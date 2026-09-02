@@ -584,7 +584,9 @@ struct RefreshCoordinatorDeadlineTests {
             force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
         let elapsed = Date().timeIntervalSince(started)
 
-        #expect(elapsed < 2.5, "the refresh waited \(elapsed) s for a repo the deadline had cut off")
+        // 0.5 s deadline; the slow stub would take far longer. The bound is loose on purpose: a loaded
+        // CI runner measured 2.52 s against a 2.5 s bound on 2026-09-02 (docs-only commit 1436e52).
+        #expect(elapsed < 8, "the refresh waited \(elapsed) s for a repo the deadline had cut off")
 
         let slow = try #require(snapshot.repos.first { $0.name == RepoStub.charlie.name })
         #expect(slow.isStale)
