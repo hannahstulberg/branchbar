@@ -19,6 +19,30 @@ public struct ProcessCommandRunner: CommandRunner {
     /// A non-zero exit is returned, not thrown: `git config --get remote.origin.url` exits 1
     /// with empty stdout when the key is unset, and `GitClient` reads that as "no remote".
     public func run(_ command: Command) async throws -> CommandOutput {
+        let partial = await runCollectingPartialOutput(command)
+        if let failure = partial.failure { throw failure }
+        return CommandOutput(
+            exitCode: partial.exitCode ?? -1,
+            standardOutput: partial.standardOutput,
+            standardError: partial.standardError)
+    }
+
+    /// `run`, except that the bytes the child managed to print survive the failure that ended it
+    /// (packet F11).
+    ///
+    /// `run` throws on a timeout and on cancellation, and a thrown error carries no output, so a
+    /// child that was killed mid-sentence is indistinguishable from one that never spoke. That is
+    /// the whole of F10's finding: `branchbar-cli scan` had found every repo on the machine, had
+    /// been killed inside a blocked listing, and the app got an empty result because the killing
+    /// path had nowhere to put what had already been read. The readers hit EOF the moment the
+    /// child dies, so the bytes are there; this is the accessor that does not throw them away.
+    ///
+    /// Deliberately not a `CommandError` change: every other caller wants "a failure is not an
+    /// answer" (a truncated `for-each-ref` read as a short branch list is a lie), and this is the
+    /// one caller whose output is a *stream* of independently meaningful records. The two paths
+    /// where the partial buffer is dropped on purpose — a blown output cap and a failed pipe read
+    /// — still drop it here.
+    public func runCollectingPartialOutput(_ command: Command) async -> PartialCommandOutput {
         // Checked up front so a missing `gh` is one clear error rather than a POSIX errno the
         // tool notice would have to interpret. `CommandError` has no `executableNotFound` case;
         // the frozen seam spells this `launchFailed`.
@@ -27,15 +51,14 @@ public struct ProcessCommandRunner: CommandRunner {
         guard exists, !isDirectory.boolValue,
               FileManager.default.isExecutableFile(atPath: command.executable)
         else {
-            throw CommandError.launchFailed(
+            return PartialCommandOutput(failure: CommandError.launchFailed(
                 executable: command.executable,
-                message: "no executable file at \(command.executable)"
-            )
+                message: "no executable file at \(command.executable)"))
         }
 
         let running = RunningCommand(command: command)
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
                 running.start(continuation)
             }
         } onCancel: {
@@ -43,6 +66,8 @@ public struct ProcessCommandRunner: CommandRunner {
         }
     }
 }
+
+extension ProcessCommandRunner: PartialOutputCommandRunning {}
 
 /// The bounded pipe drain, lifted out of `RunningCommand` so the error path is testable without
 /// a child process.
@@ -95,7 +120,7 @@ private final class RunningCommand: @unchecked Sendable {
     private var process: Process?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
-    private var continuation: CheckedContinuation<CommandOutput, any Error>?
+    private var continuation: CheckedContinuation<PartialCommandOutput, Never>?
     private var standardOutput = Data()
     private var standardError = Data()
     private var didFinish = false
@@ -114,12 +139,12 @@ private final class RunningCommand: @unchecked Sendable {
         self.command = command
     }
 
-    func start(_ continuation: CheckedContinuation<CommandOutput, any Error>) {
+    func start(_ continuation: CheckedContinuation<PartialCommandOutput, Never>) {
         lock.lock()
         // The task can already have been cancelled before the child was ever launched.
         if didCancel {
             lock.unlock()
-            continuation.resume(throwing: CommandError.cancelled)
+            continuation.resume(returning: PartialCommandOutput(failure: .cancelled))
             return
         }
         self.continuation = continuation
@@ -157,12 +182,10 @@ private final class RunningCommand: @unchecked Sendable {
             self.process = nil
             self.continuation = nil
             lock.unlock()
-            continuation.resume(
-                throwing: CommandError.launchFailed(
+            continuation.resume(returning: PartialCommandOutput(
+                failure: .launchFailed(
                     executable: command.executable,
-                    message: String(describing: error)
-                )
-            )
+                    message: String(describing: error))))
             return
         }
 
@@ -319,26 +342,32 @@ private final class RunningCommand: @unchecked Sendable {
         let timedOut = didTimeOut
         let overflowed = overflowedStream
         let readError = readFailure
-        let output = CommandOutput(
-            exitCode: exitCode,
-            standardOutput: standardOutput,
-            standardError: standardError
-        )
+        let bufferedOutput = standardOutput
+        let bufferedError = standardError
         lock.unlock()
 
         guard let continuation else { return }
+
+        let failure: CommandError?
         if cancelled {
-            continuation.resume(throwing: CommandError.cancelled)
+            failure = .cancelled
         } else if timedOut {
-            continuation.resume(throwing: CommandError.timedOut(after: command.timeout))
+            failure = .timedOut(after: command.timeout)
         } else if let overflowed {
-            continuation.resume(throwing: CommandError.outputTooLarge(
-                stream: overflowed, limit: ProcessCommandRunner.maximumOutputBytes))
+            failure = .outputTooLarge(
+                stream: overflowed, limit: ProcessCommandRunner.maximumOutputBytes)
         } else if let readError {
-            continuation.resume(throwing: CommandError.readFailed(
-                stream: readError.stream, message: readError.message))
+            failure = .readFailed(stream: readError.stream, message: readError.message)
         } else {
-            continuation.resume(returning: output)
+            failure = nil
         }
+
+        continuation.resume(returning: PartialCommandOutput(
+            standardOutput: bufferedOutput,
+            standardError: bufferedError,
+            // A failure is not an exit status: the child was killed, so whatever number the
+            // kernel left behind describes the signal and not the command.
+            exitCode: failure == nil ? exitCode : nil,
+            failure: failure))
     }
 }

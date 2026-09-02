@@ -5,10 +5,13 @@ import Foundation
 // discovery helper.
 //
 // Two subcommands. `snapshot` prints every repo, branch, worktree, PR and push as a table or as
-// JSON. `scan` walks for repos and prints one `ScanResult` as JSON; that is the subcommand the
-// app spawns through `HelperProcessScanRunner`, and the reason it exists is that a walk blocked
-// inside `open()`/`readdir()` cannot be cancelled but a process can be killed (codex round 2,
-// BLOCKER 1). `scripts/bundle.sh` copies this binary into `Contents/MacOS` beside the app's own.
+// JSON. `scan` walks for repos and streams NDJSON as it goes; that is the subcommand the app
+// spawns through `HelperProcessScanRunner`, and the reason it exists is that a walk blocked inside
+// `open()`/`readdir()` cannot be cancelled but a process can be killed (codex round 2, BLOCKER 1).
+// It streams rather than printing one document at the end because being killed is the *expected*
+// ending: F10 found the helper parked in a TCC-gated listing on three consecutive launches, and
+// every repo it had already found — all of them, since the gated folders go last — died with the
+// process. `scripts/bundle.sh` copies this binary into `Contents/MacOS` beside the app's own.
 //
 // It is the same Core the menu bar app runs, with the real `ProcessCommandRunner`,
 // `RealFileSystem`, and `FileCacheStore` behind it, so a table printed here and a popover drawn
@@ -44,7 +47,7 @@ struct Options {
 
 let usage = """
 usage: branchbar-cli snapshot [--json] [--git PATH] [--root PATH]… [--cache-dir PATH]
-       branchbar-cli scan --policy-json PATH --json [--deadline SECONDS] [--git PATH]
+       branchbar-cli scan --policy-json PATH [--deadline SECONDS] [--git PATH]
 
 snapshot
   --json           print the Snapshot as JSON instead of a table
@@ -54,8 +57,13 @@ snapshot
                    so a CLI run never touches the app's cache
 
 scan
+  Prints NDJSON as it walks, one line per event, flushed as it goes: {"repo": …} the
+  moment a repo is deduped, {"unreadable": path}, {"entering": path} before a folder
+  macOS gates behind a consent dialog, {"skipped": {counters}} periodically, and a
+  final {"result": ScanResult} when the walk finishes. A caller that kills this
+  process keeps every line that had already arrived.
+
   --policy-json PATH  file holding the JSON-encoded ScanPolicy to walk under
-  --json              print the ScanResult as JSON (the only supported form)
   --deadline SECONDS  bound the walk and print what it found; the caller kills this
                       process at its own, later, hard deadline
   --git PATH          git to dedupe with; overrides BRANCHBAR_GIT
@@ -203,8 +211,22 @@ if options.command == .scan {
         fail("could not read a ScanPolicy from \(policyPath)")
     }
 
+    // One line of NDJSON per event, written with a single `write(2)` and never buffered, because
+    // the reader on the other end may only ever see what was flushed before this process is killed
+    // (packet F11). `makeEncoder` is not pretty-printing, so each value is one line; a directory
+    // name carrying a newline is JSON-escaped and stays on its line.
+    let streamEncoder = HelperProcessScanRunner.makeEncoder()
+    @Sendable func emit(_ line: ScanStreamLine) {
+        guard var data = try? streamEncoder.encode(line) else { return }
+        data.append(UInt8(ascii: "\n"))
+        FileHandle.standardOutput.write(data)
+    }
+
     let helperScanner = RepoScanner(
-        fileSystem: fileSystem, commandRunner: runner, gitExecutable: gitPath)
+        fileSystem: fileSystem,
+        commandRunner: runner,
+        gitExecutable: gitPath,
+        onProgress: { emit(ScanStreamLine($0)) })
     let softDeadline = options.deadline ?? RefreshPolicy.default.scanDeadline
 
     let scanned = await withTaskGroup(of: ScanResult?.self, returning: ScanResult.self) { group in
@@ -224,11 +246,10 @@ if options.command == .scan {
         return found ?? HelperProcessScanRunner.truncatedResult(for: requested)
     }
 
-    guard let encoded = try? HelperProcessScanRunner.makeEncoder().encode(scanned) else {
-        fail("could not encode the scan result as JSON")
-    }
-    FileHandle.standardOutput.write(encoded)
-    FileHandle.standardOutput.write(Data("\n".utf8))
+    // The last line, and the one that says the walk finished. Without it the caller assembles the
+    // repos it received and marks the result truncated, which is exactly right: a helper that was
+    // killed never wrote this.
+    emit(ScanStreamLine(result: scanned))
     exit(0)
 }
 

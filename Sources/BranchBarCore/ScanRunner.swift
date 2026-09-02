@@ -37,15 +37,95 @@ public struct InProcessScanRunner: ScanRunning {
     }
 }
 
+/// What a child printed, plus why it stopped, with neither one hiding the other (packet F11).
+///
+/// `CommandRunner.run` throws on a timeout, and a thrown error carries no bytes, so a helper that
+/// was killed mid-walk read as a helper that had said nothing. For every other command in this app
+/// that is the right answer — a truncated `for-each-ref` that happens to end on a record boundary
+/// is a shorter branch list, which is a lie — but the scan helper's output is a stream of
+/// independently meaningful lines, and each one that arrived is true whatever happened next.
+public struct PartialCommandOutput: Sendable {
+    public var standardOutput: Data
+    public var standardError: Data
+    /// nil when the command was killed rather than finished: the status then describes a signal.
+    public var exitCode: Int32?
+    /// nil when the command ran to completion.
+    public var failure: CommandError?
+
+    public var standardOutputText: String { String(decoding: standardOutput, as: UTF8.self) }
+    public var standardErrorText: String { String(decoding: standardError, as: UTF8.self) }
+
+    public init(
+        standardOutput: Data = Data(),
+        standardError: Data = Data(),
+        exitCode: Int32? = nil,
+        failure: CommandError? = nil
+    ) {
+        self.standardOutput = standardOutput
+        self.standardError = standardError
+        self.exitCode = exitCode
+        self.failure = failure
+    }
+}
+
+/// A `CommandRunner` that owns a real process, and can therefore hand back what that process
+/// printed before it was killed. `ProcessCommandRunner` conforms; a stub that answers from a
+/// dictionary has nothing partial to offer, which is why this is a separate protocol rather than a
+/// requirement on the frozen seam.
+public protocol PartialOutputCommandRunning: CommandRunner {
+    func runCollectingPartialOutput(_ command: Command) async -> PartialCommandOutput
+}
+
+/// One line of the helper's NDJSON stream. Exactly one field is set per line.
+///
+/// The helper writes these as it walks and flushes after each one; `HelperProcessScanRunner` reads
+/// whatever arrived. A `result` line means the walk finished and its `ScanResult` is the whole
+/// answer; without one, the `repo` and `unreadable` lines are what the walk had established when
+/// something ended it.
+public struct ScanStreamLine: Hashable, Codable, Sendable {
+    public var repo: DiscoveredRepo?
+    public var unreadable: String?
+    public var entering: String?
+    public var skipped: ScanCounters?
+    public var result: ScanResult?
+
+    public init(
+        repo: DiscoveredRepo? = nil,
+        unreadable: String? = nil,
+        entering: String? = nil,
+        skipped: ScanCounters? = nil,
+        result: ScanResult? = nil
+    ) {
+        self.repo = repo
+        self.unreadable = unreadable
+        self.entering = entering
+        self.skipped = skipped
+        self.result = result
+    }
+
+    /// The wire form of one `RepoScanner` progress event.
+    public init(_ event: ScanEvent) {
+        self.init()
+        switch event {
+        case .repo(let repo): self.repo = repo
+        case .unreadable(let path): self.unreadable = path
+        case .entering(let path): self.entering = path
+        case .skipped(let counters): self.skipped = counters
+        }
+    }
+}
+
 /// `RepoScanner` in a **separate process** that the deadline can kill.
 ///
 /// The helper is the `branchbar-cli` binary the app ships beside its own executable
 /// (`Contents/MacOS/branchbar-cli`, put there by `scripts/bundle.sh`). It is invoked as
 ///
-///     branchbar-cli scan --policy-json <tmpfile> --json --deadline <soft seconds>
+///     branchbar-cli scan --policy-json <tmpfile> --deadline <soft seconds>
 ///
-/// and prints one `ScanResult` as JSON on stdout. Two bounds sit on it, and they answer different
-/// questions:
+/// and streams NDJSON on stdout as it walks: a `repo` line the moment one is deduped, an
+/// `unreadable` line per folder it could not read, an `entering` line before each TCC-gated
+/// listing, `skipped` counters periodically, and a final `result` line carrying the whole
+/// `ScanResult` when the walk finishes. Two bounds sit on it, and they answer different questions:
 ///
 /// - The **soft** deadline is the helper's own copy of the in-process race. A walk that is merely
 ///   slow, or blocked on something the task system can still interrupt at a directory boundary,
@@ -53,9 +133,15 @@ public struct InProcessScanRunner: ScanRunning {
 ///   where a partial answer exists, and it is the common one.
 /// - The **hard** deadline is `Command.timeout`, which `ProcessCommandRunner` turns into SIGTERM
 ///   to the helper's process group and SIGKILL after its grace period. That is the case a task
-///   cannot reach: a listing already inside the kernel. Nothing has been printed, so the runner
-///   answers with an empty result marked `truncatedByDeadline`, which is what tells
-///   `RefreshCoordinator` the list is incomplete and the next refresh must walk again.
+///   cannot reach: a listing already inside the kernel.
+///
+/// Until packet F11 the hard case cost everything: no final line meant no answer, and the runner
+/// returned a synthetic empty `ScanResult`. F10 measured what that was worth — three launches, 21
+/// seconds each, `repos: 0`, `candidatesExamined: 0`, while the same helper run from Terminal
+/// found 25 repos in 1.2 s. The walk had found them all; the gated folders go last. Now the
+/// stream is the answer: whatever lines arrived are assembled, `truncatedByDeadline` says the list
+/// is not everything so `RefreshCoordinator` rescans next time, and the folder the helper was
+/// inside when it died is reported the way a TCC denial is.
 public struct HelperProcessScanRunner: ScanRunning {
     /// The `branchbar-cli` subcommand this runner invokes.
     public static let subcommand = "scan"
@@ -131,8 +217,11 @@ public struct HelperProcessScanRunner: ScanRunning {
 
     /// The argument array for one helper run, exposed so a test can assert the shape without
     /// spawning anything.
+    ///
+    /// No `--json` (F10's finding): `scan` never read the flag, and the subcommand's only output
+    /// shape is now the NDJSON stream, so advertising a second one was a promise nothing kept.
     public static func arguments(policyPath: String, softDeadline: TimeInterval, gitExecutable: String?) -> [String] {
-        var arguments = [subcommand, "--policy-json", policyPath, "--json"]
+        var arguments = [subcommand, "--policy-json", policyPath]
         arguments += ["--deadline", String(format: "%.3f", max(0, softDeadline))]
         if let gitExecutable { arguments += ["--git", gitExecutable] }
         return arguments
@@ -166,33 +255,121 @@ public struct HelperProcessScanRunner: ScanRunning {
             timeout: scanDeadline
         )
 
-        let output: CommandOutput
-        do {
-            output = try await runner.run(command)
-        } catch let error as CommandError {
-            switch error {
-            case .timedOut, .cancelled, .outputTooLarge, .readFailed:
-                // The hard bound fired: the helper was killed with its process group, so nothing
-                // is leaked and nothing is lost that was ever printed. An empty truncated result
-                // is the honest answer — the walk did not finish, and the next refresh rescans.
-                return Self.truncatedResult(for: policy)
-            case .launchFailed, .nonZeroExit:
-                throw error
+        // Whatever the helper printed before it stopped, and why it stopped, side by side. A
+        // runner with no real process behind it has nothing partial to offer, so it falls back to
+        // the plain call: only the shipped `ProcessCommandRunner` can return bytes from a child it
+        // killed.
+        let output: PartialCommandOutput
+        if let partialRunner = runner as? any PartialOutputCommandRunning {
+            output = await partialRunner.runCollectingPartialOutput(command)
+        } else {
+            do {
+                let finished = try await runner.run(command)
+                output = PartialCommandOutput(
+                    standardOutput: finished.standardOutput,
+                    standardError: finished.standardError,
+                    exitCode: finished.exitCode)
+            } catch let error as CommandError {
+                output = PartialCommandOutput(failure: error)
             }
         }
 
-        guard output.exitCode == 0 else {
-            throw CommandError.nonZeroExit(
-                exitCode: output.exitCode,
-                standardError: output.standardErrorText.trimmingCharacters(in: .whitespacesAndNewlines))
+        let lines = Self.streamLines(from: output.standardOutput)
+
+        // The last line of a finished walk is its whole answer: the counts, the skip lists and
+        // `truncatedByDeadline: false` are things only the walk knows.
+        if let finished = lines.compactMap(\.result).last {
+            return finished
         }
 
-        guard let result = try? Self.makeDecoder().decode(ScanResult.self, from: output.standardOutput) else {
-            // Exit 0 with output this side cannot read is a broken helper, not a finished scan;
-            // saying "truncated" keeps the coordinator rescanning rather than freezing an empty
-            // repo list into the cache for a week.
-            return Self.truncatedResult(for: policy)
+        // No final line, but lines: the helper was ended mid-walk and these are the repos it had
+        // already established. This is the case F10 lost entirely.
+        if !lines.isEmpty {
+            return Self.assemble(policy: policy, from: lines)
         }
-        return result
+
+        // Nothing readable at all. A failure the caller must see is still a failure; a kill is
+        // still an empty truncated result, which is what makes the next refresh rescan.
+        if let failure = output.failure {
+            switch failure {
+            case .timedOut, .cancelled, .outputTooLarge, .readFailed:
+                return Self.truncatedResult(for: policy)
+            case .launchFailed, .nonZeroExit:
+                throw failure
+            }
+        }
+        if let exitCode = output.exitCode, exitCode != 0 {
+            throw CommandError.nonZeroExit(
+                exitCode: exitCode,
+                standardError: output.standardErrorText.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        // Exit 0 with output this side cannot read is a broken helper, not a finished scan; saying
+        // "truncated" keeps the coordinator rescanning rather than freezing an empty repo list
+        // into the cache for a week.
+        return Self.truncatedResult(for: policy)
+    }
+
+    /// Every line of the stream this side could read. A line it could not is skipped and costs
+    /// that line only: the stream describes directory names, which belong to whatever is on disk,
+    /// and letting one of them end the scan would hand any folder on this Mac the power to empty
+    /// the repo list.
+    static func streamLines(from data: Data) -> [ScanStreamLine] {
+        let decoder = makeDecoder()
+        var lines: [ScanStreamLine] = []
+        for raw in data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true) {
+            guard let line = try? decoder.decode(ScanStreamLine.self, from: Data(raw)) else { continue }
+            // A line that decodes but sets nothing is not evidence of anything.
+            guard line.repo != nil || line.unreadable != nil || line.entering != nil
+                    || line.skipped != nil || line.result != nil
+            else { continue }
+            lines.append(line)
+        }
+        return lines
+    }
+
+    /// The `ScanResult` a walk that never finished had established.
+    ///
+    /// Always `truncatedByDeadline: true`, because the absence of a final line is exactly the
+    /// claim "this list is not everything" — `RefreshCoordinator` refuses it as a finished scan
+    /// and rescans next time, while the user still sees the repos that were found.
+    ///
+    /// The folder named by the last `entering` line joins `unreadableDirectories`, which is how
+    /// "Not scanned: Documents" reaches the user. Last, not all: the gated folders are enumerated
+    /// one after another at the very end of the walk, so an earlier one that was announced has
+    /// since been left. The one case this over-reports is a kill in the moment between the final
+    /// gated listing returning and the result line being written, where the row says a folder was
+    /// not scanned that in fact was; the cost is one recoverable row and a rescan, and the cost of
+    /// the opposite mistake is F10's silence.
+    static func assemble(policy: ScanPolicy, from lines: [ScanStreamLine], at date: Date = Date()) -> ScanResult {
+        var order: [RepoID] = []
+        var byID: [RepoID: DiscoveredRepo] = [:]
+        var unreadable: [String] = []
+        var inProgress: String?
+        var counters = ScanCounters()
+
+        for line in lines {
+            if let repo = line.repo {
+                // A candidate whose `.git` is a real directory can supersede an earlier claim on
+                // the same common directory, so the last value for an id wins.
+                if byID.updateValue(repo, forKey: repo.id) == nil { order.append(repo.id) }
+            }
+            if let path = line.unreadable, !unreadable.contains(path) { unreadable.append(path) }
+            if let path = line.entering { inProgress = path }
+            if let skipped = line.skipped { counters = skipped }
+        }
+
+        if let inProgress, !unreadable.contains(inProgress) { unreadable.append(inProgress) }
+
+        return ScanResult(
+            policy: policy,
+            scannedAt: date,
+            repos: order.compactMap { byID[$0] }.sorted { $0.path < $1.path },
+            candidatesExamined: counters.candidatesExamined,
+            unreadableDirectories: unreadable,
+            depthCutDirectories: counters.depthCutDirectories,
+            skippedHiddenDirectories: counters.skippedHiddenDirectories,
+            // The stream carries these as counts, not paths: a partial result names the repos it
+            // found and the folders the user can act on, and nothing it cannot spell out.
+            truncatedByDeadline: true)
     }
 }

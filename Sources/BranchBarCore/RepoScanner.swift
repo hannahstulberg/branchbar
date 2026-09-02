@@ -18,7 +18,65 @@ import Foundation
 /// the result. `RealFileSystem` no longer stats symlink targets for the same reason: that was
 /// the other call an unreachable mount could block, and it answered a question the walk does not
 /// ask. A hard bound on an arbitrary blocking listing needs a killable helper process, which is
-/// out of scope here.
+/// what `HelperProcessScanRunner` and `branchbar-cli scan` are.
+///
+/// **Why the walk narrates itself** (packet F11). Ordering was not enough. F10 watched the shipped
+/// helper park in `open()` inside a gated folder on three consecutive launches, get killed, and
+/// deliver nothing — every repo on the machine found and none of them published, because
+/// publishing happened only in the value the walk returned and a killed process returns nothing.
+/// `onProgress` reports each repo the moment the dedupe claims it, so the helper can put it on
+/// stdout while there is still a process to kill, and the folder it announced entering is what the
+/// caller reports as "not scanned".
+/// What a walk in progress can say about itself, before it has a `ScanResult` to hand back.
+///
+/// Packet F11. The `branchbar-cli scan` helper is killed from outside when a listing blocks in the
+/// kernel, and until F11 everything it had found died with it: the walk's only output was a
+/// `ScanResult` returned at the end, and a process that is killed never reaches its end. These
+/// events are the same walk narrating itself, so the helper can put a repo on stdout the moment it
+/// is deduped and the caller keeps whatever arrived before the kill.
+///
+/// `InProcessScanRunner` passes no callback and is unaffected: the app's in-process walk still
+/// hands back one value.
+public enum ScanEvent: Hashable, Sendable {
+    /// A repo, at the moment the dedupe claimed its common directory. A later candidate whose
+    /// `.git` is a real directory can still win the same key, which emits the repo a second time
+    /// with the corrected working-tree path; a consumer keys on `id` and keeps the last.
+    case repo(DiscoveredRepo)
+    /// A directory the walk could not read, or was cut off before reading. Same fact
+    /// `ScanResult.unreadableDirectories` carries, at the moment it is learned.
+    case unreadable(String)
+    /// About to list a folder macOS gates behind a consent dialog. Emitted **before** the call,
+    /// because a listing that never returns runs nothing after it: this line is the only record
+    /// that the walk was inside `Documents` when the process was killed.
+    case entering(String)
+    /// The running totals, emitted periodically and once at the end of each root.
+    case skipped(ScanCounters)
+}
+
+/// The counting half of a `ScanResult`, so a stream can carry the totals without repeating the
+/// paths it has already sent.
+public struct ScanCounters: Hashable, Codable, Sendable {
+    public var candidatesExamined: Int
+    public var depthCutDirectories: Int
+    public var skippedHiddenDirectories: Int
+    public var skippedWorktreeCheckouts: Int
+    public var skippedSubmodules: Int
+
+    public init(
+        candidatesExamined: Int = 0,
+        depthCutDirectories: Int = 0,
+        skippedHiddenDirectories: Int = 0,
+        skippedWorktreeCheckouts: Int = 0,
+        skippedSubmodules: Int = 0
+    ) {
+        self.candidatesExamined = candidatesExamined
+        self.depthCutDirectories = depthCutDirectories
+        self.skippedHiddenDirectories = skippedHiddenDirectories
+        self.skippedWorktreeCheckouts = skippedWorktreeCheckouts
+        self.skippedSubmodules = skippedSubmodules
+    }
+}
+
 public struct RepoScanner: Sendable {
     private let fileSystem: FileSystem
     /// Optional on purpose: the dedupe key is `git rev-parse --path-format=absolute
@@ -27,16 +85,27 @@ public struct RepoScanner: Sendable {
     /// process seam and still get one repo per common directory.
     private let commandRunner: CommandRunner?
     private let gitExecutable: String
+    /// Called as the walk learns things, on whatever task is running it, before `scan` returns
+    /// (packet F11). Defaulted nil: the in-process runner and every unit test that does not name
+    /// it get exactly the walk they had. `branchbar-cli scan` passes one and turns each event into
+    /// a line of NDJSON, which is how a killed helper still delivers the repos it found.
+    private let onProgress: (@Sendable (ScanEvent) -> Void)?
 
     public init(
         fileSystem: FileSystem,
         commandRunner: CommandRunner? = nil,
-        gitExecutable: String = "/usr/bin/git"
+        gitExecutable: String = "/usr/bin/git",
+        onProgress: (@Sendable (ScanEvent) -> Void)? = nil
     ) {
         self.fileSystem = fileSystem
         self.commandRunner = commandRunner
         self.gitExecutable = gitExecutable
+        self.onProgress = onProgress
     }
+
+    /// Directories listed between two `skipped` events. Small enough that a walk cut short has
+    /// recent totals, large enough that the helper is not writing a line per directory.
+    private static let counterReportInterval = 25
 
     /// Walks `policy.homeRoot` breadth-first to `policy.maxDepth` and every `policy.extraRoots`
     /// entry with no depth limit, in both cases skipping hidden directories and
@@ -49,29 +118,27 @@ public struct RepoScanner: Sendable {
         let scannedAt = Date()
         var accumulator = Walk()
 
-        walk(
+        accumulator = await walk(
             root: policy.homeRoot,
             maxDepth: policy.maxDepth,
             policy: policy,
             deferTCCGatedFolders: true,
             descendIntoRootRepo: true,
-            into: &accumulator)
+            into: accumulator)
         for root in policy.extraRoots where !accumulator.truncated {
-            walk(
+            accumulator = await walk(
                 root: root,
                 maxDepth: nil,
                 policy: policy,
                 deferTCCGatedFolders: false,
                 descendIntoRootRepo: false,
-                into: &accumulator)
+                into: accumulator)
         }
-
-        let repos = await resolve(accumulator.candidates)
 
         return ScanResult(
             policy: policy,
             scannedAt: scannedAt,
-            repos: repos,
+            repos: accumulator.resolvedRepos,
             candidatesExamined: accumulator.candidatesExamined,
             unreadableDirectories: accumulator.unreadableDirectories,
             depthCutDirectories: accumulator.depthCutDirectories,
@@ -144,9 +211,16 @@ public struct RepoScanner: Sendable {
         var gitIsDirectory: Bool
     }
 
-    /// Everything one or more root walks accumulated.
+    /// Everything one or more root walks accumulated, **including the dedupe** (packet F11).
+    ///
+    /// The dedupe used to run after every root had been walked, over a list of candidates the walk
+    /// had collected. That was fine for a value returned at the end and useless for a process that
+    /// is killed: a helper parked in `open()` inside `Documents` had already found every repo on
+    /// the machine and had published none of them, because publishing happened in a pass that
+    /// never started (F10). Each candidate is now identified and claimed the moment the walk meets
+    /// it, which is what makes `onProgress` able to say "here is a repo" while there is still a
+    /// walk to kill.
     private struct Walk {
-        var candidates: [Candidate] = []
         var candidatesExamined = 0
         var unreadableDirectories: [String] = []
         var depthCutDirectories = 0
@@ -156,14 +230,60 @@ public struct RepoScanner: Sendable {
         /// The walk stopped on cancellation with directories still queued.
         var truncated = false
 
+        /// Claim order of the dedupe keys, and the working tree each key kept.
+        private var order: [String] = []
+        private var winners: [String: (path: String, gitIsDirectory: Bool)] = [:]
+
+        /// The running totals a `skipped` event carries.
+        var counters: ScanCounters {
+            ScanCounters(
+                candidatesExamined: candidatesExamined,
+                depthCutDirectories: depthCutDirectories,
+                skippedHiddenDirectories: skippedHiddenDirectories,
+                skippedWorktreeCheckouts: skippedWorktreeCheckouts.count,
+                skippedSubmodules: skippedSubmodules.count)
+        }
+
+        /// Sorted by path so a rescan of an unchanged machine produces an identical `ScanResult`
+        /// and the cache does not churn.
+        var resolvedRepos: [DiscoveredRepo] {
+            order
+                .map { DiscoveredRepo(path: winners[$0]!.path, id: RepoID(commonDir: $0)) }
+                .sorted { $0.path < $1.path }
+        }
+
+        /// Records one identified candidate under its common directory and returns the repo to
+        /// announce, or nil when an already-claimed key keeps the working tree it had.
+        ///
+        /// "The `.git` directory wins", not "whichever the walk reached first": a mirror whose
+        /// `.git` file points into a real repo must never displace the repo itself. An upgrade
+        /// changes the path under a key already announced, so it is announced again and the
+        /// consumer keeps the last value for that id.
+        mutating func claim(
+            key: String, path: String, gitIsDirectory: Bool
+        ) -> DiscoveredRepo? {
+            guard let existing = winners[key] else {
+                order.append(key)
+                winners[key] = (path, gitIsDirectory)
+                return DiscoveredRepo(path: path, id: RepoID(commonDir: key))
+            }
+            guard gitIsDirectory, !existing.gitIsDirectory else { return nil }
+            winners[key] = (path, true)
+            return DiscoveredRepo(path: path, id: RepoID(commonDir: key))
+        }
+
         /// A folder the walk was cut off before it could finish is reported the same way a folder
         /// macOS refused to open is: not scanned, recoverable by granting access or rescanning.
         /// The folder named is the pending directory's own ancestor directly under the scan root,
         /// because "Not scanned: Documents" is the fact the user can act on and
         /// `Documents/notes/vendor` is not.
-        mutating func reportNotScanned(_ path: String) {
-            guard !unreadableDirectories.contains(path) else { return }
+        ///
+        /// Returns whether this was new, so the caller announces each folder once.
+        @discardableResult
+        mutating func reportNotScanned(_ path: String) -> Bool {
+            guard !unreadableDirectories.contains(path) else { return false }
             unreadableDirectories.append(path)
+            return true
         }
     }
 
@@ -182,13 +302,16 @@ public struct RepoScanner: Sendable {
         policy: ScanPolicy,
         deferTCCGatedFolders: Bool,
         descendIntoRootRepo: Bool,
-        into accumulator: inout Walk
-    ) {
+        into initial: Walk
+    ) async -> Walk {
+        var accumulator = initial
         let rootPath = Self.normalized(root)
         var queue: [(path: String, depth: Int)] = [(rootPath, 0)]
         var deferred: [(path: String, depth: Int)] = []
+        var gatedPaths: Set<String> = []
         var next = 0
         var flushedDeferred = false
+        var lastReportedAt = accumulator.candidatesExamined
 
         while true {
             if next == queue.count {
@@ -204,23 +327,34 @@ public struct RepoScanner: Sendable {
             if Task.isCancelled {
                 accumulator.truncated = true
                 for pending in queue[next...] + deferred {
-                    accumulator.reportNotScanned(Self.topLevelFolder(of: pending.path, under: rootPath))
+                    let folder = Self.topLevelFolder(of: pending.path, under: rootPath)
+                    if accumulator.reportNotScanned(folder) { onProgress?(.unreadable(folder)) }
                 }
-                return
+                onProgress?(.skipped(accumulator.counters))
+                return accumulator
             }
             next += 1
+
+            // Announced before the call, not after it: a listing macOS is holding behind an
+            // unanswered consent dialog never returns, so anything written afterwards is never
+            // written at all. This line is the whole record that the walk was inside this folder
+            // when the process was killed, and it is what the "Not scanned: Documents" row is
+            // rebuilt from (packet F11).
+            if gatedPaths.contains(path) { onProgress?(.entering(path)) }
 
             let entries: [DirectoryEntry]
             do {
                 entries = try fileSystem.contentsOfDirectory(atPath: path)
             } catch {
                 // A TCC denial is the normal case on a managed Mac: reported, never swallowed.
-                if !accumulator.unreadableDirectories.contains(path) {
-                    accumulator.unreadableDirectories.append(path)
-                }
+                if accumulator.reportNotScanned(path) { onProgress?(.unreadable(path)) }
                 continue
             }
             accumulator.candidatesExamined += 1
+            if accumulator.candidatesExamined - lastReportedAt >= Self.counterReportInterval {
+                lastReportedAt = accumulator.candidatesExamined
+                onProgress?(.skipped(accumulator.counters))
+            }
 
             // A repo found inside a walk stops the descent — `descendIntoRepos` is a constant
             // false (PLAN.md §5), and a repo inside a monorepo is reached by adding it as a root.
@@ -243,9 +377,9 @@ public struct RepoScanner: Sendable {
             // read, and the walk carries on into the directory's children.
             if let marker = entries.first(where: { $0.name == ".git" }), !marker.isSymbolicLink {
                 if marker.isDirectory {
-                    accumulator.candidates.append(
-                        Candidate(path: path, commonDirectoryHint: path + "/.git", gitIsDirectory: true)
-                    )
+                    await claim(
+                        Candidate(path: path, commonDirectoryHint: path + "/.git", gitIsDirectory: true),
+                        into: &accumulator)
                     if !isWalkRoot { continue }
                 } else {
                     // Bounded: a `.git` file holds one short `gitdir:` line, and the file is
@@ -261,9 +395,9 @@ public struct RepoScanner: Sendable {
                         accumulator.skippedSubmodules.append(path)
                         if !isWalkRoot { continue }
                     case .candidate(let gitDirectory):
-                        accumulator.candidates.append(
-                            Candidate(path: path, commonDirectoryHint: gitDirectory, gitIsDirectory: false)
-                        )
+                        await claim(
+                            Candidate(path: path, commonDirectoryHint: gitDirectory, gitIsDirectory: false),
+                            into: &accumulator)
                         if !isWalkRoot { continue }
                     case .unrecognized:
                         // Not a repo marker we can vouch for; keep walking rather than inventing a row.
@@ -290,12 +424,27 @@ public struct RepoScanner: Sendable {
                 }
                 let child = (path: Self.normalized(entry.path), depth: depth + 1)
                 if deferTCCGatedFolders, depth == 0, Self.tccGatedFolderNames.contains(entry.name) {
+                    gatedPaths.insert(child.path)
                     deferred.append(child)
                 } else {
                     queue.append(child)
                 }
             }
         }
+
+        onProgress?(.skipped(accumulator.counters))
+        return accumulator
+    }
+
+    /// Identifies one candidate and records it under its common directory, announcing the repo
+    /// through `onProgress` if the claim changed what that key holds.
+    private func claim(_ candidate: Candidate, into accumulator: inout Walk) async {
+        let resolved = await identify(candidate)
+        let repo = accumulator.claim(
+            key: Self.normalized(resolved.commonDirectory),
+            path: resolved.path,
+            gitIsDirectory: candidate.gitIsDirectory)
+        if let repo { onProgress?(.repo(repo)) }
     }
 
     /// The ancestor of `path` that sits directly under `root`, or `root` itself when `path` is
@@ -322,33 +471,6 @@ public struct RepoScanner: Sendable {
     }
 
     // MARK: - Dedupe
-
-    /// Groups candidates by `--git-common-dir` and keeps one working tree per repo: the first
-    /// whose `.git` is a real directory, falling back to the first seen. Sorted by path so a
-    /// rescan of an unchanged machine produces an identical `ScanResult`.
-    private func resolve(_ candidates: [Candidate]) async -> [DiscoveredRepo] {
-        var order: [String] = []
-        var winners: [String: (path: String, gitIsDirectory: Bool)] = [:]
-
-        for candidate in candidates {
-            let resolved = await identify(candidate)
-            let key = Self.normalized(resolved.commonDirectory)
-
-            guard let existing = winners[key] else {
-                order.append(key)
-                winners[key] = (resolved.path, candidate.gitIsDirectory)
-                continue
-            }
-            // "The `.git` directory wins", not "whichever the walk reached first".
-            if candidate.gitIsDirectory && !existing.gitIsDirectory {
-                winners[key] = (resolved.path, true)
-            }
-        }
-
-        return order
-            .map { DiscoveredRepo(path: winners[$0]!.path, id: RepoID(commonDir: $0)) }
-            .sorted { $0.path < $1.path }
-    }
 
     /// `git -C <path> rev-parse --path-format=absolute --git-common-dir --show-toplevel` when a
     /// runner is available; otherwise the common directory the filesystem already told us and the

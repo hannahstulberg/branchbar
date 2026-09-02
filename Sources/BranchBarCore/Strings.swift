@@ -49,6 +49,18 @@ public enum Strings {
         "Updating \(completed) of \(count(total, "repo"))…"
     }
 
+    /// State: `refresh-running` — the button beside the progress line. `AppModel.cancelRefresh()`
+    /// has existed since F6 and had no control to call it, so a refresh stuck behind a folder
+    /// macOS has not answered for could only be waited out. One word, because it sits beside
+    /// Refresh and Refresh PRs in a 340 pt popover.
+    /// Literal: `Cancel`
+    public static let cancelRefreshActionLabel = "Cancel"
+
+    /// State: `refresh-running` — what VoiceOver reads for that button. Spoken on its own,
+    /// "Cancel" does not say what is being cancelled, and the row it sits in is not read with it.
+    /// Literal: `Cancel the running refresh`
+    public static let cancelRefreshAccessibilityLabel = "Cancel the running refresh"
+
     // MARK: - Git not found
 
     /// State: `git-not-found` — heading when the preflight found no `git` on this Mac. Nothing

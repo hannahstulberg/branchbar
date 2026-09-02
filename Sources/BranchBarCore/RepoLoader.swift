@@ -280,7 +280,7 @@ public struct RepoLoader: Sendable {
             pr.loadState = .stale
         }
 
-        let repo = RepoAssembler.assemble(RepoAssembler.Inputs(
+        var repo = RepoAssembler.assemble(RepoAssembler.Inputs(
             id: discovered.id,
             path: path,
             remoteURL: remoteURL,
@@ -300,6 +300,11 @@ public struct RepoLoader: Sendable {
             errors: errors,
             isStale: false,
             refreshedAt: now))
+
+        // The lookup above resolved these to key the PR match; the shell needs the same answer to
+        // say which repository a row was counted against, and rebuilding it from the PRs that
+        // happened to match gets a branch tracking a fork with no PR wrong every time (F11).
+        repo.remoteOwners = remoteOwners
 
         return LoadResult(repo: repo, prCache: entry)
     }

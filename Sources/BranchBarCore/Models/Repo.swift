@@ -156,6 +156,16 @@ public struct Repo: Hashable, Codable, Sendable {
     public var path: String
     public var remoteURL: String?
     public var githubSlug: GitHubSlug?
+    /// Remote name → owner login, for every remote this repo's branches actually track: `origin`
+    /// from the slug, and one `config --get remote.<name>.url` per other name (codex round 2,
+    /// MAJOR 4). `RepoLoader` already resolved these to key the PR match; carrying them on the
+    /// repo is what lets the shell report which fork a row was counted against instead of
+    /// reconstructing the answer from the PRs that happened to match. Defaulted empty for every
+    /// caller that has nothing to say; a *cache* written before the field existed does not decode
+    /// — a synthesized `init(from:)` requires the key whatever default the property carries — so
+    /// `FileCacheStore.load` returns nil once and the next refresh rebuilds the snapshot. One cold
+    /// launch, and never a repo whose remotes are silently attributed to the wrong owner.
+    public var remoteOwners: [String: String] = [:]
     public var worktrees: [Worktree]
     public var branches: [Branch]
     /// PLAN.md §3: author-@me PRs whose (head owner login, head branch) matches no local branch.
@@ -176,6 +186,7 @@ public struct Repo: Hashable, Codable, Sendable {
         path: String,
         remoteURL: String? = nil,
         githubSlug: GitHubSlug? = nil,
+        remoteOwners: [String: String] = [:],
         worktrees: [Worktree] = [],
         branches: [Branch] = [],
         openPRsNotOnThisMac: [PRInfo] = [],
@@ -192,6 +203,7 @@ public struct Repo: Hashable, Codable, Sendable {
         self.path = path
         self.remoteURL = remoteURL
         self.githubSlug = githubSlug
+        self.remoteOwners = remoteOwners
         self.worktrees = worktrees
         self.branches = branches
         self.openPRsNotOnThisMac = openPRsNotOnThisMac
