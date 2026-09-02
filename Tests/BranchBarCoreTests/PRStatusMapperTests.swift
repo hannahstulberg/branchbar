@@ -207,7 +207,7 @@ struct PRStatusMapperOpenElsewhereTests {
         #expect(numbers.contains(101) == false, "draft-branch is checked out here")
         #expect(numbers.contains(105) == false, "signed-off is checked out here")
         #expect(numbers.contains(110) == false, "the same owner and the same branch is a local head")
-        #expect(numbers == [102, 103, 109], "everything else the author has open lives only on GitHub")
+        #expect(numbers == [102, 103, 104, 109], "everything else the author has open lives only on GitHub")
     }
 
     @Test("noLocalBranchesLeavesEveryAuthoredOpenPRInTheGroup")
