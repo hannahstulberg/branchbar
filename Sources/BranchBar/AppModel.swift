@@ -669,11 +669,7 @@ final class AppModel: ObservableObject {
             // outcome a sentence and a way out.
             Log.info("tools: git not found; searched \(gitLocation.searched.joined(separator: ", "))")
             refreshState = .failed(
-                UserFacingFailure(
-                    title: Self.gitNotFoundTitle,
-                    message: Self.gitNotFoundMessage,
-                    action: UserFacingFailure.Action(
-                        label: Strings.refreshActionLabel, kind: .retryRefresh),
+                Strings.gitNotFound(
                     diagnostic: "searched \(gitLocation.searched.joined(separator: ", "))"))
             present()
             return nil
@@ -720,15 +716,4 @@ final class AppModel: ObservableObject {
         self.environment = environment
         return environment
     }
-
-    // MARK: - Copy this file owns
-
-    /// codex MAJOR 4 / REVIEW CR-04's two sentences. Every other user-facing string in BranchBar is
-    /// produced in Core by `Strings.swift`, and these belong there too; they are here because
-    /// `Strings.swift` is outside this packet's write boundary and a second packet is editing it in
-    /// the same checkout. Moving them is a one-line change plus `make doc-strings`.
-    static let gitNotFoundTitle = "git not found"
-    static let gitNotFoundMessage =
-        "BranchBar could not find git on this Mac, so it cannot read any repo. Run "
-        + "xcode-select --install in Terminal, then try again."
 }

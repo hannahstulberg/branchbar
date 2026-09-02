@@ -232,6 +232,7 @@ enum UIStates {
         deadlineExceeded,
         staleRowsAtLaunch,
         gitTooOld,
+        gitNotFound,
         cursorNotInstalled,
         lastPushUnknown,
         originMovedSince,
@@ -624,6 +625,36 @@ enum UIStates {
             )
         ),
         refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 16b — REVIEW CR-04. `git-too-old` above is the Mac that has git and an old one; this is the
+    // Mac that has none. The preflight fails before any command runs, so the snapshot carries no
+    // repos and `ToolStatus.gitPath` is nil, and the whole state is the `UserFacingFailure` the
+    // shell publishes. `gh` is present here on purpose: the two tools are located independently,
+    // and a footer that also said "GitHub CLI not found" would bury the reason nothing works.
+    static let gitNotFound = UIState(
+        id: "git-not-found",
+        title: "No git on this Mac, so nothing can be read at all",
+        planReference: "§5a item 1: the preflight found no git (REVIEW CR-04)",
+        entries: [
+            ("gitNotFoundTitle", Strings.gitNotFoundTitle),
+            ("gitNotFoundMessage", Strings.gitNotFoundMessage),
+            // The assembled failure's third part: the two members above are its title and message,
+            // so the literal this row contributes is the action label it puts beside them.
+            ("gitNotFound", Strings.gitNotFound().action?.label ?? ""),
+        ],
+        snapshot: UIFixtures.snapshot(
+            [],
+            refreshedAt: nil,
+            tools: ToolStatus(
+                gitPath: nil,
+                gitVersion: nil,
+                ghPath: "/opt/homebrew/bin/gh",
+                ghAuthByHost: [:]
+            )
+        ),
+        refreshState: .failed(
+            Strings.gitNotFound(diagnostic: "searched /usr/bin/git, /opt/homebrew/bin/git"))
     )
 
     // 17

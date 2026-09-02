@@ -38,8 +38,10 @@ public struct EditorAvailability: Hashable, Codable, Sendable {
 ///   one line per `RepoError` on the repo. `UserFacingFailure.diagnostic` is never joined in: §5
 ///   says it is logged, never rendered.
 /// - `FooterVM.toolNotice` is the one footer notice slot, so every footer-level notice §5a names
-///   (git too old, `gh` missing, Cursor missing, stale rows, deadline exceeded) is joined into it
-///   in that order, and the first of them that carries an action supplies the notice's action.
+///   (a failed refresh, git too old, `gh` missing, Cursor missing, stale rows, deadline exceeded)
+///   is joined into it in that order, and the first of them that carries an action supplies the
+///   notice's action. A failed refresh leads because it is the only one of the six that says
+///   nothing on screen was refreshed at all.
 /// - `BranchRowVM.aheadLabel` is the tertiary line §5a gives to the branch's relationship with
 ///   last-known origin (ahead / in sync / no upstream / upstream missing). On a merged or
 ///   closed-unmerged row the group copy is appended after " · ", the separator `pushUnknown`
@@ -379,25 +381,43 @@ public struct SnapshotPresenter: Sendable {
         return FooterVM(
             updatedLabel: updatedLabel,
             version: Strings.versionLabel(appVersion),
-            toolNotice: toolNotice(snapshot: snapshot, isRefreshing: isRefreshing),
+            toolNotice: toolNotice(
+                snapshot: snapshot,
+                isRefreshing: isRefreshing,
+                failure: Self.failure(in: refreshState)
+            ),
             scanRoots: scanResult?.policy.extraRoots ?? []
         )
     }
 
     /// Everything the footer has to say about this Mac and this refresh, in one slot.
-    private func toolNotice(snapshot: Snapshot, isRefreshing: Bool) -> NoticeVM? {
+    private func toolNotice(
+        snapshot: Snapshot,
+        isRefreshing: Bool,
+        failure: UserFacingFailure?
+    ) -> NoticeVM? {
         var lines: [String] = []
         var action: UserFacingFailure.Action?
 
+        // A refresh that failed outright leads, because it is the one fact here that says the rows
+        // below it were not refreshed at all. Rows exist in this case whenever a cache was restored
+        // before the failure, which is exactly when the empty state is absent and this slot is the
+        // only place the reason can be read (REVIEW CR-04).
+        if let failure {
+            lines.append("\(failure.title)\n\(failure.message)")
+            action = failure.action
+        }
         // The notice quotes the number, not the whole banner: `2.30.1`, never
         // `git version 2.30.1 (Apple Git-130)`.
         if let git = snapshot.tools.gitVersion.flatMap(GitVersion.parse), git.isBelowMinimumSupported {
             lines.append(Strings.gitTooOldNotice(version: git.description))
         }
         if snapshot.tools.ghPath == nil {
-            let failure = Strings.unavailable(reason: .ghNotInstalled)
-            lines.append(failure.message)
-            action = failure.action
+            let ghFailure = Strings.unavailable(reason: .ghNotInstalled)
+            lines.append(ghFailure.message)
+            // First writer wins, so a failed refresh keeps its own Refresh rather than handing the
+            // user "Open cli.github.com" for a Mac that has no git.
+            if action == nil { action = ghFailure.action }
         }
         if !editors.cursor {
             lines.append(Strings.cursorNotInstalledNotice)
@@ -426,9 +446,26 @@ public struct SnapshotPresenter: Sendable {
     /// BranchBar read. With zero repos there is no first section for that notice to ride on, and
     /// zero repos is exactly what a denied Documents folder produces — so the one state that most
     /// needs "Allow access…" was the one state that never offered it (codex MAJOR 3).
+    ///
+    /// A third way in arrived with REVIEW CR-04: a refresh that failed before it could produce a
+    /// snapshot, which on this Mac means no `git` at all. "No repos found" is not the reason and
+    /// "Add folder…" is a dead end for it, so the failure's own title, message, and action replace
+    /// both. The failure is rendered from `RefreshState` here rather than in the SwiftUI layer for
+    /// the same reason every other sentence is: this is where user-facing copy is assembled.
     private func emptyState(refreshState: RefreshState, scanResult: ScanResult?) -> EmptyStateVM {
         let addFolder = UserFacingFailure.Action(label: Strings.addFolderActionLabel, kind: .addFolder)
         let notice = notScannedNotice(scanResult)
+
+        if let failure = Self.failure(in: refreshState) {
+            return EmptyStateVM(
+                title: failure.title,
+                message: failure.message,
+                // `EmptyStateVM.action` is not optional; a failure with no action of its own falls
+                // back to the one action that is always available from an empty list.
+                action: failure.action ?? addFolder,
+                notice: notice
+            )
+        }
 
         if case .running = refreshState {
             // §5a offers no action while the first scan runs; `EmptyStateVM.action` is not
@@ -462,6 +499,13 @@ public struct SnapshotPresenter: Sendable {
     }
 
     // MARK: - Small helpers
+
+    /// The failure a refresh ended in, if it ended in one. Both the empty state and the footer
+    /// notice ask the same question of `RefreshState`, so they ask it in one place.
+    private static func failure(in refreshState: RefreshState) -> UserFacingFailure? {
+        if case .failed(let failure) = refreshState { return failure }
+        return nil
+    }
 
     private func folderName(_ path: String) -> String {
         URL(fileURLWithPath: path).lastPathComponent

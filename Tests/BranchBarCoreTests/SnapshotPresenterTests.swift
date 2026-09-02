@@ -186,10 +186,11 @@ struct SnapshotPresenterTests {
         #expect(Self.fixtureDataGaps.keys.sorted() == ["repo-failed", "single-branch-no-pr-never-pushed"])
         // 32 + 2 until the codex pre-ship review, which added one state per finding that named a
         // state the contract had no row for: `zero-repos-documents-denied` (MAJOR 3),
-        // `origin-not-fetched` (MAJOR 7), and `behind-only` (MAJOR 5).
+        // `origin-not-fetched` (MAJOR 7), and `behind-only` (MAJOR 5). The fix wave added
+        // `git-not-found` (REVIEW CR-04).
         #expect(
-            stateFixtureIDs.count == 37,
-            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3; found \(stateFixtureIDs.count)")
+            stateFixtureIDs.count == 38,
+            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1; found \(stateFixtureIDs.count)")
 
         // Nothing is exempted that no fixture actually asks for.
         var contracted: Set<String> = []
@@ -589,6 +590,54 @@ struct SnapshotPresenterTests {
             now: UIClock.now
         )
         #expect(populated.emptyState == nil)
+    }
+
+    /// REVIEW CR-04: no git on the Mac used to render "Looking for repos…" forever, because the
+    /// only thing the presenter did with `RefreshState` was ask whether it was `.running`. The
+    /// failure now names itself in both slots that can carry it: the empty state when the list is
+    /// empty, and the footer's tool notice when a cached list is on screen. Neither may fall back
+    /// to "No repos found", which is not the reason, or to "Add folder…", which is a dead end.
+    @Test("failedRefreshRendersItsReasonNotNoReposFound")
+    func failedRefreshRendersItsReasonNotNoReposFound() throws {
+        let failure = Strings.gitNotFound(diagnostic: "searched /usr/bin/git")
+        let presenter = SnapshotPresenter()
+
+        let empty = presenter.present(
+            UIFixtures.snapshot([], refreshedAt: nil, tools: ToolStatus(ghPath: "/opt/homebrew/bin/gh")),
+            refreshState: .failed(failure),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: uiAppVersion,
+            now: UIClock.now
+        )
+        let state = try #require(empty.emptyState, "a failed refresh rendered no empty state")
+        #expect(state.title == Strings.gitNotFoundTitle)
+        #expect(state.message == Strings.gitNotFoundMessage)
+        #expect(state.action.label == Strings.refreshActionLabel)
+        #expect(state.action.kind == .retryRefresh)
+        #expect(state.title != Strings.emptyStateTitle)
+        #expect(state.title != Strings.firstRunTitle)
+        // The diagnostic is logged, never rendered (PLAN.md §5).
+        #expect(!empty.renders("searched /usr/bin/git"))
+
+        // With a cached list on screen there is no empty state, so the footer carries it instead.
+        let cached = presenter.present(
+            UIFixtures.snapshot(
+                [UIFixtures.repo(branches: [UIFixtures.branch("main", prStatus: .none)])],
+                tools: ToolStatus(ghPath: "/opt/homebrew/bin/gh")),
+            refreshState: .failed(failure),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: uiAppVersion,
+            now: UIClock.now
+        )
+        #expect(cached.emptyState == nil)
+        let notice = try #require(cached.footer.toolNotice, "a failed refresh rendered no footer notice")
+        #expect(notice.text.contains(Strings.gitNotFoundTitle))
+        #expect(notice.text.contains(Strings.gitNotFoundMessage))
+        #expect(notice.action?.kind == .retryRefresh)
+        // The footer is not claiming a refresh is under way, so its buttons stay live.
+        #expect(cached.footer.updatedLabel == Strings.updated(at: UIClock.ago(12), now: UIClock.now))
     }
 
     /// PLAN.md §5a item 3: repo order is computed once per refresh, before any repo finishes. The

@@ -1,0 +1,39 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "git not found",
+    "BranchBar could not find git on this Mac, so it cannot read any repo. Run xcode-select --install in Terminal, then try again.",
+    "Refresh"
+  ],
+  "id" : "git-not-found",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: the preflight found no git (REVIEW CR-04)",
+  "refreshState" : {
+    "failed" : {
+      "_0" : {
+        "action" : {
+          "kind" : "retryRefresh",
+          "label" : "Refresh"
+        },
+        "diagnostic" : "searched /usr/bin/git, /opt/homebrew/bin/git",
+        "message" : "BranchBar could not find git on this Mac, so it cannot read any repo. Run xcode-select --install in Terminal, then try again.",
+        "title" : "git not found"
+      }
+    }
+  },
+  "snapshot" : {
+    "repos" : [
+
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+
+      },
+      "ghPath" : "/opt/homebrew/bin/gh"
+    }
+  },
+  "title" : "No git on this Mac, so nothing can be read at all"
+}

@@ -30,19 +30,12 @@ struct RootView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
                     // codex MAJOR 4 / REVIEW CR-04: a refresh that failed before it could produce a
-                    // snapshot — no git on the Mac — has no repo section and no scan result to hang
-                    // a notice on, so the failure is rendered here, from the state itself. It
-                    // replaces the empty state rather than sitting above it: "No repos found" is
-                    // not the reason, and offering "Add folder…" for a missing git is a dead end.
-                    if let failure = refreshFailure {
-                        NoticeView(
-                            notice: NoticeVM(
-                                text: "\(failure.title)\n\(failure.message)",
-                                action: failure.action),
-                            perform: model.perform)
-                            .padding(.horizontal, Metrics.horizontalPadding)
-                            .padding(.vertical, 8)
-                    } else if let empty = model.vm.emptyState {
+                    // snapshot — no git on the Mac — has no repo section to hang a notice on. The
+                    // presenter renders that failure into the empty state, replacing "No repos
+                    // found", which is not the reason; when a cached list is on screen there is no
+                    // empty state and the footer's tool notice carries it instead. This view builds
+                    // no sentence of its own for it: `Strings.gitNotFound` is where the copy lives.
+                    if let empty = model.vm.emptyState {
                         EmptyStateView(state: empty, perform: model.perform)
                     }
                     ForEach(model.vm.sections, id: \.id) { section in
@@ -104,16 +97,11 @@ struct RootView: View {
         .onAppear { listHasFocus = true }
     }
 
+    /// `.failed` is not `.running`, so the footer's buttons stay live and the user can act on what
+    /// the failure says.
     private var isRefreshing: Bool {
         if case .running = model.refreshState { return true }
         return false
-    }
-
-    /// The failure a refresh ended in, if it ended in one. `.failed` is not `.running`, so the
-    /// footer's buttons are live and the user can act on what the notice says.
-    private var refreshFailure: UserFacingFailure? {
-        if case .failed(let failure) = model.refreshState { return failure }
-        return nil
     }
 
     // MARK: - Keyboard

@@ -95,12 +95,15 @@ A cancel and a deadline are deliberately different: the deadline persists what i
 
 ### §2.2 What a row may claim about a push
 
-Every branch of this tree ends in wording, because the trap this mechanism exists to avoid is presenting a commit date as an observed push.
+Every branch of this tree ends in wording, because the trap this mechanism exists to avoid is
+presenting a commit date as an observed push.
 
 ```mermaid
 graph TD
-    A{"Does the branch have an upstream?"} -->|"No"| A1["Source: none. Row reads Never pushed from this Mac, with no date and no count"]
-    A -->|"Yes"| B{"Does the reflog file for that remote branch exist?"}
+    A{"Which remote-tracking ref does this branch have?"} -->|"A configured upstream"| B
+    A -->|"None configured, but origin/name exists"| B
+    A -->|"Neither"| A1["Source: none, ahead count nil. Row reads No tracked remote branch · push history not checked"]
+    B{"Does the reflog file for that remote branch exist?"}
     B -->|"No"| F["Source: tipCommitDate"]
     B -->|"Yes"| C["Walk the lines newest first"]
     C --> D{"Is the new OID on this line all zeros?"}
@@ -110,17 +113,43 @@ graph TD
     E -->|"Yes"| G["Source: reflogObserved. Timestamp and new OID come off this line"]
     G --> H{"Does the observed OID equal the remote-tracking tip?"}
     H -->|"Yes"| I["Row reads Pushed from this Mac 2 days ago"]
-    H -->|"No"| J["originMovedSince. Row adds origin has moved since"]
-    F --> K{"Is there a remote-tracking tip with a date?"}
-    K -->|"Yes"| L["Row reads Last push unknown, newest commit dated 2 days ago"]
+    H -->|"No"| J["originMovedSince. Row adds (origin has moved since)"]
+    F --> K{"Does the remote-tracking tip carry a commit date?"}
+    K -->|"Yes"| L["Row reads Last push unknown · newest commit dated 2 days ago"]
     K -->|"No"| A1
-    A1 --> M["Upstream gone: the ahead count is nil, an observation still stands, and the row adds Upstream missing from last-known origin"]
+    A1 --> M["Ahead count: nil with no configured upstream, nil when the upstream is gone and the row adds Upstream missing from last-known origin, otherwise the count from upstream:track"]
     J --> M
     I --> M
     L --> M
+    M --> N{"Is there a FETCH_HEAD in this repo?"}
+    N -->|"Yes"| N1["Tooltip: Counted against last-known origin, last seen 3 hours ago"]
+    N -->|"No"| N2["Tooltip: Counted against last-known origin, origin not fetched by this clone yet"]
 ```
 
-Three facts the wording keeps apart: this clone observed a push, this clone knows only a commit date, and nothing about the branch is known at all. Lines expire after 90 days, and a push from another machine is invisible to this file by design. `GitClient.reflogShow` carries PLAN.md §5's secondary `git reflog show` fallback and is pinned by a live-repo test; `RepoLoader` does not call it, so the shipping path is the file read and then the tip commit date.
+Three facts the wording keeps apart: this clone observed a push, this clone knows only a commit
+date, and nothing about the branch is known at all. Lines expire after 90 days, and a push from
+another machine is invisible to this file by design.
+
+**A branch with no upstream is not a branch that never went out.** `git push origin feature`
+without `-u` creates `refs/remotes/origin/feature` and writes `update by push` into its reflog
+file while configuring no tracking at all, so the old "Never pushed" was the opposite of what the
+file on disk recorded (REVIEW WR-01, codex MAJOR 6). `RepoLoader` therefore reads the reflog for
+`origin/<name>` whenever that ref exists, with or without tracking configuration, and
+`PushInfoDeriver` keeps the observation while holding the ahead count at nil: there is a push to
+report and nothing to be ahead of. Only a branch with neither a configured upstream nor a
+same-named remote ref gets the no-history wording, and that wording says what BranchBar did
+("push history not checked"), not what the branch did.
+
+**The two remote dates are different facts and never share a field** (codex MAJOR 7). The remote
+tip's committer date is when someone wrote that commit; `FETCH_HEAD`'s modification date is when
+this clone last heard from origin. The "last seen" tooltip reads only the second, because fetching
+a two-year-old commit today is news from today, not from two years ago. A clone that has only ever
+been pushed from has no `FETCH_HEAD`, which is why the tooltip has a branch that says so rather
+than omitting the clause.
+
+`GitClient.reflogShow` carries PLAN.md §5's secondary `git reflog show` fallback and is pinned by a
+live-repo test; `RepoLoader` does not call it, so the shipping path is the file read and then the
+tip commit date.
 
 ### §2.3 How a folder becomes a repo row
 
@@ -131,22 +160,46 @@ graph TD
     B -->|"No"| C{"Can the directory be listed?"}
     C -->|"No: TCC denial or permissions"| C1["Record the path in unreadableDirectories, which the row Not scanned reads"]
     C -->|"Yes"| D{"Does it hold a .git entry?"}
-    D -->|".git is a directory"| D1["Candidate. Common directory hint is path plus /.git, and the walk does not descend"]
-    D -->|".git is a file"| E{"What does the gitdir line point at?"}
+    D -->|".git is a directory"| D1["Candidate. Common directory hint is path plus /.git"]
+    D -->|".git is a file"| E{"What does the first 4 KB of gitdir line point at?"}
     D -->|"No .git entry"| G["Enqueue every child directory"]
     E -->|"Inside .git/worktrees/"| E1["Worktree checkout: counted in skippedWorktreeCheckouts, never its own row"]
     E -->|"Inside .git/modules/"| E2["Submodule: counted in skippedSubmodules"]
     E -->|"Anywhere else"| D1
     E -->|"No gitdir line"| G
+    D1 --> R{"Is this the home root itself?"}
+    R -->|"Yes"| G
+    R -->|"No, or it is an Add folder root"| S["Stop here: the walk does not descend into a repo it found"]
     G --> H{"Skip this child?"}
-    H -->|"Symlink"| H1["Skipped: following one turns the home scan unbounded"]
+    H -->|"Symlink"| H1["Skipped: following one turns the home scan unbounded, and it is never stat'd"]
     H -->|"Hidden name"| H2["Counted in skippedHiddenDirectories"]
     H -->|"On the literal skip list, such as Library or node_modules"| H3["Skipped by name, or by path suffix for go/pkg"]
     H -->|"Past depth 6, home root only"| H4["Counted in depthCutDirectories. Add folder roots have no depth limit"]
-    H -->|"Desktop, Documents, or Downloads directly under the home root"| H5["Deferred to the very end, so a pending access dialog blocks nothing else"]
+    H -->|"Desktop, Documents, or Downloads directly under the home root"| H5["Held back and enqueued after every other folder, so a pending access dialog blocks nothing else"]
     H -->|"None of these"| B
-    D1 --> I["Dedupe by git rev-parse --git-common-dir, keeping the working tree whose .git is a real directory, sorted by path"]
+    S --> I["Dedupe by git rev-parse --git-common-dir, keeping the working tree whose .git is a real directory, sorted by path"]
 ```
+
+**A home folder that is itself a repo does not end the walk.** `git init` in `$HOME` with a `*`
+gitignore is the dotfiles pattern, and the `.git` check runs before a directory's children are
+enqueued, so `~/.git` made `~` the one and only candidate: every real repo under home invisible,
+the empty state suppressed because one repo was listed, and nothing on screen saying why (REVIEW
+WR-08). The home root is now listed as a repo **and** walked. An "Add folder…" root that is a repo
+keeps the plain rule: the user pointed at that folder, so they get that repo, and a nested one is
+another "Add folder…" away.
+
+**Every read the walk makes is bounded, and none of them stats a symlink.** A `.git` file is
+repository-controlled, so it is classified from a bounded prefix rather than read whole (codex
+MAJOR 15). `RealFileSystem` lists once with `.isDirectoryKey` and `.isSymbolicLinkKey` resource
+values: no `attributesOfItem` per entry, which blocks behind a folder-access dialog, and no `stat`
+of a symlink's target, which used to follow a link out of the tree the walk was told to stay in.
+
+**Two bounds sit on top of the walk, and they answer different questions.** `Task.isCancelled` is
+checked before each listing, which is the only place cancellation can land: a listing already
+inside `open()` behind an unanswered consent dialog cannot be interrupted by anything. The gated
+folders going last is what keeps that unanswerable case from blocking everything else. Above both,
+`RefreshCoordinator.scanWithinDeadline` races the whole walk against the 20 s scan deadline and
+takes the partial result, marking it `truncatedByDeadline` so the next refresh rescans.
 
 ### §2.4 How a branch gets its PR pill
 
@@ -158,16 +211,17 @@ graph TD
     B -->|"No"| C["gh auth status per host, memoized for the refresh"]
     C -->|"Non-zero exit"| C1["Unavailable: ghNotAuthenticated for every repo on that host"]
     C -->|"Exit 0"| D["gh pr list --state all --limit 100"]
-    D -->|"Rate limit stderr"| D1["Unavailable: rateLimited, not commandFailed"]
-    D -->|"Any other failure"| D2["Unavailable: commandFailed. The per-head and author calls are skipped"]
+    D -->|"GitHub's own rate-limit wording"| D1["Unavailable: rateLimited. Waiting really does fix it"]
+    D -->|"Any other failure, 403 included"| D2["Unavailable: commandFailed, worded neutrally. The per-head and author calls are skipped"]
     D -->|"Rows"| E["Record every returned headRefName in queriedHeads"]
     E --> F{"Does a local branch still have no PR?"}
     F -->|"Yes"| G["gh pr list --head, most recently active first, capped at 20 per repo"]
     F -->|"No"| H
-    G --> H["Match by headRefName first, so a fork PR is never filtered out"]
-    H --> I{"Do several PRs share that head?"}
-    I -->|"Yes"| I1["Prefer the upstream owner login, then an OPEN state, then the latest updatedAt"]
-    I -->|"No"| J["Map the state: MERGED, CLOSED, draft, APPROVED, CHANGES_REQUESTED, else open"]
+    G --> H["Match by headRefName, so a fork PR opened from this branch is never filtered out"]
+    H --> I{"Does this branch's own owner claim that head?"}
+    I -->|"No"| K
+    I -->|"Yes, and several qualify"| I1["Break the tie: an OPEN state first, then the latest updatedAt"]
+    I -->|"Yes, exactly one"| J["Map the state: MERGED, CLOSED, draft, APPROVED, CHANGES_REQUESTED, else open"]
     I1 --> J
     B1 --> K{"Was this head queried?"}
     J --> K
@@ -177,6 +231,10 @@ graph TD
 ```
 
 `queriedHeads` is the field that keeps `none` and `notChecked` apart across a relaunch: a `Repo` alone cannot say which heads were asked about.
+
+**Owner is a constraint, not a tie-break** (codex MAJOR 9). Matching on `headRefName` alone was right for a fork PR opened from a branch that really is yours, and wrong for the commoner case where exactly one candidate came back: somebody else's fork carrying a branch of the same popular name (`main`, `fix-typo`) attached itself to your local branch, and the row reported a stranger's review state as yours. A branch may claim a PR head only from the owner it can prove: the upstream's owner login when it tracks a remote this app resolved a slug for, and otherwise the repo's own slug owner, which is the only owner an untracked branch could plausibly have. A single candidate from any other owner is no longer a match, and the branch renders `No PR` rather than someone else's pull request. State and `updatedAt` order only the candidates that already passed the owner test.
+
+**The failure copy no longer asserts a cause the data cannot support** (REVIEW WR-02). `.rateLimited` now requires GitHub's own rate-limit wording, because an enterprise returns HTTP 403 for SAML enforcement, a missing token scope, and IP allow-list denials, none of which waiting fixes. A repo `gh` cannot resolve is `.commandFailed` with neutral copy rather than a promise that refreshing brings it back.
 
 ### §2.5 Packet DAG
 
@@ -225,42 +283,45 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 |---|---|---|---|
 | **Core: the refresh** | | | |
 | One refresh end to end: coalescing, cap 4, 45 s deadline, progressive emit, atomic persist | `RefreshCoordinator` | `Sources/BranchBarCore/RefreshCoordinator.swift:8` | An actor, so a second popover open coalesces instead of starting a parallel walk |
-| Discovery run inside a bound so a pending folder-access dialog cannot hang a refresh | `scanWithinDeadline` | `Sources/BranchBarCore/RefreshCoordinator.swift:336` | Takes the scanner's partial result when the 20 s bound wins, and rescans next time |
-| Repo order computed once per refresh and never recomputed mid-flight | `stableOrder` | `Sources/BranchBarCore/RefreshCoordinator.swift:423` | Previous snapshot's activity first, then new repos alphabetically |
+| Discovery run inside a bound so a pending folder-access dialog cannot hang a refresh | `scanWithinDeadline` | `Sources/BranchBarCore/RefreshCoordinator.swift:351` | Takes the scanner's partial result when the 20 s bound wins, and rescans next time |
+| Repo order computed once per refresh and never recomputed mid-flight | `stableOrder` | `Sources/BranchBarCore/RefreshCoordinator.swift:438` | Previous snapshot's activity first, then new repos alphabetically |
 | One repo end to end: seven stages, each failure isolated into a `RepoError` | `RepoLoader` | `Sources/BranchBarCore/RepoLoader.swift:8` | Never throws, so one broken repo leaves the others populated |
 | Pure join of git and GitHub facts into a `Repo`, and the three groups | `RepoAssembler` | `Sources/BranchBarCore/RepoAssembler.swift:9` | Grouping is decided here and only rendered by the presenter |
 | **Core: git** | | | |
 | Every frozen git invocation, with the frozen environment and per-command timeouts | `GitClient` | `Sources/BranchBarCore/GitClient.swift:6` | `LC_ALL=C` and `GIT_OPTIONAL_LOCKS=0` live in `frozenEnvironment` |
 | Branch and remote-ref rows split on U+001F | `ForEachRefParser` | `Sources/BranchBarCore/ForEachRefParser.swift:65` | "No upstream" is decided from `upstream:short`, never from the track field |
-| Worktree records, including the ones with no branch | `WorktreeListParser` | `Sources/BranchBarCore/WorktreeListParser.swift:9` | Primary, linked, detached, locked, prunable, bare |
+| Worktree records, including the ones with no branch | `WorktreeListParser` | `Sources/BranchBarCore/WorktreeListParser.swift:11` | Primary, linked, detached, locked, prunable, bare |
 | The reflog file read, the deletion boundary, and the usable-line predicate | `ReflogFileReader` | `Sources/BranchBarCore/ReflogFileReader.swift:8` | Walks newest first and stops at the first all-zero new OID |
-| One reflog line, with fields counted from the end of the header | `Entry` | `Sources/BranchBarCore/ReflogFileReader.swift:53` | Author names carry spaces, so field 5 cannot be counted from the front |
+| One reflog line, with fields counted from the end of the header | `Entry` | `Sources/BranchBarCore/ReflogFileReader.swift:73` | Author names carry spaces, so field 5 cannot be counted from the front |
 | The `git reflog show` fallback parser, kept for the secondary path | `ReflogParser` | `Sources/BranchBarCore/ReflogParser.swift:25` | `RepoLoader` does not call it today; a live-repo test pins the invocation |
 | Push facts, and the rule that a commit date is never presented as a push | `PushInfoDeriver` | `Sources/BranchBarCore/PushInfoDeriver.swift:8` | No upstream yields a nil ahead count, never zero |
 | The git version gate behind the "works best with 2.39" notice | `GitVersion` | `Sources/BranchBarCore/GitVersion.swift:11` | Parsed from `git --version`, Apple's build suffix included |
 | **Core: GitHub** | | | |
 | Every `gh` invocation, per-host auth memoized, per-head cap, list caches | `GHClient` | `Sources/BranchBarCore/GHClient.swift:8` | An actor: the auth answer and the list caches are shared across repos on a host |
-| The `--json` field list shared by all three `gh pr list` invocations | `jsonFields` | `Sources/BranchBarCore/GHClient.swift:42` | Changing it means re-recording the fixtures |
+| The `--json` field list shared by all three `gh pr list` invocations | `jsonFields` | `Sources/BranchBarCore/GHClient.swift:54` | Changing it means re-recording the fixtures |
 | PR JSON decode, including `headRepositoryOwner` as an object | `PRListDecoder` | `Sources/BranchBarCore/PRListDecoder.swift:8` | Sorted by `updatedAt` descending whatever order `gh` returned |
-| PR to pill, branch to PR, and the "not on this Mac" key | `PRStatusMapper` | `Sources/BranchBarCore/PRStatusMapper.swift:9` | Head first, owner only as a tie-break, keyed by owner and branch |
+| PR to pill, branch to PR, and the "not on this Mac" key | `PRStatusMapper` | `Sources/BranchBarCore/PRStatusMapper.swift:14` | Head first, owner required not preferred, keyed by owner and branch |
+| The `.command` file the sign-in action hands Terminal, as fixed text | `SignInScript` | `Sources/BranchBarCore/SignInScript.swift:25` | In Core so a test can render it and run it under a real zsh |
+| The one variable part of that script, single-quoted: the resolved `gh` path | `render` | `Sources/BranchBarCore/SignInScript.swift:43` | The hostname is data in a sibling file, never script text |
 | **Core: discovery** | | | |
-| The home walk to depth 6 and the unlimited walk of added roots | `RepoScanner` | `Sources/BranchBarCore/RepoScanner.swift:7` | Breadth-first, no symlinks, never descends into a repo it found |
-| The three folders macOS gates, enumerated after everything else | `tccGatedFolderNames` | `Sources/BranchBarCore/RepoScanner.swift:70` | Desktop, Documents, and Downloads as children of the home root only |
-| `.git` file classification into worktree checkout, submodule, or candidate | `classifyGitFile` | `Sources/BranchBarCore/RepoScanner.swift:76` | A checkout's common directory is everything before `/worktrees/` |
+| The home walk to depth 6 and the unlimited walk of added roots | `RepoScanner` | `Sources/BranchBarCore/RepoScanner.swift:22` | Breadth-first, no symlinks, never descends into a repo it found |
+| The three folders macOS gates, enumerated after everything else | `tccGatedFolderNames` | `Sources/BranchBarCore/RepoScanner.swift:92` | Desktop, Documents, and Downloads as children of the home root only |
+| `.git` file classification into worktree checkout, submodule, or candidate | `classifyGitFile` | `Sources/BranchBarCore/RepoScanner.swift:98` | A checkout's common directory is everything before `/worktrees/` |
 | Tool discovery for a GUI process whose PATH has no Homebrew | `ToolLocator` | `Sources/BranchBarCore/ToolLocator.swift:54` | Env override, then four install locations, then PATH, then Apple git |
 | **Core: presentation** | | | |
-| `Snapshot` to view models, the only place a user-facing sentence is built | `SnapshotPresenter` | `Sources/BranchBarCore/SnapshotPresenter.swift:47` | Six frozen arguments; `EditorAvailability` is an initializer property |
+| `Snapshot` to view models, the only place a user-facing sentence is built | `SnapshotPresenter` | `Sources/BranchBarCore/SnapshotPresenter.swift:49` | Six frozen arguments; `EditorAvailability` is an initializer property |
 | Every user-facing literal, one static member per string | `Strings` | `Sources/BranchBarCore/Strings.swift:27` | `make doc-strings` regenerates the UI-CONTRACT table from its doc comments |
 | **Core: seams** | | | |
-| The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:70` | Argument arrays only, never a shell string |
+| The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:82` | Argument arrays only, never a shell string |
 | The real process implementation: concurrent draining, timeout, cancellation | `ProcessCommandRunner` | `Sources/BranchBarCore/ProcessCommandRunner.swift:5` | Both pipes drain on dedicated threads, then SIGTERM and SIGKILL |
 | The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:25` | Synchronous by contract; the scan's bound lives one level up |
 | The real filesystem, listing once with resource values | `RealFileSystem` | `Sources/BranchBarCore/RealFileSystem.swift:8` | No per-entry `attributesOfItem`: that call blocks behind folder-access dialogs |
 | The cache seam | `CacheStore` | `Sources/BranchBarCore/Seams/CacheStore.swift:6` | Two methods, both replaced in tests |
 | The cache file on disk, written through a temp file | `FileCacheStore` | `Sources/BranchBarCore/FileCacheStore.swift:7` | `replaceItemAt`, so an interrupted save leaves the previous file intact |
 | **Core: data model** | | | |
-| One repo, its branches, worktrees, PR availability, and errors | `Repo` | `Sources/BranchBarCore/Models/Repo.swift:102` | Identified by `RepoID`, the git common directory |
+| One repo, its branches, worktrees, PR availability, and errors | `Repo` | `Sources/BranchBarCore/Models/Repo.swift:138` | Identified by `RepoID`, the git common directory |
 | The remote address parsed into host, owner, and name for any GitHub host | `GitHubSlug` | `Sources/BranchBarCore/Models/Repo.swift:23` | Enterprise hosts resolve and preflight per host |
+| The hostname grammar every remote must pass before it becomes a slug | `isValidHostname` | `Sources/BranchBarCore/Models/Repo.swift:47` | RFC 1123 labels; the same pattern is re-applied in zsh by `SignInScript` (codex BLOCKER 1) |
 | One branch and the group it renders in | `Branch` | `Sources/BranchBarCore/Models/Branch.swift:4` | `group` is the assembler-to-presenter boundary |
 | The ten PR pill states, `notChecked` among them | `PRStatus` | `Sources/BranchBarCore/Models/PRStatus.swift:7` | `none` only after that head was actually queried |
 | What a row may say about a push | `PushInfo` | `Sources/BranchBarCore/Models/PushInfo.swift:9` | `source` decides the wording, not the presenter |
@@ -274,11 +335,12 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | The failure a user reads, with one action | `UserFacingFailure` | `Sources/BranchBarCore/Models/Failure.swift:6` | `diagnostic` is logged and never rendered |
 | The row view models the SwiftUI layer is allowed to see | `SnapshotVM` | `Sources/BranchBarCore/Models/ViewModels.swift:7` | Views hold no copy and compute no sentence |
 | **Shell** | | | |
-| The menu bar entry point | `BranchBarApp` | `Sources/BranchBar/BranchBarApp.swift:192` | `MenuBarExtra` in `.window` style, which re-runs `onAppear` per open |
+| The menu bar entry point | `BranchBarApp` | `Sources/BranchBar/BranchBarApp.swift:203` | `MenuBarExtra` in `.window` style, which re-runs `onAppear` per open |
 | Accessory activation, logging, and the state-fixture harness | `AppDelegate` | `Sources/BranchBar/BranchBarApp.swift:11` | `LSUIElement`, so there is no Dock icon and no menu bar menu |
 | Published view models, the refresh trigger, collapse, hide, roots | `AppModel` | `Sources/BranchBar/AppModel.swift:29` | The only shell type that talks to Core |
 | Row actions: editor chain, PR, Finder, clipboard | `Actions` | `Sources/BranchBar/Actions.swift:12` | Cursor, then VS Code, then Terminal; `https` PR links only |
 | Launch at login | `LaunchAtLogin` | `Sources/BranchBar/LaunchAtLogin.swift:19` | `SMAppService`, which must refuse when the bundle is translocated |
+| The guard that stops the toggle registering a copy the login item does not name | `isRunningFromApplications` | `Sources/BranchBar/LaunchAtLogin.swift:68` | Both mechanisms refuse outside `/Applications`, so they cannot name two bundles (REVIEW WR-05) |
 | The popover body and keyboard traversal | `RootView` | `Sources/BranchBar/Views/RootView.swift:22` | Arrow keys traverse, Return runs the primary action, Escape dismisses |
 | One repo section with its four groups | `RepoSectionView` | `Sources/BranchBar/Views/RepoSectionView.swift:7` | Collapse state is persisted per repo |
 | One branch row | `BranchRowView` | `Sources/BranchBar/Views/BranchRowView.swift:7` | Worktree marker, name, pill, push line, ahead count |
@@ -306,9 +368,11 @@ Two derived fields exist because a `Repo` alone cannot answer the question hones
 make test        # swift test --disable-xctest --enable-swift-testing
 ```
 
-**257 tests, all green.** Swift Testing only: XCTest is absent under Command Line Tools, and `noXCTestImportAnywhere` keeps it out on a machine that has full Xcode. `noAppKitOrSwiftUIImportInCore` keeps the shell's frameworks out of the library.
+**312 tests, all green.** Swift Testing only: XCTest is absent under Command Line Tools, and `noXCTestImportAnywhere` keeps it out on a machine that has full Xcode. `noAppKitOrSwiftUIImportInCore` keeps the shell's frameworks out of the library.
 
-Fixtures live in `Tests/BranchBarCoreTests/Fixtures/` in three families. `recorded-*` (19 files) are byte-exact output from `/usr/bin/git` 2.39.5 and `gh` 2.89.0, written by `make record-fixtures`: no model ever transcribes git output. `synthetic-*` (22 files) are hand-written extensions for cases these repos cannot produce, each with a sibling `.md` note explaining what it models. `states/*.json` (34 files) are one per user-facing state in `docs/UI-CONTRACT.md`, each carrying the exact arguments of `SnapshotPresenter.present` plus the strings that state must show.
+Fixtures live in `Tests/BranchBarCoreTests/Fixtures/` in three families. `recorded-*` (19 files) are byte-exact output from `/usr/bin/git` 2.39.5 and `gh` 2.89.0, written by `make record-fixtures`: no model ever transcribes git output. `synthetic-*` (23 files) are hand-written extensions for cases these repos cannot produce, each with a sibling `.md` note explaining what it models. `states/*.json` (38 files) are one per user-facing state in `docs/UI-CONTRACT.md`, each carrying the exact arguments of `SnapshotPresenter.present` plus the strings that state must show.
+
+One test suite runs a real shell: `SignInScriptTests` renders the `gh` sign-in `.command` file and executes it under `zsh` with a hostile `gh-sign-in.host` beside it, because the only proof that a script refuses a hostname is the shell refusing it.
 
 Two tests touch a real repo, and both skip themselves with a recorded reason rather than failing: `everyFrozenGitInvocationReturnsOutputOnThisRepo` skips when `git` is absent, and `reflogShowFallbackReturnsRowsForARefThatHasPushes` skips when this checkout's own `origin/main` reflog holds no push line, which is exactly what CI has, since a CI clone fetches and never pushes. Everything else replaces all three seams and touches no network, no real repo, and no home folder.
 
@@ -324,11 +388,18 @@ Two tests touch a real repo, and both skip themselves with a recorded reason rat
 
 ## §7 Security contract
 
-- **No secrets stored, read, or logged.** `gh` authenticates itself from its own keyring and BranchBar reads only its stdout. A `GH_TOKEN` exported in a shell rc is invisible to a GUI app, so it is not a supported setup.
-- **Only the fixed command list in PLAN.md §5 is ever spawned**, always as argument arrays through `Process`, never through a shell. A branch name beginning with `-` is passed as an operand, which a test pins.
+- **No secrets stored, read, or logged.** `gh` authenticates itself from its own keyring and BranchBar reads only its stdout. A `GH_TOKEN` exported in a shell rc is invisible to a GUI app, so it is not a supported setup. A remote URL that carries credentials in its userinfo (`https://user:token@host/o/r`) has them stripped before the URL is stored, cached, or logged.
+- **Only the fixed command list in PLAN.md §5 is ever spawned**, always as argument arrays through `Process`, never through a shell. A branch name beginning with `-` is passed as an operand, which a test pins. Beside `git` and `gh`, the shell layer runs `/usr/bin/open`, `/bin/launchctl` for the login-item fallback, `/usr/bin/xcode-select` to decide whether Apple's git shim will resolve, and `/bin/zsh` only through the sign-in script below. README's trust paragraph names that same list.
+- **A hostname is a hostname before it is anything else.** `GitHubSlug.isValidHostname` applies an RFC-1123 label grammar at parse time, so a remote such as `ssh://git@$(touch pwned)/o/r` never produces a slug, a notice, an action payload, or a PR query (codex BLOCKER 1). Enterprise hosts pass; shell syntax does not.
+- **The sign-in script is fixed text.** `SignInScript.render` writes a `.command` file whose only variable part is the resolved `gh` path, single-quoted. The hostname travels as *data* in the sibling file `gh-sign-in.host` (mode 0600), is read with a command substitution that never re-evaluates what it read, and is re-checked in zsh against the same grammar before `gh` is executed with it as one quoted argv element. Nothing a repository owns is ever interpolated into shell source.
+- **PR links are https only, and only to a host BranchBar resolved.** `Actions.openPR` requires the scheme to be exactly `https` and the URL's host to equal the host of the repo section the link came from, so a `file:`, an `http:`, or a link to somewhere else is refused and logged rather than opened.
+- **A cancelled or timed-out command takes its descendants with it.** Each child is spawned as its own process group leader, and termination signals the group, so `git`'s credential and lazy-fetch helpers cannot outlive the refresh that started them and keep its pipes open. `GIT_NO_LAZY_FETCH=1` is in the frozen git environment so a read never becomes a fetch.
+- **Every read from outside the process is bounded.** Child stdout and stderr are drained in chunks against a byte cap; past it the partial output is dropped (a truncated `for-each-ref` would read as a short branch list, which is a lie), the child is terminated, and the caller gets `outputTooLarge`. Reflog files are read as a bounded tail, and a `.git` file is classified from a bounded prefix.
+- **The cache is treated as untrusted input.** A cache file past a size cap loads as nil, dates in the future are dropped rather than believed, and the scan policy inside a loaded cache is never adopted as the policy to scan by: roots and depth come from the app, not from the file on disk.
 - **No writes to any repo and no network calls of the app's own.** It never fetches, and every GitHub read goes through `gh` under the user's own token.
+- **Launch at login registers only the copy the toggle names.** Both mechanisms refuse unless the running bundle is `/Applications/BranchBar.app`, so `SMAppService` cannot register a copy in Downloads while the LaunchAgent plist names Applications. A translocated bundle is refused outright.
 - **Not sandboxed and ad-hoc signed.** macOS asks for folder access on the first scan, a denial is visible in the "Not scanned" row rather than silent, and a rebuilt copy asks again because the signature changes with every build.
-- **Not defended against:** a hostile repo on disk. Branch names are argument operands and displayed text, never executed.
+- **Not defended against:** a hostile repo on disk beyond the above. Branch names are argument operands and displayed text, never executed.
 
 ## §8 Known footguns
 
@@ -382,6 +453,33 @@ Parallel agents sharing `.build` serialize on the build lock and can appear hung
 
 **A `fatalError` stub traps the whole Swift Testing process.**
 An `OWNER:` stub that traps takes down every test in the run, not just the one that called it, so a red packet reads as a crash rather than a failure list. Expect that shape while a packet is red.
+
+**A string that becomes shell source is a different kind of string.**
+The `gh` sign-in helper writes a `.command` file, and it used to build it by interpolating
+`gh auth login --hostname \(host)` with `host` straight off `remote.origin.url`. A remote of
+`ssh://git@$(touch pwned)/o/r` was therefore code execution on one click (codex BLOCKER 1). The
+script is now fixed text; the hostname arrives as data in a sibling file, validated in Swift by
+`GitHubSlug.isValidHostname` and again in zsh against the same grammar. Anything new that writes a
+script follows the same shape, and lives in Core so a test can run it under a real shell.
+
+**`launchctl bootstrap` reports "already loaded" as errno 5 or 37, not 17.**
+`launchctl error 5|17|37` on macOS 24 prints "Input/output error", "File exists", and "Operation
+already in progress"; the code that treated only 17 as benign deleted the plist it had just
+written on every other code, while launchd kept the job loaded for the session. Check
+`launchctl print gui/<uid>/<label>` for exit 0 first, and on a `bootstrap` failure `bootout` and
+retry once rather than removing the file.
+
+**`attributesOfItem` blocks behind a folder-access dialog, and so does anything that stats a
+symlink's target.**
+The first hung the whole first launch. `RealFileSystem` lists once with `.isDirectoryKey` and
+`.isSymbolicLinkKey` resource values and stats nothing per entry, which also stops the walk
+following a link out of the tree it was told to stay in.
+
+**A `~/.git` at the home root used to end the scan there.**
+The `.git` check runs before a directory's children are enqueued, so the dotfiles-in-home pattern
+made `~` the one candidate and hid every real repo beneath it, with no message saying why. The home
+root is now listed as a repo and still walked; an "Add folder…" root that is a repo keeps the plain
+"do not descend" rule.
 
 **Never add `resources:` to `Package.swift`, and never add a `main.swift`.**
 A resource declaration makes SwiftPM emit a side bundle next to the executable that breaks the `.app` layout and signing; a `main.swift` disables `-parse-as-library` and breaks `@main`. Fixtures load via `#filePath`; the entry file is `BranchBarApp.swift`.

@@ -49,6 +49,36 @@ public enum Strings {
         "Updating \(completed) of \(count(total, "repo"))…"
     }
 
+    // MARK: - Git not found
+
+    /// State: `git-not-found` — heading when the preflight found no `git` on this Mac. Nothing
+    /// else in the app can run without it: there is no repo to read, no branch to list, and no
+    /// push to date, so this replaces the empty state rather than sitting above it (REVIEW CR-04).
+    /// Literal: `git not found`
+    public static let gitNotFoundTitle = "git not found"
+
+    /// State: `git-not-found` — names the missing program and the one command that installs it.
+    /// Apple's copy of git ships with the Command Line Tools, which is what the README's
+    /// Requirements section already tells a tester to install, so the sentence and the README give
+    /// the same instruction.
+    /// Literal: `BranchBar could not find git on this Mac, so it cannot read any repo. Run xcode-select --install in Terminal, then try again.`
+    public static let gitNotFoundMessage =
+        "BranchBar could not find git on this Mac, so it cannot read any repo. Run "
+        + "xcode-select --install in Terminal, then try again."
+
+    /// State: `git-not-found` — the whole state as one value, so the shell that discovers the
+    /// missing git and the presenter that renders it cannot word it differently. `diagnostic`
+    /// carries the directories `ToolLocator` looked in, which is logged and never rendered.
+    /// Literal: the title and message above, with the action `Refresh`
+    public static func gitNotFound(diagnostic: String = "") -> UserFacingFailure {
+        UserFacingFailure(
+            title: gitNotFoundTitle,
+            message: gitNotFoundMessage,
+            action: UserFacingFailure.Action(label: refreshActionLabel, kind: .retryRefresh),
+            diagnostic: diagnostic
+        )
+    }
+
     // MARK: - Zero repos
 
     /// State: `zero-repos` — heading when the scan finished and found nothing.

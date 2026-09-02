@@ -17,38 +17,41 @@ included.
 make test        # swift test --disable-xctest --enable-swift-testing
 ```
 
-**257 tests, all green**, Swift Testing only. Two of them touch a real repo and skip themselves
+**312 tests, all green**, Swift Testing only. Two of them touch a real repo and skip themselves
 with a recorded reason rather than failing; everything else replaces all three seams and touches
-no network, no real repo, and no home folder.
+no network, no real repo, and no home folder. The `Tests` column counts `@Test` declarations,
+which is also what the runner reports: a parameterized case is one declaration however many
+arguments it is handed.
 
 | Test file | Tests | Holds |
 |---|---:|---|
 | `ContractTests.swift` | 17 | Frozen type shapes, the frozen environments, the test doubles, and `FixtureInventoryTests` |
-| `FileCacheStoreTests.swift` | 8 | Atomic save, unknown schema version |
+| `FileCacheStoreTests.swift` | 11 | Atomic save, unknown schema version |
 | `ForEachRefParserTests.swift` | 10 | Branch and remote-ref rows, upstream disambiguation |
-| `GHClientTests.swift` | 14 | Per-host auth, the three list invocations, the cap, failure mapping |
-| `GitClientTests.swift` | 10 | Every frozen git invocation's argument array and environment |
-| `GitHubSlugTests.swift` | 16 | Remote URL to host, owner, name, GitHub Enterprise included |
+| `GHClientTests.swift` | 20 | Per-host auth, the three list invocations, the cap, failure mapping |
+| `GitClientTests.swift` | 11 | Every frozen git invocation's argument array and environment |
+| `GitHubSlugTests.swift` | 22 | Remote URL to host, owner, name, GitHub Enterprise included |
 | `GitVersionTests.swift` | 6 | Version parsing and the 2.39 comparison |
 | `GuardTests.swift` | 3 | Structural bans and fixture existence |
 | `LiveRepoSanityTests.swift` | 2 | The two live-repo tests, both skippable on CI |
 | `PRListDecoderTests.swift` | 8 | JSON decode and the `updatedAt` sort |
-| `PRStatusMapperTests.swift` | 11 | Pill mapping, head-first matching, the open-elsewhere key |
-| `ProcessCommandRunnerTests.swift` | 11 | Pipe draining, timeout, cancellation, argument safety |
-| `PushInfoDeriverTests.swift` | 8 | Observation versus commit date, `originMovedSince`, gone upstream |
-| `RealFileSystemTests.swift` | 3 | Directory listing with resource values |
-| `ReflogFileReaderTests.swift` | 11 | The usable-line predicate and the deletion boundary |
+| `PRStatusMapperTests.swift` | 13 | Pill mapping, head-first matching, the open-elsewhere key |
+| `ProcessCommandRunnerTests.swift` | 16 | Pipe draining, timeout, cancellation, argument safety |
+| `PushInfoDeriverTests.swift` | 10 | Observation versus commit date, `originMovedSince`, gone upstream |
+| `RealFileSystemTests.swift` | 6 | Directory listing with resource values |
+| `ReflogFileReaderTests.swift` | 13 | The usable-line predicate and the deletion boundary |
 | `ReflogParserTests.swift` | 5 | The `git reflog show` fallback format |
-| `RefreshCoordinatorTests.swift` | 24 | Coalescing, cap, deadline, cancellation, stable order, lazy PR |
-| `RepoAssemblerTests.swift` | 17 | The join and the three groups |
-| `RepoLoaderTests.swift` | 11 | Seven stages, per-stage isolation, PR cache TTL |
-| `RepoScannerTests.swift` | 21 | The walk, the skip rules, classification, dedupe |
+| `RefreshCoordinatorTests.swift` | 28 | Coalescing, cap, deadline, cancellation, stable order, lazy PR |
+| `RepoAssemblerTests.swift` | 19 | The join and the three groups |
+| `RepoLoaderTests.swift` | 15 | Seven stages, per-stage isolation, PR cache TTL |
+| `RepoScannerTests.swift` | 24 | The walk, the skip rules, classification, dedupe |
 | `ScanDeadlineTests.swift` | 6 | The 20 s scan bound, partial results, gated folders last |
+| `SignInScriptTests.swift` | 8 | The fixed `.command` body, the host file it reads, and the zsh grammar guard, all run through a real shell |
 | `SmokeTests.swift` | 1 | The package builds and links |
-| `SnapshotPresenterTests.swift` | 15 | Every state fixture, the copy rules, accessibility labels |
+| `SnapshotPresenterTests.swift` | 18 | Every state fixture, the copy rules, accessibility labels |
 | `StringsTests.swift` | 9 | State coverage, banned vocabulary, the `states/` fixture writer |
 | `ToolLocatorTests.swift` | 4 | The search order and what it records |
-| `WorktreeListParserTests.swift` | 6 | Primary, linked, detached, locked, prunable, bare |
+| `WorktreeListParserTests.swift` | 7 | Primary, linked, detached, locked, prunable, bare |
 
 Two invariants are held under a different name than PLAN.md §7 gave them, both recorded here so a
 search for the plan's name finds them: `everyFrozenGitInvocationReturnsExpectedShapeOnThisRepo` is
@@ -185,8 +188,37 @@ today; the `Packet` column names who wrote it.
 | `emptyScanRendersActionableEmptyState` | `SnapshotPresenterTests.swift` | 2.2 | empty `Snapshot` |
 | `unavailableReasonCopyNamesOneActionPerReason` | `StringsTests.swift`, `SnapshotPresenterTests.swift` | 4.0, 2.2 | `PRUnavailableReason` cases |
 | `everyStringsEntryIsReachableFromSomeState` | `StringsTests.swift` | 4.0 | the §5a state table |
-| `everyStateFixtureRendersItsExpectedStrings` (parameterized over all 34 states) | `SnapshotPresenterTests.swift` | 2.2 | `states/*.json` |
+| `everyStateFixtureRendersItsExpectedStrings` (parameterized over all 38 states) | `SnapshotPresenterTests.swift` | 2.2 | `states/*.json` |
 | `everyFixtureStringIsRenderedOrOnAFrozenExemptionList` | `SnapshotPresenterTests.swift` | 2.2 | `states/*.json` plus the frozen view-owned chrome list |
+
+### The pre-ship fix wave — packets F1 to F4
+
+The codex pre-ship challenge and the code review at `review/REVIEW.md` returned 2 blockers, 15
+majors, and the CR and WR items; each fix landed with the test that reproduces the finding. The
+`Invariant` column is the test name, so a search for a finding number finds its evidence.
+
+| Invariant | Test file | Packet | Finding |
+|---|---|---|---|
+| `hostWithShellMetacharactersIsRejected`, `The hostname grammar refuses everything a shell would read as syntax` | `GitHubSlugTests.swift` | F1 | BLOCKER 1: `GitHubSlug` accepted any host string |
+| `The script interpolates no hostname anywhere in its body`, `The script re-validates the hostname in zsh against the same grammar`, `A hostile hostname file exits non-zero and executes nothing`, `Every shell metacharacter in the host file is refused` | `SignInScriptTests.swift` | F1 | BLOCKER 1: the `.command` file was shell source built by interpolation |
+| `The resolved gh path is a single-quoted literal, not bare script text`, `A gh path holding a quote is escaped rather than closing the literal`, `A missing host file exits non-zero rather than signing in to nothing`, `A valid hostname reaches gh as one argument` | `SignInScriptTests.swift` | F1 | BLOCKER 1, second half: the `gh` path and the argv shape |
+| `failedRefreshRendersItsReasonNotNoReposFound` | `SnapshotPresenterTests.swift` | F4 | CR-04: no git left the app spinning with every button disabled |
+| `branchWithoutUpstreamButMatchingRemoteRefReadsItsReflog`, `branchWithoutUpstreamOrRemoteRefSaysHistoryNotChecked`, `observationWithoutAnUpstreamIsStillTheObservationItIs` | `RepoLoaderTests.swift`, `PushInfoDeriverTests.swift` | F2 | WR-01: "Never pushed" asserted for any branch without an upstream |
+| `plain403IsNotRateLimited`, `notFoundRepoIsCommandFailed` | `GHClientTests.swift` | F3 | WR-02: every HTTP 403 read as rate limiting |
+| `remoteURLUserinfoIsStrippedBeforeStorage` | `GitClientTests.swift` | F2 | codex: credential-bearing remote URLs must never be stored |
+| `behindOnlyBranchIsNotCalledInSync` | `SnapshotPresenterTests.swift` | 5.2 fix | codex MAJOR 5: behind-only rendered as "In sync" |
+| `lastSeenTooltipUsesFetchHeadMtime`, `loaderReadsFetchHeadModificationDateAsTheLastSeenAnchor`, `fallbackLabelUsesRemoteTipCommitDateNotLocalTip` | `PushInfoDeriverTests.swift`, `RepoLoaderTests.swift` | F2 | codex MAJOR 7: "last seen" was the remote tip's commit date |
+| `worktreePathWithNewlineParsesUnderZ`, `worktreeEnumerationFailureSuppressesMergedGroup`, `worktreeStageFailureIsRecordedAndSuppressesTheMergedGroup` | `WorktreeListParserTests.swift`, `RepoAssemblerTests.swift`, `RepoLoaderTests.swift` | F2 | codex MAJOR 12: non-`-z` porcelain C-quotes unusual paths |
+| `singleSameNamedForkPRDoesNotAttachToAnUnrelatedLocalBranch`, `localBranchWithoutUpstreamStillExcludesSameNamedAuthoredPR` | `PRStatusMapperTests.swift` | F2 | codex: owner-required PR matching |
+| `childRunsInItsOwnProcessGroup`, `cancellationKillsAGrandchildThatDidNotExec` | `ProcessCommandRunnerTests.swift` | F3 | codex MAJOR 13: cancellation reached only the direct child |
+| `stdoutBeyondTheCapTerminatesTheChildWithOutputTooLarge`, `stderrBeyondTheCapTerminatesTheChildWithOutputTooLarge`, `outputJustUnderTheCapIsReturnedWhole` | `ProcessCommandRunnerTests.swift` | F3 | codex MAJOR 15: unbounded reads of child output |
+| `readFileWithAMaximumReadsOnlyThatManyBytes`, `readFileTailReadsTheLastBytesOfTheFile`, `theTailWindowHoldsTheNewestLinesAndDropsWhatIsOlderThanIt`, `aLineLongerThanTheTailWindowIsNeverParsedFromItsMiddle`, `gitFileIsClassifiedFromABoundedPrefix` | `RealFileSystemTests.swift`, `ReflogFileReaderTests.swift`, `RepoScannerTests.swift` | F3 | codex MAJOR 15: bounded file reads |
+| `aSymlinkIntoAnUnreachableTargetStillListsWithoutStattingIt` | `RealFileSystemTests.swift` | F3 | BLOCKER 2, second half: `RealFileSystem` stat'ed symlink targets |
+| `dotfilesRepoAtHomeRootDoesNotStopTheScan`, `addedRootThatIsARepoIsListedWithoutDescending` | `RepoScannerTests.swift` | F3 | WR-08: `~/.git` made the home root the only candidate |
+| `oversizedCacheLoadsNil`, `futureDatesAreDroppedFromTheLoadedCache`, `aCacheWrittenNowLoadsBackWhole`, `futureScannedAtForcesRescan`, `cachedScanPolicyIsNotTrusted`, `recentEmptyScanIsReusedWithoutRescanning` | `FileCacheStoreTests.swift`, `RefreshCoordinatorTests.swift` | F3 | codex: cache size and date guards, untrusted cached scan policy |
+| `concurrentReposIssueOneAuthStatusPerHost`, `cancelledAuthCheckIsNotMemoized`, `resetForNewRefreshClearsTheAuthMemoAndTheListCaches`, `bypassSkipsInMemoryPRCache` | `GHClientTests.swift` | F3 | codex: in-flight auth memo, and "Refresh PRs now" answered out of memory |
+| `rootAddedDuringARefreshSurvivesItsSave` | `RefreshCoordinatorTests.swift` | F2 | CR-03: an "Add folder…" during a refresh was lost at the save |
+| `tccDenialWithZeroReposRendersTheNotScannedNoticeInTheEmptyState` | `SnapshotPresenterTests.swift` | 5.2 fix | codex MAJOR 3: zero repos from a denied folder offered no way out |
 
 ### Structural guards — packet 1.1
 
@@ -236,6 +268,7 @@ inside the fixture. `FixtureInventoryTests` enforces that every synthetic has on
 | File | Rows | Bytes | What it models |
 |---|---:|---:|---|
 | `synthetic-worktree-list-multi.txt` | 29 | 911 | 7 records: primary, Agents-mode worktree, detached (no branch), path and branch with spaces, locked with reason, prunable with reason, bare |
+| `synthetic-worktree-list-z-newline-path.txt` | 14 | 347 | `worktree list --porcelain -z`: three NUL-terminated records, one whose path and branch name both carry a literal newline, which non-`-z` porcelain would C-quote and the parser would misread (codex MAJOR 12) |
 | `synthetic-for-each-ref-heads-mixed.txt` | 8 | 810 | ahead / behind / both / gone / no upstream / in sync / nested-and-spaced name / a `refs/tags/main` colliding with a branch name |
 | `synthetic-for-each-ref-heads-malformed.txt` | 5 | 257 | a truncated row and blank lines between good rows, so the parser reports rather than crashes |
 | `synthetic-for-each-ref-remotes.txt` | 7 | 573 | the `origin/HEAD` symbolic ref, tips for the mixed heads, and a second remote (`upstream`) |
@@ -260,20 +293,23 @@ inside the fixture. `FixtureInventoryTests` enforces that every synthetic has on
 
 ### States — `Fixtures/states/`, written by the suite
 
-34 files, one per row of the `docs/UI-CONTRACT.md` state table, each carrying the exact argument
+38 files, one per row of the `docs/UI-CONTRACT.md` state table, each carrying the exact argument
 list of `SnapshotPresenter.present` plus the literal strings that state is contracted to show.
 `SnapshotPresenterTests` asserts against every one of them, `scripts/screenshot-states.sh` renders
 every one of them through the real app for Gate 4, and `StringsTests` rewrites a file only when its
-bytes change.
+bytes change. Packet 4.0 recorded 32, packet 4.3 added 2, the codex pre-ship review added 3
+(`zero-repos-documents-denied`, `origin-not-fetched`, `behind-only`), and the fix wave added
+`git-not-found` (REVIEW CR-04).
 
-`ahead-of-last-known-origin`, `closed-unmerged-group`, `cursor-not-installed`, `deadline-exceeded`,
-`detached-worktree`, `first-run-scanning`, `gh-not-authenticated`, `gh-not-installed`,
-`git-too-old`, `hidden-repo`, `in-sync`, `last-push-unknown`, `launch-at-login-needs-approval`,
-`merged-group`, `no-github-remote`, `no-remote`, `not-scanned-folders`, `open-prs-not-on-this-mac`,
-`origin-moved-since`, `pr-approved`, `pr-changes-requested`, `pr-draft`, `pr-list-timeout`,
-`pr-not-checked`, `pr-not-loaded`, `pr-open`, `rate-limited`, `refresh-running`, `repo-failed`,
-`single-branch-no-pr-never-pushed`, `stale-rows-at-launch`, `upstream-missing`, `worktree-checkout`,
-`zero-repos`.
+`ahead-of-last-known-origin`, `behind-only`, `closed-unmerged-group`, `cursor-not-installed`,
+`deadline-exceeded`, `detached-worktree`, `first-run-scanning`, `gh-not-authenticated`,
+`gh-not-installed`, `git-not-found`, `git-too-old`, `hidden-repo`, `in-sync`, `last-push-unknown`,
+`launch-at-login-needs-approval`, `merged-group`, `no-github-remote`, `no-remote`,
+`not-scanned-folders`, `open-prs-not-on-this-mac`, `origin-moved-since`, `origin-not-fetched`,
+`pr-approved`, `pr-changes-requested`, `pr-draft`, `pr-list-timeout`, `pr-not-checked`,
+`pr-not-loaded`, `pr-open`, `rate-limited`, `refresh-running`, `repo-failed`,
+`single-branch-no-pr-never-pushed`, `stale-rows-at-launch`, `upstream-missing`,
+`worktree-checkout`, `zero-repos`, `zero-repos-documents-denied`.
 
 ## Test doubles
 
