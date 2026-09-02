@@ -69,16 +69,146 @@ public enum RepoAssembler {
         }
     }
 
-    /// OWNER: packet 3.1 — join branches to worktrees by exact branch name (a worktree with no
-    /// branch never joins), to PRs through `PRStatusMapper.match`, and to push observations
-    /// through `PushInfoDeriver.derive` against the matching remote-tracking ref; set each
-    /// branch's `prStatus` to `notChecked` unless its head is in `queriedHeads`; assign
-    /// `group = .merged` only when the PR is merged **and** `tipSHA == headRefOid` **and** the
-    /// branch has no worktree, `.closedUnmerged` when the PR is closed unmerged, and `.active`
-    /// otherwise; and return a `Repo` whose `openPRsNotOnThisMac` comes from
-    /// `PRStatusMapper.openPRsNotOnThisMac` and whose `lastActivity` is the newest branch
-    /// committer date.
+    /// The join. Branches come from the `refs/heads` rows, worktrees join them by exact branch
+    /// name, PRs join through `PRStatusMapper`, and push facts come from `PushInfoDeriver` against
+    /// the matching remote-tracking ref. Grouping is decided here and only rendered by
+    /// `SnapshotPresenter`; `Branch.group` is the boundary (PLAN.md §5).
+    ///
+    /// Two PR facts are repo-wide and short-circuit the per-branch join, in this order:
+    /// an unavailable `PRAvailability` makes every branch `.unavailable` and empties
+    /// "Open PRs not on this Mac" (a half-populated list from a failed query would read as fact),
+    /// and a `notLoaded` load state makes every branch `.notLoaded` — the collapsed-repo state,
+    /// which is a statement about this app and not about GitHub.
     public static func assemble(_ inputs: Inputs) -> Repo {
-        fatalError("OWNER: packet 3.1 — join branches, worktrees, PRs, and push observations into a Repo, assigning the merged / closedUnmerged / active groups and the open-elsewhere PR list.")
+        let slug = inputs.remoteURL.flatMap(GitHubSlug.init(remoteURL:))
+        let worktreeByBranch = worktreesByBranchName(inputs.worktrees)
+        let remoteTips = Dictionary(
+            inputs.remoteRefs.map { ($0.shortName, $0) },
+            uniquingKeysWith: { first, _ in first })
+
+        let isUnavailable: Bool
+        if case .unavailable = inputs.prAvailability { isUnavailable = true } else { isUnavailable = false }
+        let isNotLoaded = inputs.prLoadState == .notLoaded
+
+        var branches: [Branch] = []
+        var localHeads: Set<PRStatusMapper.LocalHead> = []
+
+        // `-- refs/heads` is the frozen pattern, but a row that is not a branch must never become
+        // one: `refs/tags/main` and `refs/heads/main` are different objects with the same name.
+        for row in inputs.branchRefs where row.refName.hasPrefix("refs/heads/") {
+            let name = row.branchName
+            let upstream = ForEachRefParser.upstream(from: row)
+            let tip = upstream.flatMap { remoteTips[$0.ref] }
+            let owner = upstreamOwnerLogin(upstream: upstream, slug: slug)
+
+            if let owner {
+                localHeads.insert(PRStatusMapper.LocalHead(ownerLogin: owner, branchName: name))
+            }
+
+            let matched = (isUnavailable || isNotLoaded)
+                ? nil
+                : PRStatusMapper.match(branchName: name, upstreamOwnerLogin: owner, in: inputs.pullRequests)
+
+            let status: PRStatus
+            if isUnavailable {
+                status = .unavailable
+            } else if isNotLoaded {
+                status = .notLoaded
+            } else if let matched {
+                status = PRStatusMapper.status(for: matched)
+            } else {
+                // The `none` versus `notChecked` distinction: `none` is only reachable after this
+                // head was actually queried (`unqueriedBranchIsNotCheckedNeverNone`).
+                status = inputs.queriedHeads.contains(name) ? .none : .notChecked
+            }
+
+            let worktreePath = worktreeByBranch[name]?.path
+
+            branches.append(Branch(
+                name: name,
+                tipSHA: row.objectName,
+                committerDate: row.committerDate,
+                upstream: upstream,
+                worktreePath: worktreePath,
+                isCheckedOutInPrimary: row.isHead,
+                pr: matched,
+                prStatus: status,
+                push: PushInfoDeriver.derive(
+                    observation: inputs.pushObservations[name],
+                    upstream: upstream,
+                    remoteTipOID: tip?.objectName,
+                    remoteTipCommitDate: tip?.committerDate),
+                group: group(status: status, tipSHA: row.objectName, pr: matched, worktreePath: worktreePath)))
+        }
+
+        branches.sort { $0.name < $1.name }
+
+        let openElsewhere = isUnavailable
+            ? []
+            : PRStatusMapper.openPRsNotOnThisMac(
+                authoredOpenPRs: inputs.authoredOpenPullRequests,
+                localHeads: localHeads)
+
+        return Repo(
+            id: inputs.id,
+            name: (inputs.path as NSString).lastPathComponent,
+            path: inputs.path,
+            remoteURL: inputs.remoteURL,
+            githubSlug: slug,
+            worktrees: inputs.worktrees,
+            branches: branches,
+            openPRsNotOnThisMac: openElsewhere,
+            prAvailability: inputs.prAvailability,
+            prFetchedAt: inputs.prFetchedAt,
+            prLoadState: inputs.prLoadState,
+            lastRefreshed: inputs.refreshedAt,
+            errors: inputs.errors,
+            isStale: inputs.isStale,
+            lastActivity: branches.map(\.committerDate).max())
+    }
+
+    // MARK: - The join rules, one function each
+
+    /// PLAN.md §5: worktrees join by exact branch name, and a worktree with no branch — a detached
+    /// checkout — never joins (`noBranchWorktreeAppearsUnderRepoAndNoBranchClaimsIt`). The
+    /// porcelain prints the full ref, so the key is its short name.
+    static func worktreesByBranchName(_ worktrees: [Worktree]) -> [String: Worktree] {
+        var byName: [String: Worktree] = [:]
+        for worktree in worktrees {
+            guard let ref = worktree.branch else { continue }
+            let name = ref.hasPrefix("refs/heads/") ? String(ref.dropFirst("refs/heads/".count)) : ref
+            // git allows one checkout per branch, so a later record for the same name would be a
+            // malformed porcelain; the first record wins rather than the last.
+            if byName[name] == nil { byName[name] = worktree }
+        }
+        return byName
+    }
+
+    /// The owner half of the "Open PRs not on this Mac" key and of the PR tie-break. It is known
+    /// only for `origin`, whose owner the slug names; a branch tracking some other remote has an
+    /// owner this app never resolved, and guessing the slug's owner there would silently hide a
+    /// fork PR (`openElsewhereKeyedByOwnerAndBranchNotBranchAlone`).
+    static func upstreamOwnerLogin(upstream: Upstream?, slug: GitHubSlug?) -> String? {
+        guard let upstream, upstream.remote == "origin" else { return nil }
+        return slug?.owner
+    }
+
+    /// PLAN.md §5: `merged` = `prStatus == merged && tipSHA == headRefOid && worktreePath == nil`;
+    /// `closedUnmerged` = `prStatus == closed`; everything else is active.
+    ///
+    /// All three clauses of the merged rule are safety, not cosmetics: a tip past the merged head
+    /// is work that did not ship (`branchWithCommitsAfterItsMergeIsNotInMergedGroup`), and a
+    /// branch checked out in a worktree cannot be deleted without removing the worktree first
+    /// (`mergedBranchWithWorktreeStaysActive`).
+    static func group(status: PRStatus, tipSHA: String, pr: PRInfo?, worktreePath: String?) -> BranchGroup {
+        switch status {
+        case .merged:
+            guard let pr, tipSHA == pr.headRefOid, worktreePath == nil else { return .active }
+            return .merged
+        case .closed:
+            return .closedUnmerged
+        default:
+            return .active
+        }
     }
 }
