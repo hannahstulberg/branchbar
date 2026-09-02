@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-02 — Packet 2.2 presenter green; view-model gaps accepted as view-owned chrome; red(3.2) committed; CI green on both jobs
+
+- **What:** `SnapshotPresenter` implemented (25 tests incl. all 32 state fixtures). `EditorAvailability` is an initializer property, not a `present` argument, so fixtures and the UI contract stay valid. Within-group row order follows UI-CONTRACT §3 (newest commit first, then name). CI run 33587342677 passed on `macos-15` for both the full-Xcode and CLT-selected jobs. red(3.2) 9d8fb7d: 22 coordinator tests trap on the OWNER stub; the header lists the defaulted parameters the implementer may add.
+- **Why:** The presenter is the last pure piece before the coordinator; CI proves the CLT path continuously as the codex review asked.
+- **Limits (accepted deviations from "views render the VM and nothing else"):** 17 fixed chrome strings (group headings, disclosure labels, secondary row actions, footer menu, the status-item accessibility label) have no VM field; the views read those `Strings` members directly and the test `everyFixtureStringIsRenderedOrOnAFrozenExemptionList` pins the exact set so it cannot grow silently. `UserFacingFailure.Action.Kind` has no open-in-editor case; the row's primary action is `.openURL` with an absolute path payload, and the shell (packet 4.1) treats an absolute filesystem path payload as "open in the available editor". Two fixtures carry strings their snapshot cannot produce (`single-branch-no-pr-never-pushed` bare "2 days ago"; `repo-failed` two of four stage errors) and are pinned as `fixtureDataGaps`; `NoticeVM` and `FooterVM.toolNotice` join multiple facts in a documented order.
+- **Cost accepted:** A later 1.1 follow-up (add `groupHeadings`, `secondaryActions`, footer slots, an `openInEditor` kind) if the view-owned chrome proves confusing; not needed for v1.
+- **Deliberately not changed:** `present`'s six frozen arguments; `StateFixture` stays inside `StringsTests.swift`.
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-02 — Phase 2 lanes: 2.4, 2.5, 2.3 green; one test-author error corrected by the orchestrator
 
 - **What:** Accepted green(2.4) 9835132 (scanner; `scan` became async and gained defaulted `commandRunner`/`gitExecutable` init params so tests stayed untouched), green(2.5) 770140c (runner drains both pipes on dedicated threads, timeout and cancellation SIGTERM then SIGKILL, cache store writes via `replaceItemAt`), green(2.3) (GHClient with the batch `pullRequests(slug:unmatchedHeads:)` entry point: heads past the cap are absent from the result, which is what renders `notChecked`). In `PRStatusMapperTests.openPRsNotOnThisMacExcludesHeadsThatExistLocally` the test author expected PR 104 (`needs-changes`, no local head) to be excluded; PLAN.md §5 keeps it. The orchestrator changed the expected set to `[102, 103, 104, 109]`; the implementer did not touch the test.
