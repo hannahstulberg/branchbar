@@ -1,20 +1,21 @@
 # SESSION HANDOFF — BranchBar
 
-**Last updated:** 2026-09-02 00:20 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+**Last updated:** 2026-09-02 03:10 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
 
 ## Current state
 
-- **Phase / packet:** Phase 1 done (0.3 spike zip published as v0.0.1-spike; 1.1 contracts frozen). Phase 2 lanes + 4.0 dispatched concurrently: 4.0 (Strings/UI contract), 2.1-T, 2.3-T, 2.4-T (test authors), 2.5 (runner/cache/fs, single agent).
-- **Suite:** 43 passing (`make test`)
-- **In-flight agents:** 4.0, 2.1-T, 2.3-T, 2.4-T, 2.5 (specs in the session scratchpad `packets/`). Each uses its own `--scratch-path .build/pk-<name>` to avoid build-lock contention. Stub files are flat under `Sources/BranchBarCore/`.
+- **Phase / packet:** Phase 3: 3.1 green (b98b0eb); red(3.2) 9d8fb7d committed; 3.2 implementer in flight (coordinator + branchbar-cli + PRCacheEntry.queriedHeads). 2.2 presenter green (2b1b083). Local main is ahead of origin (push held until 3.2 is green because red(3.2) traps the whole run).
+- **Suite:** 226 passing with `--skip RefreshCoordinator` (clean worktree at b98b0eb); CI green at d9444b6.
+- **In-flight agents:** 3.2-I (spec packets/3.2.md implementer role).
 - **Blocked on:** nothing. Hannah's own packet 0.0 items are open: ask Andrew Lisy whether JobRunner opened on NYT-managed Macs; name the NYT tester and their macOS version.
 
 ## Next steps (in order)
 
-1. Accept the three test-author packets (2.1-T, 2.3-T, 2.4-T): tests exist and fail for the right reason; commit as `red(2.x)`; then dispatch the matching implementers (specs 2.1-impl.md; 2.3.md and 2.4.md implementer role).
-2. Accept 4.0 (Hannah reads the string table = Gate 4.0) and 2.5; commit.
-3. After 2.1/2.2/2.3 green: dispatch 3.1, then 3.2 (with `branchbar-cli`), then 4.1.
-4. Hannah: Cursor push test (spike item 10, commands in DECISION-LOG), Andrew Lisy question, NYT tester named.
+1. Accept 3.2-I: full `make test` green at its SHA, zero edits to RefreshCoordinatorTests since 9d8fb7d; commit `green(3.2)`; push; confirm CI.
+2. Gate 3: run `swift run branchbar-cli snapshot --root ~/hannah-personal-agent --root ~/branchbar --root ~/WalkTimer-or-a-third-repo --git /usr/bin/git` and hand-check against `git branch -vv` / `git worktree list` / `gh pr list` for 3 repos; record in DECISION-LOG.
+3. Dispatch 4.1 (packets/4.1.md) after Gate 3; Hannah's Gate 4.0 read of docs/UI-CONTRACT.md is async.
+4. Then 5.1a (first zip, tag v0.9.0) by 09-10, 4.2 (actions + launch at login), 5.1b, 5.2.
+5. Hannah: Gate 0b NYT tester (runbook sent), Andrew Lisy question, Cursor push check.
 
 ## Re-read order for a fresh session
 

@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-02 — Packet 3.1 green (226 tests minus the coordinator); loader judgment calls accepted
+
+- **What:** `PushInfoDeriver`, `RepoAssembler`, `RepoLoader` implemented; red a3cbf49 (compile-red on the new defaulted `previous:` parameter), green b98b0eb. Accepted judgment calls: `rev-parse` failure files under `RepoError.Stage.reflog`; the per-head cap is spent most-recently-active first; a branch checked out in the primary worktree carries the primary's path and therefore never enters Merged; `remoteRefObservedAt` carries the remote tip's committer date rather than a new field.
+- **Why:** Each is the honest reading of PLAN.md §3/§5 where the plan was silent, and each is pinned by a named test.
+- **Limits:** A warm PR cache left `queriedHeads` unknown, so a branch could read `none` cold and `notChecked` warm. Packet 3.2's implementer is permitted to add `PRCacheEntry.queriedHeads` (defaulted) and have the loader record and honor it.
+- **Cost accepted:** `RepoLoader.load` gained a defaulted `previous: Repo?` parameter beyond the frozen signature.
+- **Deliberately not changed:** `GHClient` public surface (no `force` flag; staleness is decided by the loader from the cache entry).
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-02 — Packet 2.2 presenter green; view-model gaps accepted as view-owned chrome; red(3.2) committed; CI green on both jobs
 
 - **What:** `SnapshotPresenter` implemented (25 tests incl. all 32 state fixtures). `EditorAvailability` is an initializer property, not a `present` argument, so fixtures and the UI contract stay valid. Within-group row order follows UI-CONTRACT §3 (newest commit first, then name). CI run 33587342677 passed on `macos-15` for both the full-Xcode and CLT-selected jobs. red(3.2) 9d8fb7d: 22 coordinator tests trap on the OWNER stub; the header lists the defaulted parameters the implementer may add.
