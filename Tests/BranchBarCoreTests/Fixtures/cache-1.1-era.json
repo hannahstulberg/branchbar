@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "manuallyAddedRepos": ["/Users/tester/work"],
+  "hiddenRepoIDs": [{ "commonDir": "/Users/tester/work/old/.git" }],
+  "collapsedRepoIDs": [{ "commonDir": "/Users/tester/work/big/.git" }],
+  "scan": {
+    "policy": {
+      "homeRoot": "/Users/tester",
+      "extraRoots": ["/Users/tester/work"],
+      "maxDepth": 6,
+      "skipHiddenDirectories": true,
+      "skipDirectoryNames": ["Library", "node_modules"],
+      "descendIntoRepos": false
+    },
+    "scannedAt": "2026-08-24T01:46:40Z",
+    "repos": [
+      {
+        "path": "/Users/tester/work/branchbar",
+        "id": { "commonDir": "/Users/tester/work/branchbar/.git" }
+      }
+    ],
+    "candidatesExamined": 524,
+    "unreadableDirectories": ["/Users/tester/Documents"],
+    "depthCutDirectories": 3,
+    "skippedHiddenDirectories": 11,
+    "skippedWorktreeCheckouts": [],
+    "skippedSubmodules": []
+  },
+  "prCache": [
+    { "commonDir": "/Users/tester/work/branchbar/.git" },
+    {
+      "fetchedAt": "2026-08-24T01:46:40Z",
+      "prs": [
+        {
+          "number": 12,
+          "url": "https://github.com/tester/branchbar/pull/12",
+          "state": "OPEN",
+          "isDraft": false,
+          "reviewDecision": "",
+          "updatedAt": "2026-08-22T21:20:00Z",
+          "baseRefName": "main",
+          "headRefName": "feature",
+          "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+          "headRepositoryOwnerLogin": "tester"
+        }
+      ],
+      "authorPRs": []
+    }
+  ],
+  "lastSnapshot": {
+    "refreshedAt": "2026-08-24T01:46:40Z",
+    "tools": {
+      "gitPath": "/usr/bin/git",
+      "gitVersion": "git version 2.39.5 (Apple Git-154)",
+      "ghPath": "/opt/homebrew/bin/gh",
+      "ghAuthByHost": { "github.com": true }
+    },
+    "repos": [
+      {
+        "id": { "commonDir": "/Users/tester/work/branchbar/.git" },
+        "name": "branchbar",
+        "path": "/Users/tester/work/branchbar",
+        "remoteURL": "git@github.com:tester/branchbar.git",
+        "githubSlug": { "host": "github.com", "owner": "tester", "name": "branchbar" },
+        "worktrees": [
+          {
+            "path": "/Users/tester/work/branchbar",
+            "headSHA": "1111111111111111111111111111111111111111",
+            "branch": "refs/heads/main",
+            "isPrimary": true,
+            "isBare": false,
+            "isLocked": false,
+            "isPrunable": false
+          }
+        ],
+        "branches": [
+          {
+            "name": "main",
+            "tipSHA": "1111111111111111111111111111111111111111",
+            "committerDate": "2026-08-22T00:00:00Z",
+            "upstream": {
+              "ref": "origin/main",
+              "remote": "origin",
+              "ahead": 0,
+              "behind": 0,
+              "isGone": false
+            },
+            "isCheckedOutInPrimary": true,
+            "prStatus": "none",
+            "push": {
+              "observedPushAt": "2026-08-22T00:00:00Z",
+              "observedPushOID": "1111111111111111111111111111111111111111",
+              "originMovedSince": false,
+              "source": "reflogObserved",
+              "hasUpstream": true,
+              "upstreamGone": false,
+              "aheadOfLastKnownRemote": 0,
+              "remoteRefObservedAt": "2026-08-23T00:00:00Z"
+            },
+            "group": "active"
+          }
+        ],
+        "openPRsNotOnThisMac": [],
+        "prAvailability": { "available": {} },
+        "prFetchedAt": "2026-08-24T01:46:40Z",
+        "prLoadState": "loaded",
+        "lastRefreshed": "2026-08-24T01:46:40Z",
+        "errors": [],
+        "isStale": false,
+        "lastActivity": "2026-08-22T00:00:00Z"
+      }
+    ]
+  }
+}
