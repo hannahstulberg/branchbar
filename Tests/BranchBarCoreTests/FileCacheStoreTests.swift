@@ -195,3 +195,85 @@ struct FileCacheStoreTests {
         #expect(url.path == "/Users/tester/Library/Application Support/BranchBar/cache.json")
     }
 }
+
+// MARK: - Packet F3 — codex MAJOR 2, the cheap half of "a cache file is not evidence"
+
+/// `cache.json` lives in Application Support, which any process running as the user can write.
+/// Decoding plus a schema check was the whole of the validation, so a crafted file could make the
+/// app read an unbounded blob at launch and hold a scan valid forever by dating it in the future.
+@Suite("FileCacheStore refuses an oversized file and a timestamp that has not happened")
+struct FileCacheStoreTrustTests {
+
+    private func store(in temp: Packet25TempDir) -> FileCacheStore {
+        FileCacheStore(fileURL: temp.file("cache.json"))
+    }
+
+    /// The load is synchronous and on the launch path, so an unbounded file is an unbounded
+    /// launch. Past the bound it reads as "no cache", which costs a scan and never shows a row.
+    @Test("oversizedCacheLoadsNil")
+    func oversizedCacheLoadsNil() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let store = store(in: temp)
+
+        // Valid JSON, over the bound: the size check has to come before the decode, which is
+        // the expensive part this exists to skip.
+        let padding = String(repeating: "a", count: FileCacheStore.maximumFileBytes + 1024)
+        let json = "{\"schemaVersion\":1,\"manuallyAddedRepos\":[\"\(padding)\"],"
+            + "\"hiddenRepoIDs\":[],\"collapsedRepoIDs\":[],\"prCache\":[]}"
+        try Data(json.utf8).write(to: temp.file("cache.json"))
+        #expect(json.utf8.count > FileCacheStore.maximumFileBytes)
+
+        #expect(try store.load() == nil)
+    }
+
+    /// A `scannedAt`, `refreshedAt` or `fetchedAt` in the future is not evidence of anything: it
+    /// makes every age check pass, so the scan never expires, the snapshot never looks stale, and
+    /// the PR cache never refetches. Each is dropped on its own, so the parts of the file that
+    /// are still credible — the roots the user picked, the repos they hid — survive.
+    @Test("futureDatesAreDroppedFromTheLoadedCache")
+    func futureDatesAreDropped() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let store = store(in: temp)
+
+        let ahead = Date().addingTimeInterval(365 * 86_400)
+        let repoID = RepoID(commonDir: "/Users/tester/work/branchbar/.git")
+        try store.save(CacheFile(
+            scan: ScanResult(policy: ScanPolicy(homeRoot: "/Users/tester"), scannedAt: ahead,
+                             repos: [DiscoveredRepo(path: "/Users/tester/work/branchbar", id: repoID)]),
+            manuallyAddedRepos: ["/Users/tester/work"],
+            hiddenRepoIDs: [repoID],
+            prCache: [repoID: PRCacheEntry(fetchedAt: ahead)],
+            lastSnapshot: Snapshot(repos: [], refreshedAt: ahead)))
+
+        let loaded = try #require(try store.load())
+        #expect(loaded.scan == nil, "a scan dated in the future was loaded as a usable scan")
+        #expect(loaded.lastSnapshot == nil, "a snapshot dated in the future was loaded")
+        #expect(loaded.prCache.isEmpty, "a PR entry fetched in the future was loaded")
+        #expect(loaded.manuallyAddedRepos == ["/Users/tester/work"], "the user's own roots survive")
+        #expect(loaded.hiddenRepoIDs == [repoID])
+    }
+
+    /// The complement, so the future check cannot quietly discard a normal cache: everything
+    /// written a moment ago loads back whole.
+    @Test("aCacheWrittenNowLoadsBackWhole")
+    func presentDatesSurvive() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let store = store(in: temp)
+
+        let justNow = Date(timeIntervalSince1970: (Date().timeIntervalSince1970 - 5).rounded())
+        let repoID = RepoID(commonDir: "/Users/tester/work/branchbar/.git")
+        let cache = CacheFile(
+            scan: ScanResult(policy: ScanPolicy(homeRoot: "/Users/tester"), scannedAt: justNow),
+            prCache: [repoID: PRCacheEntry(fetchedAt: justNow)],
+            lastSnapshot: Snapshot(repos: [], refreshedAt: justNow))
+        try store.save(cache)
+
+        let loaded = try #require(try store.load())
+        #expect(loaded.scan?.scannedAt == justNow)
+        #expect(loaded.prCache[repoID]?.fetchedAt == justNow)
+        #expect(loaded.lastSnapshot?.refreshedAt == justNow)
+    }
+}

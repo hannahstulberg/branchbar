@@ -223,4 +223,144 @@ struct ProcessCommandRunnerTests {
 
         #expect(output.standardOutputText == "-my-branch")
     }
+
+    // MARK: - Packet F3 — codex MAJOR 13 (process groups) and MAJOR 15 (bounded output)
+
+    /// The group kill in `terminateChild` is only correct while every child leads its own
+    /// process group, which is what Darwin's `Process` does (it spawns with
+    /// `POSIX_SPAWN_SETPGROUP` and pgroup 0). This is the guard on that assumption: if a future
+    /// Foundation leaves the child in BranchBar's own group, `kill(-pgid, …)` would signal the
+    /// app itself, and the runner's fallback has to be the one that runs.
+    @Test("childRunsInItsOwnProcessGroup")
+    func childRunsInItsOwnProcessGroup() async throws {
+        let directory = try Packet25TempDir()
+        defer { directory.remove() }
+        let pidFile = directory.url.appendingPathComponent("child.pid").path
+
+        let task = Task {
+            try await ProcessCommandRunner().run(
+                Self.shell("echo $$ > '\(pidFile)'; exec sleep 30", timeout: 120)
+            )
+        }
+        let childPID = try await Self.awaitPID(inFile: pidFile)
+
+        #expect(getpgid(childPID) == childPID,
+                "the child is expected to lead its own process group; it is in \(getpgid(childPID))")
+        #expect(getpgid(childPID) != getpgid(0), "the child must not share BranchBar's group")
+
+        task.cancel()
+        _ = try? await task.value
+    }
+
+    /// codex MAJOR 13. The existing cancellation test `exec`s, so the pid the runner signals is
+    /// the only process there is. A real `git` forks helpers — credential helpers, `git-remote-*`,
+    /// a lazy fetch — and a helper that outlives the signal keeps the pipe write ends open after
+    /// the app has reported the command finished.
+    ///
+    /// The parent here does not `exec`: it starts a background `sleep` and waits. It also ignores
+    /// SIGTERM, and `sleep` inherits that disposition across its own exec, which is what a
+    /// wrapper that installs its own handler does. So only the escalation matters, and the
+    /// escalation was `kill(processIdentifier, SIGKILL)` — one pid, leaving the grandchild
+    /// running. Both signals have to reach the whole process group.
+    @Test("cancellationKillsAGrandchildThatDidNotExec")
+    func cancellationKillsAGrandchildThatDidNotExec() async throws {
+        let directory = try Packet25TempDir()
+        defer { directory.remove() }
+        let parentFile = directory.url.appendingPathComponent("parent.pid").path
+        let grandchildFile = directory.url.appendingPathComponent("grandchild.pid").path
+
+        let task = Task {
+            try await ProcessCommandRunner().run(
+                Self.shell(
+                    "trap '' TERM; sleep 30 & echo $! > '\(grandchildFile)'; echo $$ > '\(parentFile)'; wait",
+                    timeout: 120)
+            )
+        }
+
+        let parentPID = try await Self.awaitPID(inFile: parentFile)
+        let grandchildPID = try await Self.awaitPID(inFile: grandchildFile)
+        #expect(grandchildPID != parentPID)
+        #expect(kill(grandchildPID, 0) == 0, "the grandchild should be alive before cancellation")
+
+        task.cancel()
+        await #expect(throws: CommandError.cancelled) { try await task.value }
+
+        #expect(await Self.waitUntilGone(parentPID), "pid \(parentPID) outlived its cancellation")
+        #expect(await Self.waitUntilGone(grandchildPID),
+                "grandchild pid \(grandchildPID) survived the cancellation with the pipes still open")
+    }
+
+    /// codex MAJOR 15: stdout and stderr are read to EOF into memory, so a repo with an enormous
+    /// ref list — or a command that has started printing a loop — can end the app before any
+    /// timeout helps. Past the cap the child is terminated and the caller gets a distinct error
+    /// rather than a truncated answer that would read as a short branch list.
+    @Test("stdoutBeyondTheCapTerminatesTheChildWithOutputTooLarge")
+    func stdoutBeyondTheCapTerminatesTheChildWithOutputTooLarge() async throws {
+        let over = ProcessCommandRunner.maximumOutputBytes + 1_000_000
+        let started = Date()
+
+        do {
+            let output = try await ProcessCommandRunner().run(
+                Self.shell(Self.writeBytes(to: "stdout", count: over), timeout: 120))
+            Issue.record("expected outputTooLarge, got \(output.standardOutput.count) bytes")
+        } catch let error as CommandError {
+            #expect(error == .outputTooLarge(
+                stream: .standardOutput, limit: ProcessCommandRunner.maximumOutputBytes))
+        }
+
+        #expect(Date().timeIntervalSince(started) < 30, "the cap must end the read, not wait it out")
+    }
+
+    /// The same cap on the other pipe, because stderr is drained by its own reader.
+    @Test("stderrBeyondTheCapTerminatesTheChildWithOutputTooLarge")
+    func stderrBeyondTheCapTerminatesTheChildWithOutputTooLarge() async throws {
+        let over = ProcessCommandRunner.maximumOutputBytes + 1_000_000
+
+        do {
+            let output = try await ProcessCommandRunner().run(
+                Self.shell(Self.writeBytes(to: "stderr", count: over), timeout: 120))
+            Issue.record("expected outputTooLarge, got \(output.standardError.count) bytes")
+        } catch let error as CommandError {
+            #expect(error == .outputTooLarge(
+                stream: .standardError, limit: ProcessCommandRunner.maximumOutputBytes))
+        }
+    }
+
+    /// The cap is a cap, not a truncation: output just under it still arrives whole, so the
+    /// bound cannot quietly shorten a real branch list.
+    @Test("outputJustUnderTheCapIsReturnedWhole")
+    func outputJustUnderTheCapIsReturnedWhole() async throws {
+        let under = ProcessCommandRunner.maximumOutputBytes - 1024
+        let output = try await ProcessCommandRunner().run(
+            Self.shell(Self.writeBytes(to: "stdout", count: under), timeout: 120))
+
+        #expect(output.exitCode == 0)
+        #expect(output.standardOutput.count == under)
+    }
+
+    // MARK: Helpers
+
+    /// Waits for a child to publish its pid into `file`, which it does before it blocks.
+    private static func awaitPID(inFile file: String, timeout: TimeInterval = 5) async throws -> pid_t {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let text = try? String(contentsOfFile: file, encoding: .utf8),
+               let value = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return value
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        throw CancellationError()
+    }
+
+    /// True once `pid` is gone, polled for up to three seconds — the runner's own SIGTERM,
+    /// SIGKILL, force-finish sequence.
+    private static func waitUntilGone(_ pid: pid_t, timeout: TimeInterval = 6) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return false
+    }
 }

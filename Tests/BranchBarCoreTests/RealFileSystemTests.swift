@@ -60,10 +60,14 @@ struct RealFileSystemTests {
         #expect(byName["HEAD"]?.isDirectory == false)
         #expect(byName["HEAD"]?.isSymbolicLink == false)
 
-        // A symlink to a directory is both: the scanner needs `isDirectory` to decide whether to
-        // descend and `isSymbolicLink` to decide whether it should.
+        // codex BLOCKER 2: a symlink is reported from the link itself and its target is never
+        // stat'd. The scanner skips symlinks whatever `isDirectory` says, so following one to
+        // answer the question bought nothing and cost the scan a `stat` that a stalled automount
+        // or an unreachable network volume can hang forever — inside a synchronous listing that
+        // no deadline can cancel. A link therefore reports `isDirectory: false, isSymbolicLink:
+        // true`, whatever it points at.
         #expect(byName["linked-repo"]?.isSymbolicLink == true)
-        #expect(byName["linked-repo"]?.isDirectory == true)
+        #expect(byName["linked-repo"]?.isDirectory == false)
         #expect(byName["linked-HEAD"]?.isSymbolicLink == true)
         #expect(byName["linked-HEAD"]?.isDirectory == false)
 
@@ -124,5 +128,76 @@ struct RealFileSystemTests {
         // and it is never empty, because `ToolLocator` splits it.
         #expect(!fileSystem.pathEnvironment().isEmpty)
         #expect(fileSystem.pathEnvironment().contains("/usr/bin"))
+    }
+
+    /// codex BLOCKER 2, the half a unit test can reach: a link whose target does not answer must
+    /// not cost the listing anything. A link into a directory that cannot be stat'd stands in for
+    /// the stalled automount — the listing returns, and it returns the link as a link.
+    @Test("aSymlinkIntoAnUnreachableTargetStillListsWithoutStattingIt")
+    func symlinkIntoUnreachableTargetStillLists() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let manager = FileManager.default
+        let fileSystem = RealFileSystem()
+
+        try manager.createSymbolicLink(
+            at: temp.file("dangling"),
+            withDestinationURL: URL(fileURLWithPath: "/nowhere/branchbar/does/not/exist"))
+
+        let entries = try fileSystem.contentsOfDirectory(atPath: temp.url.path)
+        let dangling = try #require(entries.first { $0.name == "dangling" })
+        #expect(dangling.isSymbolicLink)
+        #expect(!dangling.isDirectory)
+    }
+
+    /// codex MAJOR 15. `.git` markers and reflogs are attacker-shaped inputs: a repo can carry a
+    /// gigabyte `.git` file or a gigabyte reflog, and a read to EOF puts all of it in memory.
+    /// `RealFileSystem` answers a bounded read with at most `maximumBytes`, read from the head.
+    @Test("readFileWithAMaximumReadsOnlyThatManyBytes")
+    func boundedReadStopsAtTheCap() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let fileSystem = RealFileSystem()
+
+        let big = temp.file("huge.git")
+        try Data(repeating: 0x41, count: 3_000_000).write(to: big)
+
+        let head = try fileSystem.readFile(atPath: big.path, maximumBytes: 4096)
+        #expect(head.count == 4096)
+        #expect(head.allSatisfy { $0 == 0x41 })
+
+        // A file smaller than the bound comes back whole.
+        let small = temp.file("small.git")
+        try Data("gitdir: /Users/tester/repo/.git/worktrees/wt\n".utf8).write(to: small)
+        #expect(try fileSystem.readFile(atPath: small.path, maximumBytes: 4096)
+                == (try fileSystem.readFile(atPath: small.path)))
+
+        // A missing file still throws, which is what the reflog reader's fallback expects.
+        #expect(throws: (any Error).self) {
+            _ = try fileSystem.readFile(atPath: temp.file("nope").path, maximumBytes: 4096)
+        }
+    }
+
+    /// The reflog reader wants the **newest** lines, which live at the end of the file, so the
+    /// bounded read it uses is a tail rather than a head.
+    @Test("readFileTailReadsTheLastBytesOfTheFile")
+    func boundedTailReadsTheEnd() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let fileSystem = RealFileSystem()
+
+        let file = temp.file("reflog")
+        let padding = String(repeating: "x", count: 200_000)
+        try Data((padding + "TAIL").utf8).write(to: file)
+
+        let tail = try fileSystem.readFileTail(atPath: file.path, maximumBytes: 1024)
+        #expect(tail.count == 1024)
+        #expect(String(decoding: tail, as: UTF8.self).hasSuffix("TAIL"))
+
+        // Smaller than the bound: the whole file, so a short reflog is unaffected.
+        let short = temp.file("short-reflog")
+        try Data("one line\n".utf8).write(to: short)
+        #expect(String(decoding: try fileSystem.readFileTail(atPath: short.path, maximumBytes: 1024),
+                       as: UTF8.self) == "one line\n")
     }
 }

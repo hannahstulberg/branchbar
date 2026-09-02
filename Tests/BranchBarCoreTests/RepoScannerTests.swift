@@ -395,3 +395,79 @@ struct RepoScannerGitFileClassificationTests {
         #expect(RepoScanner.classifyGitFile(contents: contents) == .unrecognized)
     }
 }
+
+// MARK: - Packet F3 — bounded reads (codex MAJOR 15) and a repo at the scan root (REVIEW WR-08)
+
+@Suite("RepoScanner reads a bounded prefix of a .git file and never stops at a root that is a repo")
+struct RepoScannerBoundedAndRootRepoTests {
+
+    private func scanner(_ fileSystem: InMemoryFileSystem) -> RepoScanner {
+        RepoScanner(fileSystem: fileSystem)
+    }
+
+    /// codex MAJOR 15: a `.git` file is a repository-controlled input, and the marker git writes
+    /// is one short line. Only the first `RepoScanner.maximumGitFileBytes` are read, so a repo
+    /// carrying a gigabyte `.git` file cannot be read into memory by the scan.
+    @Test("gitFileIsClassifiedFromABoundedPrefix")
+    func gitFileIsClassifiedFromABoundedPrefix() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+
+        // The marker line comes first, then far more bytes than the bound: still classified.
+        fs.addFile(
+            "/Users/tester/code/worktree/.git",
+            contents: "gitdir: /Users/tester/code/app/.git/worktrees/wt\n"
+                + String(repeating: "#", count: RepoScanner.maximumGitFileBytes * 2))
+
+        // The marker line sits past the bound: never read, so never classified, and the walk
+        // treats the directory as an ordinary folder rather than inventing a repo row.
+        fs.addFile(
+            "/Users/tester/code/hidden/.git",
+            contents: String(repeating: "#", count: RepoScanner.maximumGitFileBytes + 64)
+                + "\ngitdir: /Users/tester/code/elsewhere/.git\n")
+        fs.addRepository(at: "/Users/tester/code/hidden/inner")
+
+        let result = try await scanner(fs).scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+
+        #expect(result.skippedWorktreeCheckouts == ["/Users/tester/code/worktree"],
+                "the marker in the first bytes is still read")
+        #expect(!result.repos.map(\.path).contains("/Users/tester/code/hidden"))
+        #expect(result.repos.map(\.path).contains("/Users/tester/code/hidden/inner"),
+                "an unrecognized .git file does not stop the walk")
+    }
+
+    /// REVIEW WR-08. `git init` in `$HOME` with a `*` gitignore is a common dotfiles pattern.
+    /// The `.git` check runs on a directory before its children are enqueued, so a repo at the
+    /// scan root used to make that root the one and only candidate and end the walk there, with
+    /// every real repo under it invisible. The root is a repo **and** a folder to walk.
+    @Test("dotfilesRepoAtHomeRootDoesNotStopTheScan")
+    func dotfilesRepoAtHomeRootDoesNotStopTheScan() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addRepository(at: "/Users/tester")
+        fs.addRepository(at: "/Users/tester/code/app")
+        fs.addRepository(at: "/Users/tester/work/site")
+
+        let result = try await scanner(fs).scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+
+        #expect(result.repos.map(\.path) == [
+            "/Users/tester", "/Users/tester/code/app", "/Users/tester/work/site",
+        ])
+    }
+
+    /// The exception is the **home root only**. An "Add folder…" root that is itself a repo keeps
+    /// the plain rule — it is the folder the user pointed at, and `extraRootThatIsARepoYieldsItself`
+    /// has pinned that since packet 2.4. REVIEW WR-08 proposes extending the descent to added
+    /// roots as well; that would overturn a green test and PLAN.md §5's `descendIntoRepos: false`,
+    /// so it is left for whoever owns that decision. This test is the boundary between the two.
+    @Test("addedRootThatIsARepoIsListedWithoutDescending")
+    func addedRootThatIsARepoIsListedWithoutDescending() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory("/Volumes/work")
+        fs.addRepository(at: "/Volumes/work/mono")
+        fs.addRepository(at: "/Volumes/work/mono/packages/inner")
+
+        let result = try await scanner(fs).scan(
+            policy: ScanPolicy(homeRoot: "/Users/tester", extraRoots: ["/Volumes/work/mono"]))
+
+        #expect(result.repos.map(\.path) == ["/Volumes/work/mono"])
+    }
+}

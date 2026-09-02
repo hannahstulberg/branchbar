@@ -444,3 +444,229 @@ struct GHClientFallbackAndCacheTests {
                 "the cache is per repo; a second repo still runs its own list")
     }
 }
+
+// MARK: - Packet F3 — failure classification, one preflight per host, and per-refresh caches
+
+/// A `CommandRunner` that answers a scripted sequence, so a test can make the same invocation
+/// fail once and then succeed. `RecordedCommandRunner` matches a stub table and always returns
+/// the same answer for the same argument array, which cannot express "the first attempt was
+/// cancelled".
+private final class ScriptedRunner: CommandRunner, @unchecked Sendable {
+    private let lock = NSLock()
+    private var scripted: [String: [RecordedCommandRunner.StubResult]] = [:]
+    private var _calls: [Command] = []
+    /// Held before answering, so overlapping callers really do overlap.
+    var delay: TimeInterval = 0
+
+    var calls: [Command] { lock.lock(); defer { lock.unlock() }; return _calls }
+
+    func script(_ arguments: [String], _ results: [RecordedCommandRunner.StubResult]) {
+        lock.lock(); defer { lock.unlock() }
+        scripted[arguments.joined(separator: "\u{1}")] = results
+    }
+
+    func run(_ command: Command) async throws -> CommandOutput {
+        let key = command.arguments.joined(separator: "\u{1}")
+        let result: RecordedCommandRunner.StubResult? = lock.withLock {
+            _calls.append(command)
+            guard var queue = scripted[key], !queue.isEmpty else { return nil }
+            let next = queue.removeFirst()
+            // The last scripted answer repeats, so a caller that runs one extra time is not a
+            // crash but an observable extra call.
+            if !queue.isEmpty { scripted[key] = queue }
+            return next
+        }
+        if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+
+        guard let result else {
+            Issue.record("unscripted command: \(command.displayString)")
+            throw CommandError.launchFailed(executable: command.executable, message: "unscripted")
+        }
+        switch result {
+        case .output(let output): return output
+        case .failure(let error): throw error
+        }
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () -> T) -> T {
+        lock(); defer { unlock() }
+        return body()
+    }
+}
+
+@Suite("GHClient classifies 403 honestly, preflights a host once, and can be reset per refresh")
+struct GHClientHardeningTests {
+
+    /// codex MAJOR 11. SAML enforcement, a missing `repo` scope, an IP allow-list denial and a
+    /// repository policy are all HTTP 403, and `rateLimited`'s copy says waiting a few minutes
+    /// fixes it — false for every one of them, and most misleading on exactly the managed
+    /// account this ships to. Only an explicit rate-limit message or a 429 is rate limiting.
+    @Test("plain403IsNotRateLimited")
+    func plain403IsNotRateLimited() async throws {
+        let saml = "HTTP 403: Resource protected by organization SAML enforcement. "
+            + "You must grant your OAuth token access to this organization (https://api.github.com/graphql)\n"
+            + "trailing diagnostic line\n"
+        let availability = GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: saml), host: "github.com")
+
+        #expect(reason(availability) == .ghNotAuthenticated(host: "github.com"))
+        #expect(detail(availability)?.hasPrefix("HTTP 403: Resource protected") == true)
+        #expect(detail(availability)?.contains("trailing diagnostic line") == false,
+                "the first stderr line is the diagnostic")
+
+        // The scope failure and the plain forbidden body take the same path.
+        #expect(reason(GHClient.availability(
+            forFailedCommand: .nonZeroExit(
+                exitCode: 1,
+                standardError: "HTTP 403: Must have admin rights to Repository. (https://api.github.com/graphql)"),
+            host: "github.com")) == .ghNotAuthenticated(host: "github.com"))
+
+        // And the real rate limit still is one, message or status code.
+        #expect(reason(GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: Fixture.text("synthetic-gh-rate-limit-403.txt")),
+            host: "github.com")) == .rateLimited)
+        #expect(reason(GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: "You have exceeded a secondary RATE LIMIT."),
+            host: "github.com")) == .rateLimited)
+    }
+
+    /// REVIEW WR-02. A renamed, deleted, or no-longer-visible repo answers 404 or "Could not
+    /// resolve to a Repository". Neither is rate limiting and neither is fixed by signing in
+    /// again, so both keep the neutral `commandFailed` reason carrying the line that says what
+    /// happened.
+    @Test("notFoundRepoIsCommandFailed")
+    func notFoundRepoIsCommandFailed() async throws {
+        let resolve = "GraphQL: Could not resolve to a Repository with the name 'hannahstulberg/gone'. (repository)\n"
+        let resolved = GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: resolve), host: "github.com")
+        #expect(reason(resolved) == .commandFailed)
+        #expect(detail(resolved)?.contains("Could not resolve to a Repository") == true)
+
+        let notFound = GHClient.availability(
+            forFailedCommand: .nonZeroExit(
+                exitCode: 1, standardError: "HTTP 404: Not Found (https://api.github.com/repos/x/y)"),
+            host: "github.com")
+        #expect(reason(notFound) == .commandFailed)
+
+        // A 403 that names the missing repo is the repo's problem, not the token's.
+        let both = GHClient.availability(
+            forFailedCommand: .nonZeroExit(
+                exitCode: 1,
+                standardError: "HTTP 403: Could not resolve to a Repository with the name 'x/y'."),
+            host: "github.com")
+        #expect(reason(both) == .commandFailed)
+    }
+
+    /// codex MINOR 2. Four repo tasks reach `authStatus` at once, all see an empty memo, all
+    /// suspend inside `runner.run`, and four `gh auth status` processes start before the first
+    /// one memoizes anything. The memo has to hold the in-flight `Task`, not only its result.
+    @Test("concurrentReposIssueOneAuthStatusPerHost")
+    func concurrentReposIssueOneAuthStatusPerHost() async throws {
+        let runner = RecordedCommandRunner()
+        runner.tracksConcurrency = true
+        runner.stub(.init(
+            executableName: "gh",
+            arguments: GH.authArguments(host: "github.com"),
+            result: .stdout(Fixture.text("recorded-gh-auth-status-github.com.txt")),
+            delay: 0.2))
+        let client = GHClient(runner: runner, ghPath: GH.path)
+
+        await withTaskGroup(of: PRAvailability.self) { group in
+            for _ in 0..<4 {
+                group.addTask { await client.authStatus(host: "github.com") }
+            }
+            for await availability in group { #expect(availability == .available) }
+        }
+
+        #expect(runner.calls(matchingExecutable: "gh").count == 1,
+                "four repos on one host issued \(runner.calls(matchingExecutable: "gh").count) auth checks")
+        #expect(runner.peakInFlight <= 1)
+    }
+
+    /// REVIEW CR-02. A `gh auth status` that was cancelled by the refresh deadline, or that timed
+    /// out on a slow keychain, says nothing about whether the account is signed in. Memoizing it
+    /// makes one slow first refresh report "PR status did not load" for the rest of the session.
+    @Test("cancelledAuthCheckIsNotMemoized")
+    func cancelledAuthCheckIsNotMemoized() async throws {
+        let runner = ScriptedRunner()
+        runner.script(GH.authArguments(host: "github.com"), [
+            .failure(.cancelled),
+            .failure(.timedOut(after: 10)),
+            .stdout(Fixture.text("recorded-gh-auth-status-github.com.txt")),
+        ])
+        let client = GHClient(runner: runner, ghPath: GH.path)
+
+        #expect(reason(await client.authStatus(host: "github.com")) == .commandFailed)
+        #expect(reason(await client.authStatus(host: "github.com")) == .commandFailed)
+        #expect(await client.authStatus(host: "github.com") == .available,
+                "a cancelled or timed-out preflight was memoized as a failure")
+        #expect(runner.calls.count == 3)
+
+        // A real answer is still memoized: the retry is for the two that are not answers.
+        #expect(await client.authStatus(host: "github.com") == .available)
+        #expect(runner.calls.count == 3)
+    }
+
+    /// REVIEW CR-02. `AppModel` keeps one `GHClient` for the life of the process, so "Refresh PRs
+    /// now" has to reach past the actor's own list caches, and a sign-in that happened between
+    /// refreshes has to be re-checked.
+    @Test("bypassSkipsInMemoryPRCache")
+    func bypassSkipsInMemoryPRCache() async throws {
+        let runner = RecordedCommandRunner()
+        GH.stubAuthSuccess(runner)
+        runner.stubGH(GH.recentArguments(GH.personalAgent),
+                      stdout: Fixture.text("synthetic-gh-pr-list-mixed.json"))
+        runner.stubGH(GH.authorArguments(GH.personalAgent),
+                      stdout: Fixture.text("recorded-gh-pr-list-author-me-hannah-personal-agent.json"))
+        let client = GHClient(runner: runner, ghPath: GH.path)
+
+        _ = await client.recentPullRequests(slug: GH.personalAgent)
+        _ = await client.recentPullRequests(slug: GH.personalAgent)
+        #expect(runner.calls(matchingExecutable: "gh").filter { $0.arguments.contains("--state") }.count == 1)
+
+        _ = await client.recentPullRequests(slug: GH.personalAgent, bypass: true)
+        _ = await client.openAuthoredPullRequests(slug: GH.personalAgent)
+        _ = await client.openAuthoredPullRequests(slug: GH.personalAgent, bypass: true)
+
+        let listCalls = runner.calls(matchingExecutable: "gh").filter { $0.arguments.first == "pr" }
+        #expect(listCalls.count == 4, "bypass served \(listCalls.count) calls; it must re-fetch each time")
+        // The bypassed fetch replaces the entry, so the next cached read is the fresh one.
+        _ = await client.recentPullRequests(slug: GH.personalAgent)
+        #expect(runner.calls(matchingExecutable: "gh").filter { $0.arguments.first == "pr" }.count == 4)
+    }
+
+    /// REVIEW CR-02, the other half: the client outlives one refresh, so the per-refresh promises
+    /// in its own doc comment need a way to come true. After a reset the host is preflighted
+    /// again — which is what makes the app's own "Open Terminal → `gh auth login` → Refresh"
+    /// flow able to succeed without a relaunch.
+    @Test("resetForNewRefreshClearsTheAuthMemoAndTheListCaches")
+    func resetForNewRefreshClearsTheMemos() async throws {
+        let runner = ScriptedRunner()
+        runner.script(GH.authArguments(host: "github.com"), [
+            .exit(1, stderr: Fixture.text("synthetic-gh-auth-status-401.txt")),
+            .stdout(Fixture.text("recorded-gh-auth-status-github.com.txt")),
+        ])
+        runner.script(GH.recentArguments(GH.personalAgent), [
+            .stdout(Fixture.text("synthetic-gh-pr-list-empty.json")),
+        ])
+        let client = GHClient(runner: runner, ghPath: GH.path)
+
+        #expect(reason(await client.authStatus(host: "github.com")) == .ghNotAuthenticated(host: "github.com"))
+
+        await client.resetForNewRefresh()
+
+        #expect(await client.authStatus(host: "github.com") == .available,
+                "the sign-in that just happened is invisible until the memo is cleared")
+        #expect(value(await client.recentPullRequests(slug: GH.personalAgent))?.isEmpty == true)
+
+        // And the list caches are cleared too, so a refresh after a reset re-fetches.
+        await client.resetForNewRefresh()
+        runner.script(GH.recentArguments(GH.personalAgent), [
+            .stdout(Fixture.text("synthetic-gh-pr-list-empty.json")),
+        ])
+        _ = await client.recentPullRequests(slug: GH.personalAgent)
+        #expect(runner.calls.filter { $0.arguments.first == "pr" }.count == 2)
+    }
+}

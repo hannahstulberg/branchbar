@@ -271,3 +271,76 @@ struct ReflogFileReaderTests {
         }
     }
 }
+
+// MARK: - Packet F3 — codex MAJOR 15, the reflog is read as a bounded tail
+
+/// A reflog is a repository-controlled file that grows without a bound git enforces, and the
+/// reader wanted the newest lines all along. Reading it to EOF put an attacker-chosen number of
+/// bytes in memory for a fact that lives in the last few hundred of them, so the reader now takes
+/// the last `ReflogFileReader.maximumTailBytes` and parses from the last **complete** line in
+/// that window.
+@Suite("ReflogFileReader reads a bounded tail and never parses a half line")
+struct ReflogFileReaderTailBoundTests {
+
+    private static func reader(contents: String) -> ReflogFileReader {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addFile(
+            ReflogFileReader.reflogPath(
+                commonDirectory: "/Users/tester/repo/.git", remote: "origin", branch: "main"),
+            contents: contents)
+        return ReflogFileReader(fileSystem: fs)
+    }
+
+    private static func observation(_ reader: ReflogFileReader) throws -> ReflogObservation? {
+        try reader.observation(
+            commonDirectory: "/Users/tester/repo/.git", remote: "origin", branch: "main")
+    }
+
+    /// One line longer than the window. Read whole it parses — the header's last two fields are a
+    /// unix time and a timezone — so an unbounded reader answers with an OID taken from the
+    /// middle of a line it happened to start reading in. Read as a bounded tail there is no
+    /// complete line in the window at all, and the answer is "no push observed", which sends
+    /// `PushInfoDeriver` to its tip-commit-date fallback.
+    @Test("aLineLongerThanTheTailWindowIsNeverParsedFromItsMiddle")
+    func partialLineInTheWindowIsNotParsed() throws {
+        let padding = String(repeating: "word ", count: ReflogFileReader.maximumTailBytes / 4)
+        let line = padding
+            + "0000000000000000000000000000000000000001 "
+            + "0000000000000000000000000000000000000002 "
+            + "Tester tester@example.com 1788310851 -0400\tupdate by push"
+
+        // The parser itself still reads the whole string it is handed: the bound is the read.
+        #expect(ReflogFileReader.parse(line) != nil)
+
+        #expect(try Self.observation(Self.reader(contents: line)) == nil,
+                "a half line in the tail window was parsed as if it were a whole one")
+    }
+
+    /// A push line older than the window is not read, and the newest one still is — the two
+    /// halves of "bounded tail" that matter to the product: recent history answers, ancient
+    /// history costs nothing.
+    @Test("theTailWindowHoldsTheNewestLinesAndDropsWhatIsOlderThanIt")
+    func tailWindowHoldsTheNewestLines() throws {
+        let old = "0000000000000000000000000000000000000001 "
+            + "00000000000000000000000000000000000000aa "
+            + "Tester tester@example.com 1700000000 -0400\tupdate by push"
+        // Lines that carry no push, enough of them to push `old` out of the window.
+        let filler = (0..<600).map { index in
+            "00000000000000000000000000000000000000aa "
+                + "00000000000000000000000000000000000000bb "
+                + "Tester tester@example.com \(1_700_000_100 + index) -0400\tfetch origin"
+                + String(repeating: " padding", count: 16)
+        }.joined(separator: "\n")
+        #expect(filler.utf8.count > ReflogFileReader.maximumTailBytes)
+
+        #expect(try Self.observation(Self.reader(contents: old + "\n" + filler)) == nil,
+                "a push line older than the tail window was still read")
+
+        let newest = "00000000000000000000000000000000000000bb "
+            + "00000000000000000000000000000000000000cc "
+            + "Tester tester@example.com 1788310851 -0400\tupdate by push"
+        let found = try #require(try Self.observation(Self.reader(contents: old + "\n" + filler + "\n" + newest)))
+        #expect(found.newOID == "00000000000000000000000000000000000000cc")
+        #expect(found.pushedAt == Date(timeIntervalSince1970: 1_788_310_851))
+    }
+}

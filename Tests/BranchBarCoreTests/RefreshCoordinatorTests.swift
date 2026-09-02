@@ -65,7 +65,11 @@ import Testing
 //
 // 7. **The `ScanPolicy` comes from the cache.** The frozen init carries no home root, so the
 //    policy for a rescan is `CacheFile.scan?.policy` with `CacheFile.manuallyAddedRepos` as extra
-//    roots. Every test here seeds a cached `ScanResult` so the home root is explicit; the
+//    roots. **Revised by codex MAJOR 2** (`cachedScanPolicyIsNotTrusted`): a cache file is
+//    attacker-writable, and its policy decides which folders the app opens, so the policy is now
+//    rebuilt from the injected defaults plus the cache's `manuallyAddedRepos`. `makeHarness`
+//    injects the same home root the cached policies below name, so every assertion here is
+//    unchanged. Every test here seeds a cached `ScanResult` so the home root is explicit; the
 //    first-ever-launch case (no cached scan at all) needs a default home root the frozen init
 //    cannot express and is therefore left to the implementer (see the parameter list below).
 //    "The cache has none" is exercised as a cached scan whose `repos` is empty.
@@ -189,7 +193,8 @@ private enum Stage: CaseIterable, Sendable {
         case .remotes:
             return ["-C", path, "for-each-ref", GitClient.remotesFormat, "--", "refs/remotes/"]
         case .worktrees:
-            return ["-C", path, "worktree", "list", "--porcelain"]
+            // `-z` since codex MAJOR 12; the recorded and synthetic fixtures are NUL-delimited.
+            return ["-C", path, "worktree", "list", "--porcelain", "-z"]
         }
     }
 
@@ -416,12 +421,18 @@ private func makeHarness(
         policy: policy
     )
 
+    // codex MAJOR 2 (cache trust): the scan policy is no longer taken from the cache, so the
+    // harness supplies the trusted defaults the app supplies — the in-memory home root, and the
+    // in-memory file system the fallback reads it from. Neither changes what any assertion below
+    // expects: the cached policies these tests seed name exactly this home root.
     let coordinator = RefreshCoordinator(
         scanner: RepoScanner(fileSystem: fileSystem),
         loader: loader,
         cache: cache,
         policy: policy,
-        now: clock.closure
+        now: clock.closure,
+        scanPolicy: ScanPolicy(homeRoot: RepoStub.home),
+        fileSystem: fileSystem
     )
 
     return Harness(
@@ -1124,5 +1135,169 @@ struct RefreshCoordinatorScanDeadlineTests {
         #expect(elapsed < 5, "the refresh waited out the scan deadline: \(elapsed) s")
         #expect(Set(snapshot.repos.map(\.path)) == Set(RepoStub.all.map(\.path)))
         #expect(harness.cache.current?.scan?.truncatedByDeadline == false)
+    }
+}
+
+// MARK: - Packet F3 — cache trust (codex MAJOR 2, MINOR 5) and the end-of-refresh merge (REVIEW CR-03)
+
+/// The cache is a latency optimisation and an attacker-writable file, and the coordinator is the
+/// only thing that acts on it. These tests pin what it refuses to believe.
+@Suite("The coordinator rebuilds what it can and reuses only what a scan actually established", .serialized)
+struct RefreshCoordinatorCacheTrustTests {
+
+    /// codex MINOR 5. A machine with no repos, or one whose repos are all inside a denied folder,
+    /// repeated the whole home walk — and its TCC exposure — on every refresh, because
+    /// `scanIsUsable` demanded a non-empty repo list. A scan that ran, finished, and found
+    /// nothing is a finished scan; only an explicit rescan, the 7-day age, or a truncation
+    /// makes it walk again.
+    @Test("recentEmptyScanIsReusedWithoutRescanning")
+    func recentEmptyScanIsReusedWithoutRescanning() async throws {
+        // `candidatesExamined` is what separates "the walk ran and found nothing" from the empty
+        // placeholder a machine that has never scanned leaves behind.
+        var empty = ScanResult(
+            policy: ScanPolicy(homeRoot: RepoStub.home),
+            scannedAt: Date(timeIntervalSince1970: 1_788_399_000),
+            repos: [],
+            candidatesExamined: 412)
+        empty.truncatedByDeadline = false
+
+        let harness = makeHarness(
+            policy: RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0),
+            cacheFile: CacheFile(scan: empty))
+
+        let snapshot = await harness.coordinator.refresh(
+            force: false, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+
+        #expect(snapshot.repos.isEmpty, "a finished empty scan was walked again and found the tree's repos")
+        #expect(harness.runner.callCount == 0, "no repo means no command")
+        #expect(harness.cache.current?.scan?.candidatesExamined == 412, "the finished scan was kept")
+
+        // An explicit rescan still walks, so the user is never stuck with an empty list.
+        let rescanned = await harness.coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in }, rescan: true)
+        #expect(Set(rescanned.repos.map(\.name)) == Set(RepoStub.all.map(\.name)))
+    }
+
+    /// codex MAJOR 2. A cached `scannedAt` in the future makes the age negative, so the 7-day
+    /// check passes forever and the repo list is frozen at whatever the cache says. A timestamp
+    /// that has not happened yet is not evidence of anything.
+    @Test("futureScannedAtForcesRescan")
+    func futureScannedAtForcesRescan() async throws {
+        let ahead = Date(timeIntervalSince1970: 1_788_400_000 + 365 * 86_400)
+        let cached = CacheFile(scan: ScanResult(
+            policy: ScanPolicy(homeRoot: RepoStub.home),
+            scannedAt: ahead,
+            repos: [RepoStub.branchbar.discovered],
+            candidatesExamined: 9))
+
+        let harness = makeHarness(
+            policy: RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0),
+            cacheFile: cached)
+
+        let snapshot = await harness.coordinator.refresh(
+            force: false, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+
+        #expect(Set(snapshot.repos.map(\.name)) == Set(RepoStub.all.map(\.name)),
+                "a scan dated in the future was trusted instead of redone")
+        let persisted = try #require(harness.cache.current?.scan)
+        #expect(persisted.scannedAt < ahead)
+    }
+
+    /// codex MAJOR 2. `ScanPolicy` decides which folders the app opens, and it round-tripped
+    /// through a file anyone with write access to Application Support can edit — a cached
+    /// `homeRoot` of `/` with an empty skip list turns a refresh into a full-disk walk. The
+    /// policy is rebuilt from the app's own defaults; only `manuallyAddedRepos`, which the folder
+    /// picker wrote, contributes roots.
+    @Test("cachedScanPolicyIsNotTrusted")
+    func cachedScanPolicyIsNotTrusted() async throws {
+        let fileSystem = InMemoryFileSystem(home: RepoStub.home)
+        for repo in RepoStub.all { fileSystem.addRepository(at: repo.path) }
+        // Probes, not repos: a `.git` file pointing into `…/modules/…` is recorded in
+        // `skippedSubmodules` and costs no git command, so each one says whether the walk reached
+        // that folder without adding a row the loader would then try to load.
+        fileSystem.addGitFile(at: "/Users/attacker/planted", gitdir: "/x/.git/modules/planted")
+        fileSystem.addGitFile(at: "/Volumes/planted/probe", gitdir: "/x/.git/modules/probe")
+        fileSystem.addGitFile(at: "/Volumes/work/added", gitdir: "/x/.git/modules/added")
+
+        let runner = RecordedCommandRunner()
+        let policy = RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0)
+        for repo in RepoStub.all {
+            stubGit(repo, into: runner, delay: 0, failing: [])
+            stubGH(repo, into: runner)
+        }
+
+        // A cache that names someone else's home folder, an extra root of its own, and no skips.
+        var hostile = ScanPolicy(homeRoot: "/Users/attacker")
+        hostile.extraRoots = ["/Volumes/planted"]
+        hostile.skipDirectoryNames = []
+        hostile.maxDepth = 99
+        let cache = InMemoryCacheStore(initial: CacheFile(
+            scan: ScanResult(policy: hostile, scannedAt: Date(timeIntervalSince1970: 1), repos: []),
+            manuallyAddedRepos: ["/Volumes/work"]))
+
+        let coordinator = RefreshCoordinator(
+            scanner: RepoScanner(fileSystem: fileSystem),
+            loader: RepoLoader(
+                git: GitClient(runner: runner, gitPath: gitPath),
+                gh: GHClient(runner: runner, ghPath: ghPath, policy: policy),
+                reflog: ReflogFileReader(fileSystem: fileSystem),
+                policy: policy),
+            cache: cache,
+            policy: policy,
+            now: { Date(timeIntervalSince1970: 1_788_400_000) },
+            scanPolicy: ScanPolicy(homeRoot: RepoStub.home),
+            fileSystem: fileSystem)
+
+        let snapshot = await coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+
+        #expect(Set(snapshot.repos.map(\.path)) == Set(RepoStub.all.map(\.path)))
+
+        let persisted = try #require(cache.current?.scan)
+        let reached = Set(persisted.skippedSubmodules)
+        #expect(reached.contains("/Volumes/work/added"), "the folder the user actually picked is a root")
+        #expect(!reached.contains("/Users/attacker/planted"), "the cached homeRoot was walked")
+        #expect(!reached.contains("/Volumes/planted/probe"), "a cached extra root was walked")
+        #expect(persisted.policy.homeRoot == RepoStub.home)
+        #expect(persisted.policy.extraRoots == ["/Volumes/work"])
+        #expect(persisted.policy.skipDirectoryNames == ScanPolicy.defaultSkipDirectoryNames)
+        #expect(persisted.policy.maxDepth == ScanPolicy(homeRoot: RepoStub.home).maxDepth)
+    }
+
+    /// REVIEW CR-03. `run()` loaded the whole cache file at the start of a refresh and wrote the
+    /// whole thing back at the end, so anything the shell persisted in between — an "Add folder…"
+    /// root, a hidden repo, a collapsed section — was silently reverted. Add folder is the TCC
+    /// rescue the plan leans on and it is reached during the first, longest refresh.
+    @Test("rootAddedDuringARefreshSurvivesItsSave")
+    func rootAddedDuringARefreshSurvivesItsSave() async throws {
+        let cached = CacheFile(scan: scanResult(RepoStub.all, scannedAt: Date(timeIntervalSince1970: 1_788_399_000)))
+        let harness = makeHarness(
+            policy: RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0),
+            cacheFile: cached,
+            delays: Dictionary(uniqueKeysWithValues: RepoStub.all.map { ($0.path, 0.2) }))
+
+        let refresh = Task {
+            await harness.coordinator.refresh(
+                force: false, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+        }
+        await waitUntil { harness.runner.callCount > 0 }
+
+        // Exactly what `AppModel.persist` does while a refresh is in flight.
+        var mid = try #require(harness.cache.current)
+        mid.manuallyAddedRepos = ["/Volumes/work"]
+        mid.hiddenRepoIDs = [RepoID(commonDir: RepoStub.charlie.path + "/.git")]
+        mid.collapsedRepoIDs = [RepoID(commonDir: RepoStub.branchbar.path + "/.git")]
+        try harness.cache.save(mid)
+
+        _ = await refresh.value
+
+        let after = try #require(harness.cache.current)
+        #expect(after.manuallyAddedRepos == ["/Volumes/work"],
+                "the refresh's save reverted the root the user added while it was running")
+        #expect(after.hiddenRepoIDs == mid.hiddenRepoIDs)
+        #expect(after.collapsedRepoIDs == mid.collapsedRepoIDs)
+        // And the refresh still persisted its own work.
+        #expect(after.lastSnapshot?.repos.count == RepoStub.all.count)
+        #expect(after.scan?.repos.count == RepoStub.all.count)
     }
 }
