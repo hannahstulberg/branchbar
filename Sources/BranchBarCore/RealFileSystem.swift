@@ -95,6 +95,64 @@ public struct RealFileSystem: FileSystem {
         return date
     }
 
+    /// One `open(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)` and a close (codex round 3,
+    /// BLOCKER 1). Each flag answers a different half of the question the row action asks:
+    ///
+    /// - `O_DIRECTORY` makes the kernel refuse anything that is not a directory, so a regular
+    ///   file — a `.command` document Terminal would execute — never reaches an action payload.
+    /// - `O_NOFOLLOW` refuses a symlink, because "the thing at this path" is what the row claims
+    ///   to open, not wherever it points today.
+    /// - `O_NONBLOCK` keeps a device or a FIFO at that path from parking this call in the kernel,
+    ///   which is the same unkillable state `readBoundedRegularFile` exists to avoid.
+    /// - `O_CLOEXEC` keeps the descriptor out of the children `ProcessCommandRunner` spawns.
+    ///
+    /// No `stat` of a path and no `FileManager.fileExists(atPath:isDirectory:)`: both answer for a
+    /// path that can change between the answer and its use, and both follow symlinks.
+    public func isDirectoryNoFollow(atPath path: String) -> Bool {
+        let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { return false }
+        close(descriptor)
+        return true
+    }
+
+    /// The same primitive `readBoundedRegularFile` opens with, stopping at the `fstat` (codex
+    /// round 3, BLOCKER 2).
+    ///
+    /// Absence is the **open's** errno and not a `fileExists` preflight: the preflight was a
+    /// second path lookup that answered a moment earlier about a path rather than about the
+    /// descriptor the answer would be used with, and `FETCH_HEAD`'s modification time came from a
+    /// URL resource-value read that follows symlinks and blocks on a FIFO — outside the killable
+    /// helper, on the startup path.
+    ///
+    /// `ENOENT` and `ENOTDIR` are "there is nothing here", which is nil. `ELOOP` is a symlink this
+    /// call refused to follow, which is also nothing this reader will vouch for. Everything else —
+    /// `EACCES` above all — is a failure the caller reports, because reading it as absence would
+    /// render "never pushed" for a branch whose history this process simply may not read. A path
+    /// that opens and is not `S_IFREG` throws too: a FIFO where a reflog belongs is a fact, not an
+    /// absence.
+    public func statRegularFile(atPath path: String) throws -> RegularFileStat? {
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            let code = errno
+            if code == ENOENT || code == ENOTDIR || code == ELOOP { return nil }
+            throw FileReadError.openFailed(path: path, code: code)
+        }
+        defer { close(descriptor) }
+
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else {
+            throw FileReadError.openFailed(path: path, code: errno)
+        }
+        guard (status.st_mode & S_IFMT) == S_IFREG else {
+            throw FileReadError.notARegularFile(path: path)
+        }
+        return RegularFileStat(
+            size: max(0, Int(status.st_size)),
+            modificationDate: Date(
+                timeIntervalSince1970: TimeInterval(status.st_mtimespec.tv_sec)
+                    + TimeInterval(status.st_mtimespec.tv_nsec) / 1_000_000_000))
+    }
+
     public func homeDirectory() -> String {
         manager.homeDirectoryForCurrentUser.path
     }

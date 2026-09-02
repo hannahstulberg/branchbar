@@ -54,6 +54,15 @@ public struct PushInfo: Hashable, Codable, Sendable {
     /// which a synthesized decoder demands a key for whatever default it carries — the field that
     /// made every 1.1-era cache fail to load (packet F12).
     public var remoteRefExists: Bool = false
+    /// `git for-each-ref -- refs/remotes/` answered for this repo (codex round 3, MAJOR 6).
+    ///
+    /// False means the listing **failed**, so `remoteRefExists == false` is "nobody looked", not
+    /// "there is no such branch". Without the distinction a failed listing produced no tip, the
+    /// deriver selected `.none`, and the row read "No tracked remote branch" above a tertiary line
+    /// claiming the branch was in sync with that same remote. Read with `decodeIfPresent` below,
+    /// so a cache written before the field loads as "the listing answered" — which is what every
+    /// refresh that wrote one had established.
+    public var remoteRefsKnown: Bool = true
 
     /// The `hasConfiguredUpstream` half of the codex round 2 MAJOR 5 split, under the name the
     /// finding uses. It is `hasUpstream`, which stays the stored name for cache compatibility.
@@ -67,6 +76,10 @@ public struct PushInfo: Hashable, Codable, Sendable {
         case tipCommitDate
         /// Nothing to show at all (no upstream, never pushed).
         case none
+        /// The reflog file held a line this app could not vouch for, so the walk stopped there
+        /// rather than reporting the push it found above the corruption (codex round 3, MAJOR 7).
+        /// The row says the push history is unreadable; it never falls back to a date.
+        case unreadable
     }
 
     public init(
@@ -80,7 +93,8 @@ public struct PushInfo: Hashable, Codable, Sendable {
         remoteRefObservedAt: Date? = nil,
         remoteTipCommitDate: Date? = nil,
         remoteName: String? = nil,
-        remoteRefExists: Bool = false
+        remoteRefExists: Bool = false,
+        remoteRefsKnown: Bool = true
     ) {
         self.observedPushAt = observedPushAt
         self.observedPushOID = observedPushOID
@@ -93,6 +107,7 @@ public struct PushInfo: Hashable, Codable, Sendable {
         self.remoteTipCommitDate = remoteTipCommitDate
         self.remoteName = remoteName
         self.remoteRefExists = remoteRefExists
+        self.remoteRefsKnown = remoteRefsKnown
     }
 
     /// Explicit for the reason spelled out on `PRCacheEntry.init(from:)` (packet F12). Of the
@@ -114,6 +129,7 @@ public struct PushInfo: Hashable, Codable, Sendable {
         remoteTipCommitDate = try container.decodeIfPresent(Date.self, forKey: .remoteTipCommitDate)
         remoteName = try container.decodeIfPresent(String.self, forKey: .remoteName)
         remoteRefExists = try container.decodeIfPresent(Bool.self, forKey: .remoteRefExists) ?? false
+        remoteRefsKnown = try container.decodeIfPresent(Bool.self, forKey: .remoteRefsKnown) ?? true
     }
 }
 

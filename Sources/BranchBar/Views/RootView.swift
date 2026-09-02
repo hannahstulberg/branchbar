@@ -170,7 +170,14 @@ struct RootView: View {
             case .closedUnmerged: rows = section.closedUnmerged
             }
             guard rows.indices.contains(index) else { return }
-            model.perform(rows[index].primaryAction)
+            // Optional since codex round 3, BLOCKER 1: a row whose worktree record is prunable
+            // names no folder, so Return on it does nothing rather than opening a path that is
+            // not there.
+            guard let action = rows[index].primaryAction else {
+                Log.info("action: \(rows[index].title) has no folder to open")
+                return
+            }
+            model.perform(action)
         case .prRow(let id, let index):
             guard let section = model.vm.sections.first(where: { $0.id == id }),
                   section.openElsewhere.indices.contains(index)

@@ -43,14 +43,58 @@ public enum SafeText {
         return escaped
     }
 
-    /// C0 (U+0000–U+001F), DEL (U+007F), and C1 (U+0080–U+009F). C1 is in the list because
-    /// U+009B is a single-scalar CSI that some terminals honour exactly like `ESC [`.
+    /// C0 (U+0000–U+001F), DEL (U+007F), C1 (U+0080–U+009F), and the Unicode bidirectional
+    /// formatting scalars. C1 is in the list because U+009B is a single-scalar CSI that some
+    /// terminals honour exactly like `ESC [`.
+    ///
+    /// The bidi scalars joined it in codex round 3, MINOR 4. They are not control characters in
+    /// the C0 sense and no terminal executes them, which is why they were missed; what they do is
+    /// reorder the glyphs **around** them, so a branch or folder named with a U+202E inside can
+    /// make the text after it in a CLI table or a log line read backwards — a row that says
+    /// something other than what the bytes say, in output whose whole job is to be believed.
+    /// U+202A–U+202E are the overrides and embeddings, U+2066–U+2069 the isolates.
     public static func isControlScalar(_ scalar: Unicode.Scalar) -> Bool {
-        scalar.value < 0x20 || (scalar.value >= 0x7F && scalar.value <= 0x9F)
+        if scalar.value < 0x20 || (scalar.value >= 0x7F && scalar.value <= 0x9F) { return true }
+        return isBidiControlScalar(scalar)
+    }
+
+    /// U+202A LRE, U+202B RLE, U+202C PDF, U+202D LRO, U+202E RLO, and U+2066–U+2069, the four
+    /// isolate scalars (LRI, RLI, FSI, PDI).
+    public static func isBidiControlScalar(_ scalar: Unicode.Scalar) -> Bool {
+        (0x202A...0x202E).contains(scalar.value) || (0x2066...0x2069).contains(scalar.value)
+    }
+
+    /// First strong isolate, and its terminator: everything between them is laid out as its own
+    /// run, so a right-to-left name cannot reorder the columns beside it.
+    public static let isolatePrefix = "\u{2068}"
+    public static let isolateSuffix = "\u{2069}"
+
+    /// One displayed cell: escaped, then isolated (codex round 3, MINOR 4).
+    ///
+    /// Escaping alone stops a cell from *carrying* a bidi control. It does not stop a cell whose
+    /// text is genuinely right-to-left from reordering the cells printed after it on the same
+    /// line, which is the same lie by a different route. Wrapping each cell in FSI…PDI bounds the
+    /// reordering to the cell, which is what the column it sits in means.
+    ///
+    /// An all-ASCII cell is left alone: the isolate is invisible either way, and every table this
+    /// package prints today is compared against byte-for-byte expectations in tests and in the
+    /// Gate 3 diff.
+    public static func displayCell(_ text: String) -> String {
+        isolated(escapingControlScalars(text))
+    }
+
+    /// Wraps already-escaped text in FSI…PDI, unless it is plain ASCII and so cannot reorder
+    /// anything.
+    static func isolated(_ escaped: String) -> String {
+        guard escaped.unicodeScalars.contains(where: { $0.value > 0x7F }) else { return escaped }
+        return isolatePrefix + escaped + isolateSuffix
     }
 
     /// Left-aligned columns padded to the widest cell, every cell escaped first — so the widths
     /// are measured on what is actually printed and a cell can never contribute a row of its own.
+    /// Widths are measured on the **escaped** cell and the isolate scalars are added at render
+    /// time, so the two zero-width formatting characters do not each count as a column of padding
+    /// (codex round 3, MINOR 4).
     public static func table(header: [String], rows: [[String]]) -> String {
         let header = header.map(escapingControlScalars)
         let rows = rows.map { $0.map(escapingControlScalars) }
@@ -60,17 +104,18 @@ public enum SafeText {
         for row in all {
             for index in 0..<columns { widths[index] = max(widths[index], row[index].count) }
         }
-        func render(_ row: [String]) -> String {
+        func render(_ row: [String], isolating: Bool = true) -> String {
             (0..<columns).map { index in
-                index == columns - 1
-                    ? row[index]
-                    : row[index].padding(toLength: widths[index], withPad: " ", startingAt: 0)
+                let cell = isolating ? isolated(row[index]) : row[index]
+                guard index != columns - 1 else { return cell }
+                return cell + String(repeating: " ", count: max(0, widths[index] - row[index].count))
             }
             .joined(separator: "  ")
             .trimmingCharacters(in: CharacterSet(charactersIn: " "))
         }
-        return ([render(header), render(widths.map { String(repeating: "-", count: $0) })]
-            + rows.map(render)).joined(separator: "\n")
+        return ([render(header),
+                 render(widths.map { String(repeating: "-", count: $0) }, isolating: false)]
+            + rows.map { render($0) }).joined(separator: "\n")
     }
 }
 

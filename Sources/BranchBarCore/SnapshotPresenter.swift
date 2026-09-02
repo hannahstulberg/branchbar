@@ -159,7 +159,13 @@ public struct SnapshotPresenter: Sendable {
             pushLabel: push.label,
             pushTooltip: push.tooltip,
             aheadLabel: aheadLabel(for: branch),
-            primaryAction: openAction(path: branch.worktreePath ?? repo.path),
+            // codex round 3, BLOCKER 1. A worktree path only reaches `Branch.worktreePath` after
+            // `RepoAssembler` refused every prunable and bare record, and `RepoLoader` marks a
+            // record prunable when its path is not an existing directory; the repo's own folder
+            // carries the same verdict in `pathIsDirectory`. A row with neither offers nothing to
+            // click, because the last editor in the fallback chain executes what it is handed.
+            primaryAction: branch.worktreePath.map(openAction(path:))
+                ?? (repo.pathIsDirectory ? openAction(path: repo.path) : nil),
             accessibilityLabel: Strings.branchRowAccessibilityLabel(
                 branchName: branch.name,
                 prPill: pillText,
@@ -186,7 +192,11 @@ public struct SnapshotPresenter: Sendable {
                     pushLabel: "",
                     pushTooltip: "",
                     aheadLabel: nil,
-                    primaryAction: openAction(path: worktree.path),
+                    // The row still lists the worktree — it is part of the repo and saying so is
+                    // information — but a record git calls prunable, or one whose path this
+                    // refresh could not open as a directory, has nothing to offer a click
+                    // (codex round 3, BLOCKER 1).
+                    primaryAction: worktree.isPrunable ? nil : openAction(path: worktree.path),
                     accessibilityLabel: marker
                 )
             }
@@ -227,13 +237,27 @@ public struct SnapshotPresenter: Sendable {
             label = Strings.pushUnknown(
                 tipCommitDate: push.remoteTipCommitDate ?? branch.committerDate, now: now)
             tooltip = Strings.pushUnknownTooltip
+        case .unreadable:
+            // codex round 3, MAJOR 7: the reflog walk stopped at a line it could not vouch for.
+            // Falling through to `.tipCommitDate` here would state a date over the corruption
+            // that stopped the walk, which is the fabricated push history the finding is about.
+            label = Strings.pushHistoryUnreadable
+            tooltip = Strings.pushHistoryUnreadableTooltip
         case .none:
-            // Not "Never pushed": no tracking configuration is not evidence that nothing left
-            // this Mac, and the reflog for `origin/<branch>` was either absent or never read
-            // (codex MAJOR 6). A gone upstream that was never fetched lands here too, and the
-            // tertiary line says so beside this one.
-            label = Strings.noTrackedRemoteBranch
-            tooltip = Strings.noTrackedRemoteBranchTooltip
+            if push.remoteRefsKnown {
+                // Not "Never pushed": no tracking configuration is not evidence that nothing left
+                // this Mac, and the reflog for `origin/<branch>` was either absent or never read
+                // (codex MAJOR 6). A gone upstream that was never fetched lands here too, and the
+                // tertiary line says so beside this one.
+                label = Strings.noTrackedRemoteBranch
+                tooltip = Strings.noTrackedRemoteBranchTooltip
+            } else {
+                // codex round 3, MAJOR 6: `for-each-ref -- refs/remotes/` failed, so there is no
+                // tip for a reason that says nothing about the branch. "No tracked remote branch"
+                // would be a claim this refresh never established.
+                label = Strings.pushHistoryNotChecked
+                tooltip = Strings.pushHistoryNotCheckedTooltip
+            }
         }
 
         // §5a item 3 hangs both the push tooltip and the ahead tooltip off the tertiary tier, and
@@ -273,22 +297,31 @@ public struct SnapshotPresenter: Sendable {
         let remote = Self.remoteName(for: branch)
 
         var parts: [String] = []
+        // codex round 3, MAJOR 6. Two of the five lines below are claims **about the remote**:
+        // "no matching branch on last-known origin" and "in sync with last-known origin". A failed
+        // `for-each-ref -- refs/remotes/` proves neither, and pairing either with the push line
+        // above produced a row that contradicted itself. The three that survive — gone, ahead,
+        // and nothing-ahead — come from `%(upstream:track)`, which git computed itself and this
+        // refresh did read.
+        let remoteRefsKnown = branch.push.remoteRefsKnown
         if isGone {
             parts.append(Strings.upstreamMissing(remote: remote))
         } else if !hasUpstream {
+            if remoteRefsKnown {
             // codex round 2, MAJOR 5: `origin/<name>` is what the reflog on this row was read
             // from, so "no matching branch on origin" contradicts the line above it. The branch
             // still tracks nothing, and that is what the copy says instead.
             parts.append(branch.push.remoteRefExists
                 ? Strings.untrackedRemoteBranchExists(remote: remote)
                 : Strings.noUpstream)
+            }
         } else if aheadCount(for: branch) > 0 {
             parts.append(Strings.ahead(aheadCount(for: branch), remote: remote))
         } else if behindCount(for: branch) > 0 {
             // Nothing local is ahead, but the remote holds commits this clone does not, so "In
             // sync" would be false. The count itself still never reaches the row.
             parts.append(Strings.noLocalCommitsAhead(remote: remote))
-        } else {
+        } else if remoteRefsKnown {
             parts.append(Strings.inSync(remote: remote))
         }
 
@@ -371,10 +404,24 @@ public struct SnapshotPresenter: Sendable {
     /// and the categories the scan skips on purpose are named beside it so the list reads as a
     /// choice rather than a gap.
     private func notScannedNotice(_ scanResult: ScanResult?) -> NoticeVM? {
-        guard let scanResult, !scanResult.unreadableDirectories.isEmpty else { return nil }
+        guard let scanResult else { return nil }
+        guard !scanResult.unreadableDirectories.isEmpty else {
+            // codex round 3, MAJOR 2: the notice used to be gated on that list alone, so a walk the
+            // deadline cut off inside an ordinary directory or an added root — which names no
+            // folder, because nothing refused it — showed a short repo list with nothing at all
+            // saying it was short. `truncatedByDeadline` is that claim, and it is enough on its
+            // own.
+            guard scanResult.truncatedByDeadline else { return nil }
+            return NoticeVM(
+                text: Strings.scanIncomplete,
+                action: UserFacingFailure.Action(label: Strings.rescanActionLabel, kind: .rescan)
+            )
+        }
+        var text = Strings.notScanned(folders: scanResult.unreadableDirectories.map(folderName))
+            + "\n" + Strings.skippedCategoriesSummary
+        if scanResult.truncatedByDeadline { text += "\n" + Strings.scanIncomplete }
         return NoticeVM(
-            text: Strings.notScanned(folders: scanResult.unreadableDirectories.map(folderName))
-                + "\n" + Strings.skippedCategoriesSummary,
+            text: text,
             action: UserFacingFailure.Action(
                 label: Strings.grantFolderAccessActionLabel,
                 kind: .grantFolderAccess

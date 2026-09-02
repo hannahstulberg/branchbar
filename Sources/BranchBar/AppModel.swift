@@ -296,13 +296,21 @@ final class AppModel: ObservableObject {
         let (force, rescan, bypassPRCache) = Self.coordinatorArguments(for: reason)
         Log.info(
             "refresh: reason=\(reason.rawValue) force=\(force) rescan=\(rescan) "
-                + "bypassPRCache=\(bypassPRCache) expanded=\(expanded.count)")
+                + "bypassPRCache=\(bypassPRCache) expanded=\(expanded.count) "
+                + "coalescing=\(isRefreshInFlight) ghClientReset=\(!isRefreshInFlight)")
 
         // Cleared by the call that starts the refresh, never by one coalescing into a running one,
         // so a cancel is still visible to every caller when the shared refresh returns.
-        if !isRefreshInFlight { cancelRequested = false }
+        let startsTheRefresh = !isRefreshInFlight
+        if startsTheRefresh { cancelRequested = false }
         isRefreshInFlight = true
-        environment.ghClients.startRefresh()
+        // codex round 3, MINOR 3: the `gh` client is reset by the call the coordinator will accept
+        // as a new refresh, and by no other. `RefreshCoordinator.refresh` returns the in-flight
+        // task to every later caller, so a popover open landing mid-refresh used to drop the
+        // client that refresh's repos were sharing: the repos that had not started yet built a
+        // second one, asked `gh auth status` again, and filled a second PR memo — two clients
+        // inside one refresh, with the coverage each of them believed split between them.
+        if startsTheRefresh { environment.ghClients.startRefresh() }
         let final = await environment.coordinator.refresh(
             force: force,
             expandedRepoIDs: expanded,
@@ -638,11 +646,16 @@ final class AppModel: ObservableObject {
         Log.info("rendered sections: \(titles)")
         for section in vm.sections {
             guard let row = section.active.first else { continue }
+            let marker = row.worktreeMarker ?? "—"
+            let pill = row.prPill?.text ?? "—"
+            let ahead = row.aheadLabel ?? "—"
+            // Optional since codex round 3, BLOCKER 1: a prunable worktree row has no action.
+            let action = row.primaryAction.map { "\($0.label) -> \($0.payload ?? "—")" } ?? "none"
             Log.info(
                 "rendered row: repo=\(section.title) title=\(row.title) "
-                    + "marker=\(row.worktreeMarker ?? "—") pill=\(row.prPill?.text ?? "—") "
-                    + "push=\(row.pushLabel) ahead=\(row.aheadLabel ?? "—") "
-                    + "action=\(row.primaryAction.label) -> \(row.primaryAction.payload ?? "—") "
+                    + "marker=\(marker) pill=\(pill) "
+                    + "push=\(row.pushLabel) ahead=\(ahead) "
+                    + "action=\(action) "
                     + "voiceover=\(row.accessibilityLabel)")
             break
         }
@@ -665,7 +678,15 @@ final class AppModel: ObservableObject {
             let tracked = Set(repo.branches.compactMap(\.push.remoteName))
             let names = tracked.union(repo.remoteOwners.keys)
             guard !names.isEmpty else { continue }
-            let pairs = names.sorted().map { "\($0)=\(repo.remoteOwners[$0] ?? "?")" }
+            // `remoteOwners` is keyed by remote name and now carries `(host, owner)` rather than
+            // a bare login (codex round 3, MAJOR 4), so the log names the service too: a branch
+            // tracking `gitlab.com/alice/product` and one tracking `github.com/alice/product` are
+            // two different heads that used to print the same.
+            let pairs = names.sorted().map { name -> String in
+                guard let identity = repo.remoteOwners[name] else { return "\(name)=?" }
+                let host = identity.host.isEmpty ? "?" : identity.host
+                return "\(name)=\(host)/\(identity.owner)"
+            }
             Log.info("remote owners: \(repo.name) \(pairs.joined(separator: " "))")
         }
     }

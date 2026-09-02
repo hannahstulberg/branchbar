@@ -95,12 +95,24 @@ public actor GHClient {
             do {
                 let output = try await runner.run(command)
                 if output.exitCode == 0 { return AuthAnswer(availability: .available, isVerdict: true) }
-                // Every non-zero exit of the preflight means the same thing to the UI: this host
-                // needs `gh auth login`. The stderr rides along as the diagnostic.
+                // codex round 3, MAJOR 3. Every non-zero exit used to mean the same thing here —
+                // "this host needs `gh auth login`" — while the classifier that tells a 401 from a
+                // 403 from a rate limit sat one method away, reachable only from a **thrown**
+                // `CommandError`. The real runner returns a `CommandOutput` for an ordinary
+                // non-zero exit, so the classifier never ran on the preflight, and a managed
+                // account refused by SAML or an organization policy was sent round a
+                // `gh auth login` loop that cannot lift either.
+                //
+                // Both streams are classified together because `gh auth status` writes its report
+                // to stdout on gh 2.89 and to stderr on older releases (ARCHITECTURE.md §8), so
+                // reading either one by name reads the wrong one on half the versions this ships
+                // to.
                 return AuthAnswer(
-                    availability: .unavailable(
-                        .ghNotAuthenticated(host: host),
-                        detail: Self.diagnostic(output.standardErrorText)),
+                    availability: Self.availability(
+                        forFailedCommand: .nonZeroExit(
+                            exitCode: output.exitCode,
+                            standardError: Self.combinedStreams(output)),
+                        host: host),
                     isVerdict: true)
             } catch let error as CommandError {
                 // A cancelled or timed-out check says nothing about the account: the refresh
@@ -399,6 +411,15 @@ public actor GHClient {
     private func cachedPRs(_ entry: CachedList?) -> [PRInfo]? {
         guard let entry, Date().timeIntervalSince(entry.fetchedAt) < policy.prCacheTTL else { return nil }
         return entry.prs
+    }
+
+    /// Both streams, in the order a reader would see them, for a command that reports itself to
+    /// whichever one the installed `gh` prefers (codex round 3, MAJOR 3).
+    private nonisolated static func combinedStreams(_ output: CommandOutput) -> String {
+        [output.standardOutputText, output.standardErrorText]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
     }
 
     /// The whole stderr, trimmed — the line that names the failure is often several lines in

@@ -115,10 +115,17 @@ public struct RepoLoader: Sendable {
 
         // Stage 2 — the remote URL. An unset key is nil and not an error: it is how a repo reaches
         // `PRUnavailableReason.noRemote`.
+        // codex round 3, MAJOR 6: a failed query and an unset key both left `remoteURL == nil`,
+        // and the copy read the second one's meaning into both. `GitClient.remoteOriginURL`
+        // already returns nil only for exit 1 with no output — "the key is unset" — and throws for
+        // everything else, so the two are separable here and only the first is absence.
+        var remoteFacts = RemoteFacts()
         var remoteURL: String?
         do {
             remoteURL = try await git.remoteOriginURL(at: path)
+            remoteFacts.originURL = remoteURL == nil ? .absent : .known
         } catch {
+            remoteFacts.originURL = .failed
             errors.append(RepoError(stage: .remotes, message: "git config --get remote.origin.url failed (\(Self.describe(error)))"))
         }
         let slug = remoteURL.flatMap(GitHubSlug.init(remoteURL:))
@@ -148,7 +155,13 @@ public struct RepoLoader: Sendable {
         var remoteRefs: [ParsedRemoteRef] = []
         do {
             remoteRefs = try await git.remoteRefs(at: path)
+            remoteFacts.remoteRefs = remoteRefs.isEmpty ? .absent : .known
         } catch {
+            // codex round 3, MAJOR 6. Losing the listing costs push detail, and it must not be
+            // allowed to cost the truth: with no tip the deriver used to select `.none`, which the
+            // row rendered as "No tracked remote branch" over a tertiary line claiming the branch
+            // was in sync with that same remote.
+            remoteFacts.remoteRefs = .failed
             errors.append(RepoError(stage: .remotes, message: "git for-each-ref -- refs/remotes/ failed (\(Self.describe(error)))"))
         }
 
@@ -159,7 +172,8 @@ public struct RepoLoader: Sendable {
         var worktrees: [Worktree] = []
         var worktreesEnumerated = true
         do {
-            worktrees = try await git.worktrees(at: path)
+            worktrees = Self.markingUnopenablePathsPrunable(
+                try await git.worktrees(at: path), fileSystem: fileSystem)
         } catch {
             worktreesEnumerated = false
             errors.append(RepoError(
@@ -172,13 +186,17 @@ public struct RepoLoader: Sendable {
         // issued once per distinct name. Without it a branch tracking a fork fell back to the
         // origin repository's owner, which is a different head that happens to share a name
         // (codex round 2, MAJOR 4).
-        var remoteOwners: [String: String] = [:]
-        if let owner = slug?.owner { remoteOwners["origin"] = owner }
+        //
+        // codex round 3, MAJOR 4 made the value (host, owner): the owner alone let a branch
+        // tracking `gitlab.com/alice/product` match a GitHub PR whose head was `alice:<same
+        // name>`, and two GitHub Enterprise installations collide the same way.
+        var remoteOwners: [String: RemoteIdentity] = [:]
+        if let slug { remoteOwners["origin"] = RemoteIdentity(host: slug.host, owner: slug.owner) }
         for name in Self.upstreamRemoteNames(of: branchRefs) where remoteOwners[name] == nil {
             do {
                 if let url = try await configuredRemoteURL(forRemote: name, at: path),
                    let remoteSlug = GitHubSlug(remoteURL: url) {
-                    remoteOwners[name] = remoteSlug.owner
+                    remoteOwners[name] = RemoteIdentity(host: remoteSlug.host, owner: remoteSlug.owner)
                 }
             } catch {
                 errors.append(RepoError(
@@ -191,8 +209,14 @@ public struct RepoLoader: Sendable {
         // nothing else, so its modification date is a local observation — unlike the remote tip's
         // committer date, which the tooltip used to report as "last seen" (codex MAJOR 7). A clone
         // that has only ever been pushed from has no `FETCH_HEAD`, and that is not an error.
+        //
+        // codex round 3, BLOCKER 2: the date used to come from a URL resource-value read, which
+        // follows a symlink and blocks in `open()` on a FIFO — on the repo-loading path, outside
+        // the killable helper, so a `FETCH_HEAD` that is a named pipe parked the refresh with
+        // nothing above it able to end it. `statRegularFile` is the same `O_NOFOLLOW | O_NONBLOCK`
+        // descriptor every bounded read opens, stopped at the `fstat`.
         let fetchHeadPath = (commonDirectory as NSString).appendingPathComponent("FETCH_HEAD")
-        let fetchHeadObservedAt = try? fileSystem.modificationDate(atPath: fetchHeadPath)
+        let fetchHeadObservedAt = (try? fileSystem.statRegularFile(atPath: fetchHeadPath))??.modificationDate
 
         // Stage 6 — one reflog file per upstream branch, isolated per branch. An absent file is
         // nil and not an error (a branch that was never pushed has no reflog); a file that exists
@@ -205,6 +229,7 @@ public struct RepoLoader: Sendable {
         // calling that "never pushed" was a claim the data never supported (codex MAJOR 6).
         let remoteShortNames = Set(remoteRefs.map(\.shortName))
         var observations: [String: ReflogObservation] = [:]
+        var uncertainPushHistory: Set<String> = []
         for row in branchRefs where row.refName.hasPrefix("refs/heads/") {
             let remote: String
             let remoteBranch: String
@@ -219,11 +244,19 @@ public struct RepoLoader: Sendable {
             }
 
             do {
-                if let observation = try reflog.observation(
+                switch try reflog.reading(
                     commonDirectory: commonDirectory,
                     remote: remote,
                     branch: remoteBranch) {
+                case .observed(let observation):
                     observations[row.branchName] = observation
+                case .nothingObserved:
+                    break
+                // codex round 3, MAJOR 7: a line the reader could not vouch for stopped its walk,
+                // and what sits below it may be the deletion that makes everything above it a lie.
+                // The row says so instead of falling back to a date.
+                case .uncertain:
+                    uncertainPushHistory.insert(row.branchName)
                 }
             } catch {
                 let file = ReflogFileReader.reflogPath(
@@ -259,6 +292,7 @@ public struct RepoLoader: Sendable {
                 errors: &errors,
                 branchRefs: branchRefs,
                 remoteURL: remoteURL,
+                remoteFacts: remoteFacts,
                 slug: slug,
                 remoteOwners: remoteOwners,
                 now: now)
@@ -280,7 +314,10 @@ public struct RepoLoader: Sendable {
             pr.loadState = .stale
         }
 
-        var repo = RepoAssembler.assemble(RepoAssembler.Inputs(
+        // The lookup above resolved the remote identities to key the PR match, and the assembler
+        // carries them onto the repo so the shell can say which repository a row was counted
+        // against (F11).
+        let repo = RepoAssembler.assemble(RepoAssembler.Inputs(
             id: discovered.id,
             path: path,
             remoteURL: remoteURL,
@@ -294,17 +331,15 @@ public struct RepoLoader: Sendable {
             authoredOpenPullRequests: pr.authored,
             queryCoverage: pr.coverage,
             remoteOwners: remoteOwners,
+            uncertainPushHistory: uncertainPushHistory,
+            remoteFacts: remoteFacts,
+            pathIsDirectory: fileSystem.isDirectoryNoFollow(atPath: path),
             prAvailability: pr.availability,
             prFetchedAt: pr.fetchedAt,
             prLoadState: pr.loadState,
             errors: errors,
             isStale: false,
             refreshedAt: now))
-
-        // The lookup above resolved these to key the PR match; the shell needs the same answer to
-        // say which repository a row was counted against, and rebuilding it from the PRs that
-        // happened to match gets a branch tracking a fork with no PR wrong every time (F11).
-        repo.remoteOwners = remoteOwners
 
         return LoadResult(repo: repo, prCache: entry)
     }
@@ -330,8 +365,9 @@ public struct RepoLoader: Sendable {
         errors: inout [RepoError],
         branchRefs: [ParsedBranchRef],
         remoteURL: String?,
+        remoteFacts: RemoteFacts,
         slug: GitHubSlug?,
-        remoteOwners: [String: String],
+        remoteOwners: [String: RemoteIdentity],
         now: Date
     ) async {
         pr.loadState = .loaded
@@ -341,6 +377,12 @@ public struct RepoLoader: Sendable {
             return
         }
         guard let slug else {
+            // codex round 3, MAJOR 6: three answers, not two. A query that **failed** proves
+            // nothing about this repo's origin, so it gets neither "No origin for this repo" nor
+            // "Origin is not on GitHub". It leaves the repo available with no head queried, which
+            // renders every branch `notChecked` — "PR status not checked yet" — beside the
+            // `.remotes` stage error that says which read failed.
+            guard remoteFacts.originURL != .failed else { return }
             // Two different answers with two different actions (PLAN.md §5a): no remote at all,
             // versus a remote this app cannot turn into a `gh --repo` argument.
             pr.availability = remoteURL == nil
@@ -424,6 +466,31 @@ public struct RepoLoader: Sendable {
         repo.errors = errors
         repo.isStale = true
         return repo
+    }
+
+    /// Every worktree record whose path is not an existing directory, marked prunable (codex
+    /// round 3, BLOCKER 1).
+    ///
+    /// `git worktree list --porcelain` prints whatever the `.git/worktrees` records say, and those
+    /// records are files anyone who can write under `~` can write. The path became a branch row's
+    /// action payload, and the last editor in the fallback chain is Terminal, which *executes* a
+    /// `.command` document — so a record naming `/tmp/payload.command` turned a click on a branch
+    /// into running it. `isPrunable` is git's own word for "this record does not point at a usable
+    /// working tree", which is exactly what a path that will not open as a directory is; reusing
+    /// it means `RepoAssembler` and `SnapshotPresenter` need one rule rather than two.
+    ///
+    /// The check is `open(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)`: it refuses a regular file, a
+    /// symlink, and a FIFO, and it cannot block on any of them.
+    static func markingUnopenablePathsPrunable(
+        _ worktrees: [Worktree], fileSystem: FileSystem
+    ) -> [Worktree] {
+        worktrees.map { worktree in
+            guard !worktree.isPrunable else { return worktree }
+            guard !fileSystem.isDirectoryNoFollow(atPath: worktree.path) else { return worktree }
+            var refused = worktree
+            refused.isPrunable = true
+            return refused
+        }
     }
 
     /// Distinct `%(upstream:remotename)` values across the `refs/heads` rows, in first-seen order.

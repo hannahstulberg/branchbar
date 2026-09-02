@@ -111,9 +111,149 @@ enum LaunchAtLogin {
         return SMAppService.mainApp.status
     }
 
-    static var hasLaunchAgentPlist: Bool {
-        FileManager.default.fileExists(atPath: launchAgentURL.path)
+    // MARK: - One reading of the LaunchAgent, per launch
+
+    /// Everything this file knows about the login item, read once and then remembered until
+    /// something here changes it (codex round 3, BLOCKER 2 and MAJOR 5).
+    ///
+    /// Every property below is derived from one of these rather than from its own read. Before, a
+    /// single `logCurrentState()` opened `~/Library/LaunchAgents/com.hannahstulberg.branchbar.plist`
+    /// three times and spawned `launchctl print` three more, all during
+    /// `applicationDidFinishLaunching` and all with unbounded, path-based, symlink-following reads:
+    /// a FIFO at that fixed pathname blocked the app's launch outright, and nothing above a blocked
+    /// `open()` can end it.
+    struct State {
+        /// Something exists at the plist path. Established with `lstat`, which neither follows a
+        /// symlink nor blocks on a FIFO, so "there is a file here" and "I read it" stay separate
+        /// questions.
+        var fileExists: Bool
+        /// What `lstat` said it is, for the log: `regular`, `symlink`, `fifo`, and so on.
+        var fileType: String
+        /// The whole schema check: exactly our three keys, our label, `RunAtLoad`, and a `Program`
+        /// naming either install candidate.
+        var isOwnPlist: Bool
+        /// `Program`, whatever it names.
+        var plistProgram: String?
+        /// launchd holds *something* under our label.
+        var isLoaded: Bool
+        /// The live `program =` from `launchctl print`. Nil when nothing is loaded, and also when
+        /// something is loaded that has no `Program` of its own (a job carrying only
+        /// `ProgramArguments`, or one submitted by another process) — which is precisely the case
+        /// that used to read as "BranchBar's login item is on".
+        var loadedProgram: String?
+
+        /// The plist on disk is the one *this* build would write: our whole schema, and a
+        /// `Program` naming the executable this copy of the app runs from.
+        var matchesThisBuild: Bool
+        /// The live job is one of ours: its program is an executable inside one of the two install
+        /// candidates. Either candidate counts, for the same reason `isOwnLaunchAgentPlist`
+        /// accepts either — a job the `/Applications` copy registered is still BranchBar's login
+        /// item when the `~/Applications` copy is the one asking.
+        var loadedProgramIsOurs: Bool
     }
+
+    /// The read is memoized because it costs a file open and a `launchctl` process, and because
+    /// the reviewer's rule is that a launch touches that pathname once. Every path in this file
+    /// that changes the login item calls `invalidateState()`, so a flip is still followed by a
+    /// fresh read rather than by a remembered answer.
+    private static var cachedState: State?
+
+    /// How many times this process has opened the plist path. Logged rather than assumed: "the
+    /// launch touches that pathname once" is the invariant codex round 3 BLOCKER 2 asked for, and
+    /// a counter in the launch log is what proves it on a real Mac.
+    private(set) static var plistReadCount = 0
+
+    static func invalidateState() { cachedState = nil }
+
+    @discardableResult
+    static func state(reloading: Bool = false) -> State {
+        if !reloading, let cachedState { return cachedState }
+        let fresh = readState()
+        cachedState = fresh
+        return fresh
+    }
+
+    /// A plist BranchBar wrote is 300-odd bytes. 64 KB is room for any file a person could
+    /// plausibly have put there and a bound on one nobody should.
+    static let maximumPlistBytes = 64 * 1024
+
+    private static func readState() -> State {
+        plistReadCount += 1
+        let path = launchAgentURL.path
+        let (exists, type) = fileType(atPath: path)
+
+        var plist: [String: Any]?
+        if exists, type == "regular", let data = boundedPlistData(atPath: path) {
+            plist = (try? PropertyListSerialization.propertyList(
+                from: data, options: [], format: nil)) as? [String: Any]
+        }
+        let program = plist?["Program"] as? String
+        let isOwnPlist = plist.map(isOwnLaunchAgentPlist) ?? false
+
+        let printed = launchctl(["print", "\(guiDomain)/\(bundleID)"])
+        let loadedProgram = printed.status == 0
+            ? programPath(inLaunchctlPrint: printed.output)
+            : nil
+        let ourPrograms = installCandidateBundlePaths.map(executablePath(inBundleAt:))
+
+        return State(
+            fileExists: exists,
+            fileType: type,
+            isOwnPlist: isOwnPlist,
+            plistProgram: program,
+            isLoaded: printed.status == 0,
+            loadedProgram: loadedProgram,
+            matchesThisBuild: isOwnPlist && program == installedExecutablePath,
+            loadedProgramIsOurs: loadedProgram.map(ourPrograms.contains) ?? false)
+    }
+
+    /// What is at a path, without following a symlink and without opening anything. `lstat` cannot
+    /// block, so this is the safe half of "is there a file here".
+    private static func fileType(atPath path: String) -> (exists: Bool, type: String) {
+        var status = stat()
+        guard lstat(path, &status) == 0 else { return (false, "absent") }
+        switch status.st_mode & S_IFMT {
+        case S_IFREG: return (true, "regular")
+        case S_IFLNK: return (true, "symlink")
+        case S_IFIFO: return (true, "fifo")
+        case S_IFDIR: return (true, "directory")
+        case S_IFSOCK: return (true, "socket")
+        case S_IFCHR, S_IFBLK: return (true, "device")
+        default: return (true, "other")
+        }
+    }
+
+    /// The plist path is read the way every repository-owned file in this app is read: an FD open
+    /// that refuses a symlink and cannot block, an `fstat` type check on the descriptor already
+    /// opened, and a bounded `pread` (codex round 3, BLOCKER 2). `Data(contentsOf:)` and
+    /// `String(contentsOf:)` were both of the things ARCHITECTURE.md §8 warns about — unbounded,
+    /// and blocked forever on a FIFO at a fixed, guessable pathname.
+    ///
+    /// `RealFileSystem.readBoundedRegularFile` is that primitive; using Core's rather than a
+    /// second copy here is what keeps the two from drifting.
+    private static func boundedPlistData(atPath path: String) -> Data? {
+        try? RealFileSystem().readBoundedRegularFile(
+            path: path, maxBytes: maximumPlistBytes, tail: false)
+    }
+
+    /// The live `program =` line out of `launchctl print gui/<uid>/<label>`.
+    ///
+    /// Pure, so the grammar can be exercised from the probe without a job being loaded. The key is
+    /// matched exactly: `launchctl` also prints `program identifier = …` for a job another process
+    /// submitted, and that is not a program path.
+    static func programPath(inLaunchctlPrint output: String) -> String? {
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let key = line[line.startIndex..<separator].trimmingCharacters(in: .whitespaces)
+            guard key == "program" else { continue }
+            let value = line[line.index(after: separator)...]
+                .trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    static var hasLaunchAgentPlist: Bool { state().fileExists }
 
     /// The complete set of keys BranchBar's own LaunchAgent has. Membership is checked by equality,
     /// not by lookup, which is what makes an extra key a rejection rather than something ignored.
@@ -129,13 +269,7 @@ enum LaunchAtLogin {
     /// binary with an argv and an environment we never chose — while the toggle read "on" and the
     /// disable path deleted the file as if it had been ours all along. The whole dictionary is now
     /// the thing that is validated: exactly `Label`, `Program`, and `RunAtLoad`, nothing else.
-    static var hasOwnLaunchAgentPlist: Bool {
-        guard let data = try? Data(contentsOf: launchAgentURL),
-              let plist = try? PropertyListSerialization.propertyList(
-                  from: data, options: [], format: nil) as? [String: Any]
-        else { return false }
-        return isOwnLaunchAgentPlist(plist)
-    }
+    static var hasOwnLaunchAgentPlist: Bool { state().isOwnPlist }
 
     /// Pure half of `hasOwnLaunchAgentPlist`, so the schema rule can be exercised without a file.
     static func isOwnLaunchAgentPlist(_ plist: [String: Any]) -> Bool {
@@ -151,16 +285,25 @@ enum LaunchAtLogin {
         return true
     }
 
-    /// Whether launchd is actually holding the job right now. `launchctl print` exits 0 for a
-    /// loaded job and non-zero otherwise, which is the only question a file on disk cannot answer:
-    /// a plist can exist while nothing is loaded, and a job can stay loaded for the session after
-    /// its plist is gone.
-    static var isLaunchAgentLoaded: Bool {
-        launchctl(["print", "\(guiDomain)/\(bundleID)"]).status == 0
-    }
+    /// Whether launchd is holding *anything* under our label right now. `launchctl print` exits 0
+    /// for a loaded job and non-zero otherwise, which is the only question a file on disk cannot
+    /// answer: a plist can exist while nothing is loaded, and a job can stay loaded for the
+    /// session after its plist is gone.
+    ///
+    /// This says nothing about *what* is loaded — see `isOurLaunchAgentLoaded`.
+    static var isLaunchAgentLoaded: Bool { state().isLoaded }
+
+    /// Whether the job launchd is holding under our label is BranchBar (codex round 3, MAJOR 5).
+    ///
+    /// A successful `launchctl print` used to be the whole check, so a job someone else had loaded
+    /// under `com.hannahstulberg.branchbar` — or one of ours from an install that has since been
+    /// replaced — made the toggle read "on" while the live job named another program. launchd is
+    /// keyed by label, not by file, and the label is a fixed string in a shipped app: the question
+    /// the toggle has to answer is what the live job's `program =` says.
+    static var isOurLaunchAgentLoaded: Bool { state().loadedProgramIsOurs }
 
     static var mechanism: Mechanism {
-        if hasOwnLaunchAgentPlist, isLaunchAgentLoaded { return .launchAgent }
+        if hasOwnLaunchAgentPlist, isOurLaunchAgentLoaded { return .launchAgent }
         if serviceStatus == .enabled { return .serviceManagement }
         return .off
     }
@@ -171,14 +314,15 @@ enum LaunchAtLogin {
     ///
     /// codex MINOR 1: the fallback's half of this used to be "a file exists at that path", so any
     /// stale or tampered file made the toggle read on. It is now this app's own plist *and* a job
-    /// launchd says is loaded.
+    /// launchd says is loaded — and, since codex round 3 MAJOR 5, a live job whose `program =` is
+    /// one of BranchBar's own executables.
     static var isEnabled: Bool {
-        if hasOwnLaunchAgentPlist, isLaunchAgentLoaded { return true }
+        if hasOwnLaunchAgentPlist, isOurLaunchAgentLoaded { return true }
         return isRegistered(serviceStatus)
     }
 
     static var needsApproval: Bool {
-        !(hasOwnLaunchAgentPlist && isLaunchAgentLoaded) && serviceStatus == .requiresApproval
+        !(hasOwnLaunchAgentPlist && isOurLaunchAgentLoaded) && serviceStatus == .requiresApproval
     }
 
     // MARK: - Flipping it
@@ -244,15 +388,34 @@ enum LaunchAtLogin {
             throw Failure.notInstalledInApplications
         }
 
-        // Nothing to do only when the file on disk is byte-for-byte the plist this build would
-        // write *and* launchd is holding it. Comparing the text rather than asking
-        // `hasOwnLaunchAgentPlist` matters now that there are two install locations: a job loaded
-        // from the `/Applications` plist is not the job the `~/Applications` copy wants.
-        let alreadyCorrect = (try? String(contentsOf: launchAgentURL, encoding: .utf8))
-            == launchAgentPlistXML
-        if alreadyCorrect, isLaunchAgentLoaded {
-            Log.info("launch at login: the agent is already loaded from the plist this build writes")
+        // What this build wants loaded, and the value every check below is against.
+        let wanted = installedExecutablePath
+        var live = state(reloading: true)
+
+        // Nothing to do only when the file on disk is the plist this build would write *and* the
+        // job launchd is holding names this build's own executable. Both halves matter now that
+        // there are two install locations: a job loaded from the `/Applications` plist is not the
+        // job the `~/Applications` copy wants, and `launchctl print` exiting 0 says only that the
+        // label is taken (codex round 3, MAJOR 5).
+        if live.matchesThisBuild, live.loadedProgram == wanted {
+            Log.info(
+                "launch at login: the agent is already loaded from the plist this build writes "
+                    + "(live program=\(wanted))")
             return
+        }
+
+        // codex round 3, MAJOR 5: whenever the disk or the live job differs from what this build
+        // wants, the label is booted out *before* the bootstrap. Without this, a foreign job under
+        // our label made `bootstrap` fail as already-loaded, the retry's bootout was skipped
+        // because something was loaded, and the final check passed on that same foreign job — the
+        // toggle read on while the live job named another program.
+        if live.isLoaded, live.loadedProgram != wanted {
+            let bootout = launchctl(["bootout", "\(guiDomain)/\(bundleID)"])
+            Log.info(
+                "launch at login: booting out the job already loaded as \(bundleID) "
+                    + "(live program=\(live.loadedProgram ?? "none")) before bootstrap, "
+                    + "exit=\(bootout.status) \(bootout.output)")
+            invalidateState()
         }
 
         do {
@@ -272,7 +435,8 @@ enum LaunchAtLogin {
         // instead, because the codes overlap: errno 5, 17, and 37 are what a bootstrap of an
         // already-loaded job reports (REVIEW WR-05) *and* what several unrelated refusals report,
         // so treating them as success meant the toggle could read on with nothing registered.
-        if !isLaunchAgentLoaded {
+        live = state(reloading: true)
+        if live.loadedProgram != wanted {
             // One retry, through a bootout, rather than deleting the plist: the old code removed
             // the file it had just written while launchd kept the job for the session, so the
             // toggle read off, the app still opened at the next login, and stopped after that.
@@ -282,16 +446,18 @@ enum LaunchAtLogin {
             Log.info(
                 "launch at login: launchctl bootstrap retry exit=\(bootstrap.status) "
                     + "(\(errnoDescription(bootstrap.status))) \(bootstrap.output)")
+            live = state(reloading: true)
         }
 
-        let verification = launchctl(["print", "\(guiDomain)/\(bundleID)"])
-        Log.info("launch at login: launchctl print exit=\(verification.status) (the loaded check)")
-        guard verification.status == 0 else {
+        Log.info(
+            "launch at login: verified live program=\(live.loadedProgram ?? "none") "
+                + "wanted=\(wanted) loaded=\(live.isLoaded)")
+        guard live.loadedProgram == wanted else {
             diagnostics.append(
                 "launchctl bootstrap exit \(bootstrap.status) "
                     + "(\(errnoDescription(bootstrap.status))): \(bootstrap.output) · "
-                    + "launchctl print \(guiDomain)/\(bundleID) exit \(verification.status), "
-                    + "so nothing is loaded")
+                    + "launchctl print \(guiDomain)/\(bundleID) reports program "
+                    + "\(live.loadedProgram ?? "none") rather than \(wanted)")
             throw Failure.bothMechanismsRefused(diagnostics.joined(separator: " · "))
         }
     }
@@ -330,24 +496,27 @@ enum LaunchAtLogin {
         // plist was deleted — by an uninstall script, by a previous half-finished disable, by the
         // user — therefore stayed live while the toggle reported off. launchd is keyed by label,
         // not by file, so the question is whether anything is loaded under that label.
-        if isLaunchAgentLoaded {
+        if state(reloading: true).isLoaded {
             let bootout = launchctl(["bootout", "\(guiDomain)/\(bundleID)"])
             Log.info("launch at login: launchctl bootout exit=\(bootout.status) \(bootout.output)")
+            invalidateState()
             // codex MINOR 1: a failed bootout used to be ignored and the plist deleted anyway, so
             // the toggle read off while the job stayed loaded for the session. The plist stays put
             // when the job is still loaded — it is the only record of what to boot out next time —
             // and the failure is reported. What is checked is `launchctl print` after the fact,
             // not the bootout's own exit code.
-            if isLaunchAgentLoaded {
+            if state(reloading: true).isLoaded {
                 throw Failure.couldNotUnload(
                     "launchctl bootout exit \(bootout.status): \(bootout.output) · the job is "
                         + "still loaded in \(guiDomain)")
             }
         }
-        if hasLaunchAgentPlist {
+        if state().fileExists {
             do {
                 try FileManager.default.removeItem(at: launchAgentURL)
+                invalidateState()
             } catch {
+                invalidateState()
                 Log.info("launch at login: could not remove \(launchAgentURL.path): \(error)")
                 throw Failure.couldNotUnload("removing \(launchAgentURL.path): \(error)")
             }
@@ -398,29 +567,29 @@ enum LaunchAtLogin {
 
     /// `RunAtLoad` and nothing else: no `KeepAlive`, so quitting BranchBar keeps it quit until the
     /// next login rather than having launchd restart the app the user just closed.
-    static var launchAgentPlistXML: String {
-        """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-        \t<key>Label</key>
-        \t<string>\(bundleID)</string>
-        \t<key>Program</key>
-        \t<string>\(installedExecutablePath)</string>
-        \t<key>RunAtLoad</key>
-        \t<true/>
-        </dict>
-        </plist>
+    ///
+    /// The dictionary, not the XML, is the definition — and `isOwnLaunchAgentPlist` validates the
+    /// same three keys, so what this build writes and what it will later accept are one rule.
+    static var launchAgentPlist: [String: Any] {
+        ["Label": bundleID, "Program": installedExecutablePath, "RunAtLoad": true]
+    }
 
-        """
+    /// codex round 3, MINOR 1: the plist was assembled by string interpolation, so a `Program`
+    /// path containing `&` or `<` — a managed home directory is a path a person does not choose —
+    /// produced XML launchd refuses to parse, and the toggle failed with nothing on screen naming
+    /// the reason. `PropertyListSerialization` escapes what it serializes, and the encoder is now
+    /// the same one that reads the file back.
+    static func launchAgentPlistData() throws -> Data {
+        try PropertyListSerialization.data(
+            fromPropertyList: launchAgentPlist, format: .xml, options: 0)
     }
 
     private static func writeLaunchAgent() throws {
         let directory = launchAgentURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try launchAgentPlistXML.write(to: launchAgentURL, atomically: true, encoding: .utf8)
-        Log.info("launch at login: wrote \(launchAgentURL.path)")
+        try launchAgentPlistData().write(to: launchAgentURL, options: [.atomic])
+        invalidateState()
+        Log.info("launch at login: wrote \(launchAgentURL.path) naming \(installedExecutablePath)")
     }
 
     @discardableResult
@@ -458,13 +627,24 @@ enum LaunchAtLogin {
 
     /// One line for the launch log, so a tester's log says what the login item was without them
     /// having to open System Settings.
+    ///
+    /// codex round 3, BLOCKER 2: this used to read the plist path three times and spawn
+    /// `launchctl print` three times, once per property it interpolated, during
+    /// `applicationDidFinishLaunching`. Now it takes one `State` and reads every field off it, so
+    /// the fixed pathname is touched once per launch — and once more only after a flip, which
+    /// invalidates it.
     static func logCurrentState() {
+        let live = state()
         Log.info(
             "launch at login: available=\(isAvailable) enabled=\(isEnabled) "
                 + "mechanism=\(mechanism.rawValue) SMAppService status=\(statusDescription(serviceStatus)) "
                 + "translocated=\(isTranslocated) inApplications=\(isRunningFromApplications) "
                 + "installPath=\(runningInstallBundlePath ?? "—") "
-                + "ownPlist=\(hasOwnLaunchAgentPlist) agentLoaded=\(isLaunchAgentLoaded) "
+                + "ownPlist=\(live.isOwnPlist) plistFile=\(live.fileType) "
+                + "plistProgram=\(live.plistProgram ?? "—") "
+                + "agentLoaded=\(live.isLoaded) liveProgram=\(live.loadedProgram ?? "—") "
+                + "liveProgramIsOurs=\(live.loadedProgramIsOurs) "
+                + "wantedProgram=\(installedExecutablePath) plistReads=\(plistReadCount) "
                 + "bundleID=\(Bundle.main.bundleIdentifier ?? "—")")
     }
 }

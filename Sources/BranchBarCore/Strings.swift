@@ -130,6 +130,17 @@ public enum Strings {
         "Also skipped on purpose: hidden folders, Library, anything more than six folders deep, "
         + "and folders inside a repo BranchBar already found."
 
+    /// State: `scan-incomplete` — the walk was cut off before it drained its queue, so the repo
+    /// list is not everything there is. Shown whenever `ScanResult.truncatedByDeadline` is true,
+    /// including when the walk named no folder it could not read: a helper killed inside an
+    /// ordinary directory or an added root leaves a truncated result with an empty unreadable
+    /// list, and suppressing the warning on that emptiness was a silently short list (codex
+    /// round 3, MAJOR 2).
+    /// Literal: `BranchBar stopped looking for repos before it finished. What you see may be incomplete. Rescan to try again.`
+    public static let scanIncomplete =
+        "BranchBar stopped looking for repos before it finished. What you see may be incomplete. "
+        + "Rescan to try again."
+
     /// State: `not-scanned-folders` — footer heading above the Add folder… roots.
     /// Literal: `Folders you added`
     public static let scanRootsHeading = "Folders you added"
@@ -549,6 +560,32 @@ public enum Strings {
     public static let noTrackedRemoteBranchTooltip =
         "BranchBar only reads push history for a branch that tracks one on origin, so it has not "
         + "checked this one."
+
+    /// State: `push-history-unreadable` — the file this clone writes about pushes held a line
+    /// BranchBar could not vouch for, so it stopped there (codex round 3, MAJOR 7). It is not the
+    /// `Last push unknown` fallback: that one states a commit date, and stating any date here
+    /// would be stating it over the corruption that stopped the walk.
+    /// Literal: `Push history unreadable`
+    public static let pushHistoryUnreadable = "Push history unreadable"
+
+    /// State: `push-history-unreadable` — tooltip saying what BranchBar met and what it did.
+    /// Literal: `BranchBar found something it could not read in this repo's record of pushes, so it stopped there rather than report a date it cannot stand behind.`
+    public static let pushHistoryUnreadableTooltip =
+        "BranchBar found something it could not read in this repo's record of pushes, so it stopped "
+        + "there rather than report a date it cannot stand behind."
+
+    /// State: `remote-branches-unread` — reading this repo's branches on origin failed, so
+    /// BranchBar knows nothing about the remote side of this row (codex round 3, MAJOR 6). It may
+    /// not say there is no matching branch and it may not say the branch is in sync: a failed read
+    /// proves neither.
+    /// Literal: `Push history not checked`
+    public static let pushHistoryNotChecked = "Push history not checked"
+
+    /// State: `remote-branches-unread` — tooltip naming the read that failed, in workshop words.
+    /// Literal: `BranchBar could not read this repo's branches on origin this time, so it is not saying anything about where this branch stands against them.`
+    public static let pushHistoryNotCheckedTooltip =
+        "BranchBar could not read this repo's branches on origin this time, so it is not saying "
+        + "anything about where this branch stands against them."
 
     /// State: `ahead-of-last-known-origin` — tooltip carrying when this clone last heard from
     /// origin. `remoteObservedAt` is the `FETCH_HEAD` modification date, which is a local

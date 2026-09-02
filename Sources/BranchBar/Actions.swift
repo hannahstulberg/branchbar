@@ -32,13 +32,17 @@ enum Actions {
 
     /// PLAN.md §3's fallback chain: Cursor → VS Code → Terminal. Terminal is always present, which
     /// is why the chain ends there and there is no fourth step.
-    static func openInAvailableEditor(path: String) {
+    ///
+    /// Returns whether anything was launched, so the `BRANCHBAR_ACTION_CHECK` probe can assert the
+    /// refusal a non-directory earns rather than infer it from the absence of a window.
+    @discardableResult
+    static func openInAvailableEditor(path: String) -> Bool {
         if editors.cursor {
-            openInCursor(path: path)
+            return openInCursor(path: path)
         } else if editors.vsCode {
-            openInVSCode(path: path)
+            return openInVSCode(path: path)
         } else {
-            openInTerminal(path: path)
+            return openInTerminal(path: path)
         }
     }
 
@@ -49,16 +53,30 @@ enum Actions {
         Strings.openInAvailableEditorLabel(editors)
     }
 
-    static func openInCursor(path: String) { open(application: "Cursor", path: path) }
-    static func openInVSCode(path: String) { open(application: "Visual Studio Code", path: path) }
-    static func openInTerminal(path: String) { open(application: "Terminal", path: path) }
+    @discardableResult
+    static func openInCursor(path: String) -> Bool { open(application: "Cursor", path: path) }
+    @discardableResult
+    static func openInVSCode(path: String) -> Bool { open(application: "Visual Studio Code", path: path) }
+    @discardableResult
+    static func openInTerminal(path: String) -> Bool { open(application: "Terminal", path: path) }
 
     /// `open -a <App> <path>`, exactly as §3 froze it. `/usr/bin/open` is used rather than
     /// `NSWorkspace.open(_:withApplicationAt:…)` so the invocation in the log is the one a tester
     /// can paste into a shell to reproduce what the row did.
-    private static func open(application: String, path: String) {
+    ///
+    /// codex round 3, BLOCKER 1: the path is checked here, at click time, and only a real
+    /// directory is ever handed over. A row's payload is a worktree path a repository or
+    /// `cache.json` supplied, and the last step of the chain is Terminal, which *executes* a
+    /// `.command` document — so a payload of `/tmp/payload.command` used to be a click away from
+    /// running. The one `open -a Terminal` that is deliberately given a file is the sign-in
+    /// script, which this app wrote itself moments earlier into a 0700 directory of its own; it
+    /// calls `run` directly and never comes through here.
+    @discardableResult
+    private static func open(application: String, path: String) -> Bool {
+        guard ActionPaths.allows(path, action: "open -a \"\(application)\"") else { return false }
         Log.info("action: open -a \"\(application)\" \(path)")
         run("/usr/bin/open", ["-a", application, path])
+        return true
     }
 
     // MARK: - The other row actions
@@ -111,16 +129,28 @@ enum Actions {
         NSWorkspace.shared.open(parsed)
     }
 
-    static func revealInFinder(path: String) {
+    /// codex round 3, BLOCKER 1: the same directory check as the editor chain. Finder selecting a
+    /// document is not execution, but the path reaching it came from the same untrusted place, and
+    /// a row that refuses to open a payload while still revealing it says the payload was fine.
+    @discardableResult
+    static func revealInFinder(path: String) -> Bool {
+        guard ActionPaths.allows(path, action: "show in Finder") else { return false }
         Log.info("action: show in Finder \(path)")
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        return true
     }
 
-    static func copyPath(_ path: String) {
+    /// The clipboard is the one row action whose result a person pastes into a shell, so a path
+    /// this app would refuse to open is a path it does not hand out either (codex round 3,
+    /// BLOCKER 1). A refusal leaves the clipboard exactly as it was.
+    @discardableResult
+    static func copyPath(_ path: String) -> Bool {
+        guard ActionPaths.allows(path, action: "copy path") else { return false }
         Log.info("action: copy path \(path)")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(path, forType: .string)
+        return true
     }
 
     /// The `gh auth login` setup action: PLAN.md §3's answer for a Mac where `gh` is installed but
@@ -159,6 +189,12 @@ enum Actions {
             return
         }
 
+        // The one path handed to Terminal that is deliberately a file rather than a folder, and
+        // the reason `open(application:path:)`'s directory check is on that member rather than on
+        // `run`: this `.command` was written by `writeSignInScript` moments ago, inside a 0700
+        // directory this app created under its own temporary folder, with fixed text
+        // (`SignInScript.render`) and a hostname that was validated twice. Nothing a repository or
+        // the cache owns can reach it.
         Log.info("action: open -a Terminal \(script.path) (signs in to \(host))")
         run("/usr/bin/open", ["-a", "Terminal", script.path])
     }

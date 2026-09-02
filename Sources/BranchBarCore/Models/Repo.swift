@@ -164,7 +164,20 @@ public struct Repo: Hashable, Codable, Sendable {
     /// that has nothing to say, and read with `decodeIfPresent` below (packet F12) so a cache
     /// written before the field existed loads with an empty map — the honest reading, since that
     /// refresh never ran the lookup — rather than costing the whole snapshot a cold rescan.
-    public var remoteOwners: [String: String] = [:]
+    /// Values became `RemoteIdentity` in codex round 3, MAJOR 4: a PR head is an (owner, branch)
+    /// pair **on a host**, and storing the owner alone let a GitHub PR from `alice` attach to a
+    /// branch tracking `gitlab.com/alice/product`.
+    public var remoteOwners: [String: RemoteIdentity] = [:]
+    /// `path` was verified to be an existing directory, without following a symlink, by the
+    /// refresh that produced this repo (codex round 3, BLOCKER 1).
+    ///
+    /// False means the folder is gone, is a regular file, or is something this app will not open:
+    /// the rows under it carry no primary action, because the last editor in the fallback chain is
+    /// Terminal and Terminal *executes* a `.command` document. Read with `decodeIfPresent` below
+    /// as true, which is what every refresh that wrote a cache before this field had established
+    /// by walking to the folder in the first place; the check runs again on the next refresh, and
+    /// the shell re-checks at click time.
+    public var pathIsDirectory: Bool = true
     public var worktrees: [Worktree]
     public var branches: [Branch]
     /// PLAN.md §3: author-@me PRs whose (head owner login, head branch) matches no local branch.
@@ -185,7 +198,8 @@ public struct Repo: Hashable, Codable, Sendable {
         path: String,
         remoteURL: String? = nil,
         githubSlug: GitHubSlug? = nil,
-        remoteOwners: [String: String] = [:],
+        remoteOwners: [String: RemoteIdentity] = [:],
+        pathIsDirectory: Bool = true,
         worktrees: [Worktree] = [],
         branches: [Branch] = [],
         openPRsNotOnThisMac: [PRInfo] = [],
@@ -203,6 +217,7 @@ public struct Repo: Hashable, Codable, Sendable {
         self.remoteURL = remoteURL
         self.githubSlug = githubSlug
         self.remoteOwners = remoteOwners
+        self.pathIsDirectory = pathIsDirectory
         self.worktrees = worktrees
         self.branches = branches
         self.openPRsNotOnThisMac = openPRsNotOnThisMac
@@ -225,8 +240,18 @@ public struct Repo: Hashable, Codable, Sendable {
         path = try container.decode(String.self, forKey: .path)
         remoteURL = try container.decodeIfPresent(String.self, forKey: .remoteURL)
         githubSlug = try container.decodeIfPresent(GitHubSlug.self, forKey: .githubSlug)
-        remoteOwners =
-            try container.decodeIfPresent([String: String].self, forKey: .remoteOwners) ?? [:]
+        // A cache written before codex round 3 holds a bare login per remote; `RemoteIdentity`'s
+        // own decoder reads that as an owner with no host, and the host it could only have meant
+        // is origin's (MAJOR 4).
+        let decodedOwners =
+            try container.decodeIfPresent([String: RemoteIdentity].self, forKey: .remoteOwners) ?? [:]
+        let originHost = githubSlug?.host ?? ""
+        remoteOwners = decodedOwners.mapValues { identity in
+            identity.host.isEmpty
+                ? RemoteIdentity(host: originHost, owner: identity.owner)
+                : identity
+        }
+        pathIsDirectory = try container.decodeIfPresent(Bool.self, forKey: .pathIsDirectory) ?? true
         worktrees = try container.decode([Worktree].self, forKey: .worktrees)
         branches = try container.decode([Branch].self, forKey: .branches)
         openPRsNotOnThisMac = try container.decode([PRInfo].self, forKey: .openPRsNotOnThisMac)

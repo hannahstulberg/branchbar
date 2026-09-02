@@ -107,6 +107,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         checkSignInDirectoriesAreUnique()
         Actions.openTerminalForSignIn(command: command)
 
+        checkNonDirectoryPathsAreRefused()
+
         Actions.openPR(url: "https://github.com/hannahstulberg/branchbar", host: "github.com")
         Actions.openPR(url: "http://github.com/hannahstulberg/branchbar", host: "github.com")
         Actions.openPR(url: "file:///etc/passwd", host: "github.com")
@@ -117,6 +119,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Log.info("action check: done")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.terminate(nil) }
+    }
+
+    /// codex round 3, BLOCKER 1: the shape that used to be a click away from executing.
+    ///
+    /// A row's path comes from `git worktree list --porcelain` or from `cache.json`, and neither
+    /// is trusted: a crafted worktree record, or a tampered cache, can name `/tmp/payload.command`
+    /// as a branch's folder. On a Mac with neither Cursor nor VS Code the editor chain ends at
+    /// `open -a Terminal <path>`, and Terminal *runs* a `.command` document. Three targets are
+    /// built here — a regular `.command` file, a FIFO, and a symlink pointing at a real directory
+    /// — and every row action must refuse all three while still accepting the real folder the
+    /// probe was given. The clipboard is read back afterwards because a refusal that still
+    /// overwrote it would have handed the path out anyway.
+    private func checkNonDirectoryPathsAreRefused() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BranchBar-action-check-\(UUID().uuidString)", isDirectory: true)
+        guard (try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)) != nil
+        else {
+            Log.info("action check: could not build the non-directory targets")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let command = directory.appendingPathComponent("payload.command", isDirectory: false)
+        try? "#!/bin/zsh\necho payload\n".write(to: command, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: command.path)
+
+        let fifo = directory.appendingPathComponent("payload.fifo", isDirectory: false)
+        let madeFIFO = mkfifo(fifo.path, 0o600) == 0
+
+        let link = directory.appendingPathComponent("payload.link", isDirectory: false)
+        let madeLink = (try? FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: directory)) != nil
+
+        let sentinel = "action-check-clipboard-sentinel"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(sentinel, forType: .string)
+
+        var targets: [(String, String)] = [("command-file", command.path)]
+        if madeFIFO { targets.append(("fifo", fifo.path)) }
+        if madeLink { targets.append(("symlink-to-directory", link.path)) }
+        targets.append(
+            ("missing", directory.appendingPathComponent("absent", isDirectory: true).path))
+
+        var verdicts: [String] = []
+        for target in targets {
+            let editor = Actions.openInAvailableEditor(path: target.1)
+            let finder = Actions.revealInFinder(path: target.1)
+            let copied = Actions.copyPath(target.1)
+            verdicts.append(
+                "\(target.0): refusedEditor=\(!editor) refusedFinder=\(!finder) "
+                    + "refusedCopy=\(!copied)")
+        }
+        // The editor chain ends at Terminal only on a Mac with neither Cursor nor VS Code, and this
+        // one may have both, so the step that would have executed the file is asked directly.
+        let terminal = Actions.openInTerminal(path: command.path)
+        let clipboard = NSPasteboard.general.string(forType: .string) ?? "—"
+        Log.info("action check: open -a Terminal on a .command file refused=\(!terminal)")
+        Log.info("action check: non-directory targets " + verdicts.joined(separator: " · "))
+        Log.info(
+            "action check: clipboard survived the refusals=\(clipboard == sentinel) · "
+                + "a real folder still passes=\(ActionPaths.isDirectory(directory.path))")
     }
 
     /// The `BRANCHBAR_ACTION_CHECK` value that runs the cancel probe rather than a folder's
@@ -230,11 +295,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("launch at login check: unknown mode \(mode)")
         }
         LaunchAtLogin.logCurrentState()
+        let live = LaunchAtLogin.state()
         Log.info(
-            "launch at login check: plist=\(LaunchAtLogin.hasLaunchAgentPlist) "
+            "launch at login check: plist=\(live.fileExists) type=\(live.fileType) "
                 + "path=\(LaunchAtLogin.launchAgentURL.path) bundle=\(Bundle.main.bundlePath)")
+        // codex round 3, MAJOR 5: the fact the toggle now depends on. `launchctl print` exiting 0
+        // says the label is taken; this says by what, and whether that is the executable this
+        // build would have registered.
+        Log.info(
+            "launch at login check: verified live program=\(live.loadedProgram ?? "none") "
+                + "wanted=\(LaunchAtLogin.installedExecutablePath) "
+                + "matches=\(live.loadedProgram == LaunchAtLogin.installedExecutablePath) "
+                + "isOurs=\(live.loadedProgramIsOurs) toggleReadsOn=\(LaunchAtLogin.isEnabled)")
+        checkLaunchctlPrintParsing()
         checkLaunchAgentPlistSchema()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+    }
+
+    /// codex round 3, MAJOR 5 and MINOR 1: the two grammars this file now depends on, exercised
+    /// against fixed text so they are evidence on a Mac where nothing is loaded.
+    ///
+    /// `launchctl print` prints `program = <path>` for a job that has a `Program`, and
+    /// `program identifier = <relative path>` for one another process submitted — which is not a
+    /// program path and must not be read as one. The plist half checks that
+    /// `PropertyListSerialization` round-trips a `Program` containing the XML metacharacters a
+    /// managed home directory can carry, which string interpolation used to emit unescaped.
+    private func checkLaunchctlPrintParsing() {
+        let samples: [(String, String, String?)] = [
+            ("program", "\tpath = /Users/x/Library/LaunchAgents/a.plist\n\tprogram = /Applications/BranchBar.app/Contents/MacOS/BranchBar\n\targuments = {\n",
+             "/Applications/BranchBar.app/Contents/MacOS/BranchBar"),
+            ("program-identifier-only", "\tpath = (submitted by smd.310)\n\tprogram identifier = Contents/Library/LaunchAgents/other\n", nil),
+            ("no-program", "\tpath = (submitted by runningboardd.384)\n\tactive count = 1\n", nil),
+            ("empty-output", "", nil),
+        ]
+        let verdicts = samples.map { name, output, expected in
+            "\(name)=\(LaunchAtLogin.programPath(inLaunchctlPrint: output) == expected)"
+        }
+        Log.info("launch at login check: launchctl print parse " + verdicts.joined(separator: " "))
+
+        let hostile = "/Users/a&b/<Applications>/BranchBar.app/Contents/MacOS/BranchBar"
+        let plist: [String: Any] = [
+            "Label": LaunchAtLogin.bundleID, "Program": hostile, "RunAtLoad": true,
+        ]
+        let data = try? PropertyListSerialization.data(
+            fromPropertyList: plist, format: .xml, options: 0)
+        let parsed = data.flatMap {
+            try? PropertyListSerialization.propertyList(from: $0, options: [], format: nil)
+        } as? [String: Any]
+        Log.info(
+            "launch at login check: plist serialization round-trips a Program carrying & and <"
+                + " = \(parsed?["Program"] as? String == hostile)")
     }
 
     /// codex MAJOR 8: `Label` and `Program` were the whole check, so a plist carrying those two

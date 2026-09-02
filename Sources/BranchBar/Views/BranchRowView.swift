@@ -13,7 +13,7 @@ struct BranchRowView: View {
     let prHost: String?
 
     var body: some View {
-        Button(action: { perform(row.primaryAction) }) {
+        Button(action: performPrimaryAction) {
             HStack(alignment: .top, spacing: 6) {
                 DecorativeIcon(name: leadingGlyph)
                     .frame(width: Metrics.glyphColumn, alignment: .leading)
@@ -70,23 +70,42 @@ struct BranchRowView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(row.accessibilityLabel)
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction(named: row.primaryAction.label) { perform(row.primaryAction) }
         // VoiceOver reaches a context menu through the rotor, so the item the mouse just gained is
-        // an accessibility action too (§5a: a control the mouse has, the keyboard has).
+        // an accessibility action too (§5a: a control the mouse has, the keyboard has). The
+        // primary action joined them when it became optional: a row whose worktree record is
+        // prunable or bare has no folder to open, and an action named after one it does not have
+        // is a promise VoiceOver would read aloud.
         .accessibilityActions {
+            if let action = row.primaryAction {
+                Button(action.label) { perform(action) }
+            }
             if let url = row.prURL, !url.isEmpty {
                 Button(Strings.openPRActionLabel) { Actions.openPR(url: url, host: prHost) }
             }
         }
     }
 
+    /// The click, and what happens when there is nothing to click: `BranchRowVM.primaryAction` is
+    /// optional, because a worktree record git has marked prunable names a folder that is not
+    /// there any more (codex round 3, BLOCKER 1). The row still draws — it is a branch the repo
+    /// has — and clicking it does nothing but say so in the log.
+    private func performPrimaryAction() {
+        guard let action = row.primaryAction else {
+            Log.info("action: \(row.title) has no folder to open")
+            return
+        }
+        perform(action)
+    }
+
     /// The secondary actions §5a names. `BranchRowVM` holds only `primaryAction`, so these labels
     /// are view-owned chrome pinned by packet 2.2's frozen exemption list.
     @ViewBuilder private var menu: some View {
-        Button {
-            perform(row.primaryAction)
-        } label: {
-            Label(row.primaryAction.label, systemImage: Glyph.openInEditor)
+        if let action = row.primaryAction {
+            Button {
+                perform(action)
+            } label: {
+                Label(action.label, systemImage: Glyph.openInEditor)
+            }
         }
         // Only on a row whose branch actually matched a PR (packet 4.3's `BranchRowVM.prURL`): an
         // item that opens nothing is worse than no item.
@@ -114,7 +133,7 @@ struct BranchRowView: View {
     /// A row's primary action is `.openURL` carrying an absolute path (DECISION-LOG, packet 2.2),
     /// which is also the folder Finder and the clipboard want.
     private var folderPath: String? {
-        guard let payload = row.primaryAction.payload, payload.hasPrefix("/") else { return nil }
+        guard let payload = row.primaryAction?.payload, payload.hasPrefix("/") else { return nil }
         return payload
     }
 

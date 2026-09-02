@@ -255,6 +255,37 @@ if options.command == .scan {
 
 // MARK: - snapshot
 
+// codex round 3, MAJOR 1: `snapshot` walks in the same killable helper the app uses, and the
+// helper it spawns is *this binary's* own `scan` subcommand.
+//
+// Until now the CLI built its coordinators without a `scanRunner`, so both fell back to
+// `InProcessScanRunner`: the walk ran in this process, `scanWithinDeadline` raced it against a
+// timer, and when the timer won it cancelled a task that was parked inside `open()`/`readdir()`
+// and then waited for it. A TCC prompt nobody answered, a dead mount, or a stalled File Provider
+// therefore hung the shipped CLI with no deadline able to end it — the same failure the app fixed
+// in round 2 and the reason `scan` exists at all. A process can be killed; the runner's
+// `Command.timeout` is `RefreshPolicy.scanDeadline`, which `ProcessCommandRunner` turns into
+// SIGTERM then SIGKILL to the helper's process group.
+//
+// The child is resolved from the running executable rather than from a PATH lookup of
+// `branchbar-cli`: `realpath` of `argv[0]` when that names a file, otherwise
+// `Bundle.main.executableURL`. A copy installed elsewhere, or a different build earlier on PATH,
+// is then not what answers.
+func ownExecutablePath() -> String? {
+    let manager = FileManager.default
+    if let argv0 = CommandLine.arguments.first, !argv0.isEmpty,
+       let resolved = realpath(argv0, nil) {
+        defer { free(resolved) }
+        let path = String(cString: resolved)
+        if manager.isExecutableFile(atPath: path) { return path }
+    }
+    if let url = Bundle.main.executableURL {
+        let path = url.resolvingSymlinksInPath().path
+        if manager.isExecutableFile(atPath: path) { return path }
+    }
+    return nil
+}
+
 let ghPath = locator.locate(.gh).path
 
 let policy = RefreshPolicy()
@@ -264,10 +295,32 @@ let gitVersion = try? await runner.run(
 
 let tools = ToolStatus(gitPath: gitPath, gitVersion: gitVersion, ghPath: ghPath)
 
+// codex round 3, MINOR 2: a `snapshot` run that was not given `--cache-dir` writes its cache into
+// a UUID-named temporary directory, and nothing ever removed it — so every Gate 3 run, every
+// headless fallback, and every `make snapshot` left a `cache.json` holding repository paths,
+// branch names and PR metadata in `/var/folders/…` for the next person with that account.
+//
+// The removal is registered rather than written as a `defer`: top-level code in `main.swift` ends
+// at `exit(_:)` on every path this file takes, and `exit` runs `atexit` handlers while skipping
+// `defer` blocks entirely. A directory the user named with `--cache-dir` is theirs and is never
+// touched.
+enum TemporaryDirectories {
+    /// Written before any concurrency starts and read from the exit handler; the directories are
+    /// this process's own.
+    nonisolated(unsafe) static var paths: [String] = []
+
+    static func removeAll() {
+        for path in paths { try? FileManager.default.removeItem(atPath: path) }
+        paths = []
+    }
+}
+atexit { TemporaryDirectories.removeAll() }
+
 let cacheDirectory = options.cacheDirectory
     ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("branchbar-cli-\(UUID().uuidString)")
 try? FileManager.default.createDirectory(
     atPath: cacheDirectory, withIntermediateDirectories: true)
+if options.cacheDirectory == nil { TemporaryDirectories.paths.append(cacheDirectory) }
 let cache = FileCacheStore(
     fileURL: URL(fileURLWithPath: (cacheDirectory as NSString).appendingPathComponent("cache.json")))
 
@@ -304,10 +357,29 @@ let discoveryDirectory = (NSTemporaryDirectory() as NSString)
     .appendingPathComponent("branchbar-cli-scan-\(UUID().uuidString)")
 try? FileManager.default.createDirectory(
     atPath: discoveryDirectory, withIntermediateDirectories: true)
+// Removed below on the path that reaches it, and at exit on the paths that do not (MINOR 2).
+TemporaryDirectories.paths.append(discoveryDirectory)
 let discoveryCache = FileCacheStore(
     fileURL: URL(
         fileURLWithPath: (discoveryDirectory as NSString).appendingPathComponent("cache.json")))
 let silentRunner = NoCommandsRunner()
+
+/// The walk runs where a deadline can reach it: a child process this one can kill (MAJOR 1).
+/// Without an own-executable path — which should not happen for a binary that is running — the
+/// in-process walk is what is left, and stderr says so rather than the table.
+let scanRunner: any ScanRunning
+if let helper = ownExecutablePath() {
+    scanRunner = HelperProcessScanRunner(
+        helperExecutable: helper,
+        runner: runner,
+        scanDeadline: policy.scanDeadline,
+        gitExecutable: gitPath)
+} else {
+    scanRunner = InProcessScanRunner(scanner: scanner)
+    FileHandle.standardError.write(Data(
+        "branchbar-cli: could not resolve this executable, so the scan runs in-process\n".utf8))
+}
+
 let discovery = RefreshCoordinator(
     scanner: scanner,
     loader: RepoLoader(
@@ -318,7 +390,8 @@ let discovery = RefreshCoordinator(
     cache: discoveryCache,
     policy: policy,
     scanPolicy: scanPolicy,
-    fileSystem: fileSystem)
+    fileSystem: fileSystem,
+    scanRunner: scanRunner)
 
 _ = await discovery.refresh(
     force: true,
@@ -352,7 +425,10 @@ let coordinator = RefreshCoordinator(
     cache: cache,
     policy: policy,
     scanPolicy: scanPolicy,
-    fileSystem: fileSystem)
+    fileSystem: fileSystem,
+    // The refresh rescans when the discovery pass came back truncated, so its walk needs the same
+    // killable process the discovery walk had.
+    scanRunner: scanRunner)
 
 let snapshot = await coordinator.refresh(
     force: true,

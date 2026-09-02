@@ -40,16 +40,43 @@ public enum PushInfoDeriver {
     /// untracked branch passes `"origin"`. `remoteRefExists` follows from the tip: a
     /// remote-tracking ref that `for-each-ref` listed is a ref that exists (codex round 2,
     /// MAJOR 5).
+    /// `pushHistoryUnreadable` is the reflog's third answer (codex round 3, MAJOR 7): a nonempty
+    /// line the reader could not vouch for stopped the walk, so there is no push date to report
+    /// and the tip-commit fallback would be reporting a date over corruption. It outranks every
+    /// other source, because the thing below the corruption could be the deletion that makes the
+    /// rest of the file a lie.
+    ///
+    /// `remoteRefsState` is what `for-each-ref -- refs/remotes/` did (codex round 3, MAJOR 6).
+    /// `.failed` travels to the row as `remoteRefsKnown: false`, which is what keeps "No tracked
+    /// remote branch" and "In sync with last-known origin" off a row whose remote nobody read.
     public static func derive(
         observation: ReflogObservation?,
         upstream: Upstream?,
         remoteTipOID: String?,
         remoteTipCommitDate: Date?,
         fetchHeadObservedAt: Date? = nil,
-        remoteName: String? = nil
+        remoteName: String? = nil,
+        pushHistoryUnreadable: Bool = false,
+        remoteRefsState: RemoteFactState = .known
     ) -> PushInfo {
         let remote = remoteName ?? upstream?.remote
         let remoteRefExists = remoteTipOID != nil || remoteTipCommitDate != nil
+        let remoteRefsKnown = remoteRefsState != .failed
+
+        // The uncertainty boundary short-circuits both arms below: no date, no OID, no
+        // "has moved since" comparison against an OID this reader refused to trust.
+        if pushHistoryUnreadable {
+            return PushInfo(
+                source: .unreadable,
+                hasUpstream: upstream != nil,
+                upstreamGone: upstream?.isGone ?? false,
+                aheadOfLastKnownRemote: (upstream?.isGone ?? true) ? nil : upstream?.ahead,
+                remoteRefObservedAt: fetchHeadObservedAt,
+                remoteTipCommitDate: remoteTipCommitDate,
+                remoteName: remote,
+                remoteRefExists: remoteRefExists,
+                remoteRefsKnown: remoteRefsKnown)
+        }
 
         guard let upstream else {
             // No tracking configuration, but the reflog of a same-named remote ref may still hold
@@ -60,7 +87,8 @@ public enum PushInfoDeriver {
                     source: .none,
                     hasUpstream: false,
                     remoteName: remote,
-                    remoteRefExists: remoteRefExists)
+                    remoteRefExists: remoteRefExists,
+                    remoteRefsKnown: remoteRefsKnown)
             }
             return PushInfo(
                 observedPushAt: observation.pushedAt,
@@ -72,7 +100,8 @@ public enum PushInfoDeriver {
                 remoteRefObservedAt: fetchHeadObservedAt,
                 remoteTipCommitDate: remoteTipCommitDate,
                 remoteName: remote,
-                remoteRefExists: remoteRefExists)
+                remoteRefExists: remoteRefExists,
+                remoteRefsKnown: remoteRefsKnown)
         }
 
         let source: PushInfo.Source
@@ -98,7 +127,8 @@ public enum PushInfoDeriver {
             remoteRefObservedAt: fetchHeadObservedAt,
             remoteTipCommitDate: remoteTipCommitDate,
             remoteName: remote,
-            remoteRefExists: remoteRefExists
+            remoteRefExists: remoteRefExists,
+            remoteRefsKnown: remoteRefsKnown
         )
     }
 

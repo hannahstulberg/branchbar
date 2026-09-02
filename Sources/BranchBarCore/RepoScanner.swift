@@ -107,6 +107,17 @@ public struct RepoScanner: Sendable {
     /// recent totals, large enough that the helper is not writing a line per directory.
     private static let counterReportInterval = 25
 
+    /// Directories one "Add folder…" root may cost before the walk stops and says the root is
+    /// incomplete (codex round 3, MAJOR 8).
+    ///
+    /// An extra root is walked with **no depth limit** by design, which is what makes a repo eight
+    /// folders down reachable — and what makes a root somebody put at `/` or on a huge mounted
+    /// volume an unbounded walk that the scan deadline kills, every refresh, with a partial list
+    /// each time and nothing on screen saying why. The budget makes that case finite and visible:
+    /// the root joins the "not scanned" list and the result is truncated, so the notice appears
+    /// and the next refresh rescans.
+    public static let extraRootCandidateBudget = 10_000
+
     /// Walks `policy.homeRoot` breadth-first to `policy.maxDepth` and every `policy.extraRoots`
     /// entry with no depth limit, in both cases skipping hidden directories and
     /// `policy.skipDirectoryNames`, never following symlinks, never descending into a directory
@@ -124,6 +135,10 @@ public struct RepoScanner: Sendable {
             policy: policy,
             deferTCCGatedFolders: true,
             descendIntoRootRepo: true,
+            // codex round 3, MAJOR 2: the home root itself and everything directly under it, so a
+            // helper killed inside an ordinary folder still leaves the line that names it.
+            announceDepth: 1,
+            candidateBudget: nil,
             into: accumulator)
         for root in policy.extraRoots where !accumulator.truncated {
             accumulator = await walk(
@@ -132,6 +147,8 @@ public struct RepoScanner: Sendable {
                 policy: policy,
                 deferTCCGatedFolders: false,
                 descendIntoRootRepo: false,
+                announceDepth: 0,
+                candidateBudget: Self.extraRootCandidateBudget,
                 into: accumulator)
         }
 
@@ -302,10 +319,13 @@ public struct RepoScanner: Sendable {
         policy: ScanPolicy,
         deferTCCGatedFolders: Bool,
         descendIntoRootRepo: Bool,
+        announceDepth: Int,
+        candidateBudget: Int?,
         into initial: Walk
     ) async -> Walk {
         var accumulator = initial
         let rootPath = Self.normalized(root)
+        let candidatesAtStart = accumulator.candidatesExamined
         var queue: [(path: String, depth: Int)] = [(rootPath, 0)]
         var deferred: [(path: String, depth: Int)] = []
         var gatedPaths: Set<String> = []
@@ -340,7 +360,20 @@ public struct RepoScanner: Sendable {
             // written at all. This line is the whole record that the walk was inside this folder
             // when the process was killed, and it is what the "Not scanned: Documents" row is
             // rebuilt from (packet F11).
-            if gatedPaths.contains(path) { onProgress?(.entering(path)) }
+            // codex round 3, MAJOR 2: announced for the gated folders **and** for every folder at
+            // `announceDepth` or above, which is the home root's own children and each extra root.
+            // Only the three gated names were announced before, so a helper killed inside an
+            // ordinary directory or an added root left a result that was marked truncated and
+            // named no folder at all — and the presenter suppressed its warning on exactly that
+            // emptiness.
+            if depth <= announceDepth || gatedPaths.contains(path) { onProgress?(.entering(path)) }
+
+            if let candidateBudget, accumulator.candidatesExamined - candidatesAtStart >= candidateBudget {
+                accumulator.truncated = true
+                if accumulator.reportNotScanned(rootPath) { onProgress?(.unreadable(rootPath)) }
+                onProgress?(.skipped(accumulator.counters))
+                return accumulator
+            }
 
             let entries: [DirectoryEntry]
             do {

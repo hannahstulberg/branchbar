@@ -36,7 +36,16 @@ public enum RepoAssembler {
         /// `config --get remote.<name>.url`. A branch tracking a remote that is absent here has an
         /// owner that exists and could not be established, which is not the same as origin's
         /// (codex round 2, MAJOR 4).
-        public var remoteOwners: [String: String]
+        public var remoteOwners: [String: RemoteIdentity]
+        /// Branch names whose reflog file stopped at an uncertainty boundary (codex round 3,
+        /// MAJOR 7). Their rows say the push history is unreadable rather than falling back to a
+        /// commit date over corruption.
+        public var uncertainPushHistory: Set<String>
+        /// What this refresh established about `remote.origin.url` and the remote-ref listing, as
+        /// opposed to what it guessed from a missing value (codex round 3, MAJOR 6).
+        public var remoteFacts: RemoteFacts
+        /// `path` is an existing directory this app is willing to open (codex round 3, BLOCKER 1).
+        public var pathIsDirectory: Bool
         public var prAvailability: PRAvailability
         public var prFetchedAt: Date?
         public var prLoadState: PRLoadState
@@ -57,7 +66,10 @@ public enum RepoAssembler {
             pullRequests: [PRInfo] = [],
             authoredOpenPullRequests: [PRInfo] = [],
             queryCoverage: PRQueryCoverage = PRQueryCoverage(),
-            remoteOwners: [String: String] = [:],
+            remoteOwners: [String: RemoteIdentity] = [:],
+            uncertainPushHistory: Set<String> = [],
+            remoteFacts: RemoteFacts = RemoteFacts(),
+            pathIsDirectory: Bool = true,
             prAvailability: PRAvailability = .available,
             prFetchedAt: Date? = nil,
             prLoadState: PRLoadState = .notLoaded,
@@ -78,6 +90,9 @@ public enum RepoAssembler {
             self.authoredOpenPullRequests = authoredOpenPullRequests
             self.queryCoverage = queryCoverage
             self.remoteOwners = remoteOwners
+            self.uncertainPushHistory = uncertainPushHistory
+            self.remoteFacts = remoteFacts
+            self.pathIsDirectory = pathIsDirectory
             self.prAvailability = prAvailability
             self.prFetchedAt = prFetchedAt
             self.prLoadState = prLoadState
@@ -123,7 +138,12 @@ public enum RepoAssembler {
             let sameNamedOriginTip = remoteTips["origin/\(name)"]
             let tip = upstreamTip ?? sameNamedOriginTip
             let remoteName = upstream?.remote ?? (sameNamedOriginTip != nil ? "origin" : nil)
-            let owner = upstreamOwnerLogin(upstream: upstream, slug: slug, remoteOwners: inputs.remoteOwners)
+            // codex round 3, MAJOR 4: the identity is (host, owner), and an identity on another
+            // host is not a candidate for a PR on this one. `upstreamOwnerLogin` returns nil for
+            // it, which is the same answer as "never resolved" — `notChecked`, never a match.
+            let identity = upstreamIdentity(
+                upstream: upstream, slug: slug, remoteOwners: inputs.remoteOwners)
+            let owner = identity.flatMap { $0.matchesHost(slug?.host) ? $0.owner : nil }
             // A branch that tracks something whose owner this app never resolved: the head exists
             // on GitHub, and which head it is was never established (codex round 2, MAJOR 4).
             let ownerUnresolved = upstream != nil && owner == nil
@@ -176,7 +196,9 @@ public enum RepoAssembler {
                     remoteTipOID: tip?.objectName,
                     remoteTipCommitDate: tip?.committerDate,
                     fetchHeadObservedAt: inputs.fetchHeadObservedAt,
-                    remoteName: remoteName),
+                    remoteName: remoteName,
+                    pushHistoryUnreadable: inputs.uncertainPushHistory.contains(name),
+                    remoteRefsState: inputs.remoteFacts.remoteRefs),
                 group: group(
                     status: status,
                     tipSHA: row.objectName,
@@ -200,6 +222,8 @@ public enum RepoAssembler {
             path: inputs.path,
             remoteURL: inputs.remoteURL,
             githubSlug: slug,
+            remoteOwners: inputs.remoteOwners,
+            pathIsDirectory: inputs.pathIsDirectory,
             worktrees: inputs.worktrees,
             branches: branches,
             openPRsNotOnThisMac: openElsewhere,
@@ -217,9 +241,14 @@ public enum RepoAssembler {
     /// PLAN.md §5: worktrees join by exact branch name, and a worktree with no branch — a detached
     /// checkout — never joins (`noBranchWorktreeAppearsUnderRepoAndNoBranchClaimsIt`). The
     /// porcelain prints the full ref, so the key is its short name.
+    /// codex round 3, BLOCKER 1 adds two more records that never join: a **prunable** one, whose
+    /// path git itself says is gone or unusable, and a **bare** one, which has no working tree to
+    /// open at all. `RepoLoader` also marks a worktree prunable when its path is not an existing
+    /// directory, so this one filter is what keeps `/tmp/payload.command` — a `.command` document
+    /// Terminal executes — out of a branch row's action payload.
     static func worktreesByBranchName(_ worktrees: [Worktree]) -> [String: Worktree] {
         var byName: [String: Worktree] = [:]
-        for worktree in worktrees {
+        for worktree in worktrees where !worktree.isPrunable && !worktree.isBare {
             guard let ref = worktree.branch else { continue }
             let name = ref.hasPrefix("refs/heads/") ? String(ref.dropFirst("refs/heads/".count)) : ref
             // git allows one checkout per branch, so a later record for the same name would be a
@@ -234,14 +263,28 @@ public enum RepoAssembler {
     /// (`openElsewhereKeyedByOwnerAndBranchNotBranchAlone`), so it is only ever resolved:
     /// `remoteOwners` for any configured remote whose URL `RepoLoader` read, and the slug for
     /// origin, whose URL is the slug (codex round 2, MAJOR 4 widened this past origin).
+    static func upstreamIdentity(
+        upstream: Upstream?,
+        slug: GitHubSlug?,
+        remoteOwners: [String: RemoteIdentity] = [:]
+    ) -> RemoteIdentity? {
+        guard let upstream else { return nil }
+        if let resolved = remoteOwners[upstream.remote] { return resolved }
+        guard upstream.remote == "origin", let slug else { return nil }
+        return RemoteIdentity(host: slug.host, owner: slug.owner)
+    }
+
+    /// The owner half, and only when the upstream lives on the repo's own host (codex round 3,
+    /// MAJOR 4). An upstream on another host has an owner that is real and is not a candidate for
+    /// a PR in this repository, so it is reported as unresolved, which renders `notChecked`.
     static func upstreamOwnerLogin(
         upstream: Upstream?,
         slug: GitHubSlug?,
-        remoteOwners: [String: String] = [:]
+        remoteOwners: [String: RemoteIdentity] = [:]
     ) -> String? {
-        guard let upstream else { return nil }
-        if let resolved = remoteOwners[upstream.remote] { return resolved }
-        return upstream.remote == "origin" ? slug?.owner : nil
+        guard let identity = upstreamIdentity(upstream: upstream, slug: slug, remoteOwners: remoteOwners)
+        else { return nil }
+        return identity.matchesHost(slug?.host) ? identity.owner : nil
     }
 
     /// PLAN.md §5: `merged` = `prStatus == merged && tipSHA == headRefOid && worktreePath == nil`;

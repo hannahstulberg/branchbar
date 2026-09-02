@@ -351,7 +351,11 @@ public actor RefreshCoordinator {
         // here and the next rescan walks it.
         if var scan = merged.scan {
             var roots = scan.policy.extraRoots
-            for root in merged.manuallyAddedRepos where !roots.contains(root) { roots.append(root) }
+            // Bounded the same way `resolvedScanPolicy` bounds them (codex round 3, MAJOR 8):
+            // this is the other door a cached root walks through, and an unchecked one here would
+            // be written straight back into the policy the next refresh scans by.
+            for root in Self.acceptableExtraRoots(merged.manuallyAddedRepos, fileSystem: fileSystem)
+            where !roots.contains(root) { roots.append(root) }
             scan.policy.extraRoots = roots
             merged.scan = scan
         }
@@ -536,10 +540,65 @@ public actor RefreshCoordinator {
     private func resolvedScanPolicy(from cacheFile: CacheFile) -> ScanPolicy {
         var policy = self.scanPolicy ?? ScanPolicy(homeRoot: fileSystem.homeDirectory())
         var roots = policy.extraRoots
-        for root in cacheFile.manuallyAddedRepos where !roots.contains(root) {
+        for root in Self.acceptableExtraRoots(cacheFile.manuallyAddedRepos, fileSystem: fileSystem)
+        where !roots.contains(root) {
             roots.append(root)
         }
         policy.extraRoots = roots
         return policy
+    }
+
+    /// At most `maximumCachedRoots` entries.
+    ///
+    /// The cache file is JSON in Application Support that any process running as this user can
+    /// write, and every extra root is walked **with no depth limit** (PLAN.md §3). An unbounded
+    /// list of them is an unbounded scan that survives every relaunch.
+    public static let maximumCachedRoots = 32
+
+    /// The longest path an added root may be. macOS caps a component at 255 bytes and a path at
+    /// 1024; a value past that cannot name anything real.
+    public static let maximumRootPathBytes = 1024
+
+    /// The prefixes a folder picker on this Mac can produce: the user's own tree, a mounted
+    /// volume, or a Homebrew-style tree under `/opt`.
+    public static let allowedRootPrefixes = ["/Users", "/Volumes", "/opt"]
+
+    /// Which cached "Add folder…" roots this refresh is willing to walk (codex round 3, MAJOR 8).
+    ///
+    /// Every cached value used to be trusted verbatim, so a tampered cache holding `/` — or a dead
+    /// volume — forced a full-disk walk that the scan deadline killed after 20 seconds, every
+    /// refresh, forever, with a partial list each time and no way for the user to see why.
+    ///
+    /// Five rules, and each one rejects a real shape:
+    ///
+    /// - Absolute, and under one of `allowedRootPrefixes`. A relative path is not a root a folder
+    ///   picker produced, and `/System` or `/private/var` is not a place repos live.
+    /// - At most `maximumRootPathBytes`, so a megabyte-long string cannot ride in the policy.
+    /// - Never a filesystem or mount root: `/`, one of the prefixes themselves, or a bare
+    ///   `/Volumes/<name>`'s parent. A root with fewer than two components below `/` is the whole
+    ///   of somebody's disk.
+    /// - An existing directory, checked with `open(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)`, so an
+    ///   unmounted volume or a deleted folder costs nothing rather than 20 seconds a refresh.
+    /// - At most `maximumCachedRoots` of them, in the order the file lists them.
+    static func acceptableExtraRoots(_ roots: [String], fileSystem: FileSystem) -> [String] {
+        var accepted: [String] = []
+        for root in roots {
+            guard accepted.count < maximumCachedRoots else { break }
+            guard isAcceptableExtraRoot(root, fileSystem: fileSystem) else { continue }
+            if !accepted.contains(root) { accepted.append(root) }
+        }
+        return accepted
+    }
+
+    static func isAcceptableExtraRoot(_ root: String, fileSystem: FileSystem) -> Bool {
+        guard root.hasPrefix("/"), root.utf8.count <= maximumRootPathBytes else { return false }
+        guard !root.contains("\0") else { return false }
+        let components = root.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        // `/` is zero components; `/Volumes` is one, and so is `/Users`. Both are mount or tree
+        // roots, not folders anybody picked.
+        guard components.count >= 2 else { return false }
+        guard components.allSatisfy({ $0 != "." && $0 != ".." }) else { return false }
+        guard allowedRootPrefixes.contains("/" + components[0]) else { return false }
+        return fileSystem.isDirectoryNoFollow(atPath: root)
     }
 }

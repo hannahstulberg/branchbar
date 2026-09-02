@@ -107,7 +107,17 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
     public var pushTooltip: String
     /// "2 ahead of last-known origin"; nil when there is no upstream or nothing ahead.
     public var aheadLabel: String?
-    public var primaryAction: UserFacingFailure.Action
+    /// Opening the folder this row stands for — **nil when there is no folder to open** (codex
+    /// round 3, BLOCKER 1).
+    ///
+    /// It was not optional, so every row always carried an action and the payload was a path
+    /// taken from `git worktree list` or from a cached snapshot, both of which anyone who can
+    /// write under `~` controls. With no Cursor and no VS Code the fallback is `open -a Terminal`,
+    /// and Terminal *executes* a `.command` document, so a crafted prunable worktree record
+    /// naming `/tmp/payload.command` made a click run it. A path the refresh could not establish
+    /// as a directory now yields no action at all, and the shell re-checks the survivors at click
+    /// time.
+    public var primaryAction: UserFacingFailure.Action?
     public var accessibilityLabel: String
 
     public init(
@@ -118,7 +128,7 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
         pushLabel: String,
         pushTooltip: String,
         aheadLabel: String? = nil,
-        primaryAction: UserFacingFailure.Action,
+        primaryAction: UserFacingFailure.Action? = nil,
         accessibilityLabel: String
     ) {
         self.title = title
@@ -143,7 +153,8 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
         pushLabel = try container.decode(String.self, forKey: .pushLabel)
         pushTooltip = try container.decode(String.self, forKey: .pushTooltip)
         aheadLabel = try container.decodeIfPresent(String.self, forKey: .aheadLabel)
-        primaryAction = try container.decode(UserFacingFailure.Action.self, forKey: .primaryAction)
+        primaryAction = try container.decodeIfPresent(
+            UserFacingFailure.Action.self, forKey: .primaryAction)
         accessibilityLabel = try container.decode(String.self, forKey: .accessibilityLabel)
     }
 }
