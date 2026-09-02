@@ -4,7 +4,7 @@
 
 | Date | Session UUID | Model | What happened | Distilled log |
 |---|---|---|---|---|
-| 2026-09-01 | `cced85a0-5ced-4282-bc94-e23dcbe42d18` | Fable 5.1 (orchestrator), Opus subagents | Scoped BranchBar with Hannah, wrote PLAN.md, ran Gate 1 (design review, eng review, Opus adversarial review; codex unavailable), plan approved, repo created, Phase 0 started | `session-logs/2026-09-01-plan-and-bootstrap.md` |
+| 2026-09-01 | `cced85a0-5ced-4282-bc94-e23dcbe42d18` | Fable 5.1 (orchestrator), Opus subagents | Scoped and planned BranchBar with Hannah; Gate 1 (design, eng, Opus adversarial, then codex); built phases 0–5 via parallel Opus packets with red/green SHAs; pre-ship gate (code review + five codex rounds) drove fix waves F1–F18; cut v0.9.1 at 1038a4c | `session-logs/2026-09-01-plan-and-bootstrap.md` |
 
 Provenance queries:
 
