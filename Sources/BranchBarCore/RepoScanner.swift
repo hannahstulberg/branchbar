@@ -6,33 +6,270 @@ import Foundation
 /// monorepo is reachable by adding it. Symlinks are not followed and bare repos are out of scope.
 public struct RepoScanner: Sendable {
     private let fileSystem: FileSystem
+    /// Optional on purpose: the dedupe key is `git rev-parse --path-format=absolute
+    /// --git-common-dir --show-toplevel` when a runner is available, and the `.git` directory
+    /// path (or the `gitdir:` line) when one is not, so a unit test can scan a tree without a
+    /// process seam and still get one repo per common directory.
+    private let commandRunner: CommandRunner?
+    private let gitExecutable: String
 
-    public init(fileSystem: FileSystem) {
+    public init(
+        fileSystem: FileSystem,
+        commandRunner: CommandRunner? = nil,
+        gitExecutable: String = "/usr/bin/git"
+    ) {
         self.fileSystem = fileSystem
+        self.commandRunner = commandRunner
+        self.gitExecutable = gitExecutable
     }
 
-    /// OWNER: packet 2.4 — walk `policy.homeRoot` breadth-first to `policy.maxDepth` and every
-    /// `policy.extraRoots` entry with no depth limit, in both cases skipping hidden directories
-    /// and `policy.skipDirectoryNames`, never following symlinks, never descending into a
-    /// directory that already yielded a repo, classifying a `.git` **file** by its `gitdir:` line
-    /// into a worktree checkout or a submodule and excluding both, deduping the survivors by the
-    /// `.git` common directory, and returning a `ScanResult` that counts every directory examined,
-    /// every unreadable directory by path, every depth cut, and every hidden skip.
-    public func scan(policy: ScanPolicy) throws -> ScanResult {
-        fatalError("OWNER: packet 2.4 — BFS the home root to depth 6 and every extra root with no limit, skipping hidden and listed directories, excluding worktree checkouts and submodules, deduping by common dir, and reporting unreadable, depth-cut, and hidden counts.")
+    /// Walks `policy.homeRoot` breadth-first to `policy.maxDepth` and every `policy.extraRoots`
+    /// entry with no depth limit, in both cases skipping hidden directories and
+    /// `policy.skipDirectoryNames`, never following symlinks, never descending into a directory
+    /// that already yielded a repo, classifying a `.git` **file** by its `gitdir:` line into a
+    /// worktree checkout or a submodule and excluding both, deduping the survivors by the `.git`
+    /// common directory, and returning a `ScanResult` that counts every directory examined, every
+    /// unreadable directory by path, every depth cut, and every hidden skip.
+    public func scan(policy: ScanPolicy) async throws -> ScanResult {
+        let scannedAt = Date()
+        var accumulator = Walk()
+
+        walk(root: policy.homeRoot, maxDepth: policy.maxDepth, policy: policy, into: &accumulator)
+        for root in policy.extraRoots {
+            walk(root: root, maxDepth: nil, policy: policy, into: &accumulator)
+        }
+
+        let repos = await resolve(accumulator.candidates)
+
+        return ScanResult(
+            policy: policy,
+            scannedAt: scannedAt,
+            repos: repos,
+            candidatesExamined: accumulator.candidatesExamined,
+            unreadableDirectories: accumulator.unreadableDirectories,
+            depthCutDirectories: accumulator.depthCutDirectories,
+            skippedHiddenDirectories: accumulator.skippedHiddenDirectories,
+            skippedWorktreeCheckouts: accumulator.skippedWorktreeCheckouts,
+            skippedSubmodules: accumulator.skippedSubmodules
+        )
     }
 
-    /// OWNER: packet 2.4 — read a `.git` file's `gitdir: <path>` line and classify the checkout:
-    /// a path containing `/worktrees/` is a linked worktree, one containing `/modules/` is a
-    /// submodule, anything else is a candidate repo whose common dir is that path.
+    /// Reads a `.git` file's `gitdir: <path>` line and classifies the checkout: a path inside
+    /// `…/.git/worktrees/` is a linked worktree whose **common directory** is everything before
+    /// `/worktrees/`, one inside `…/.git/modules/` is a submodule, anything else (a
+    /// `--separate-git-dir` repo) is a candidate whose common dir is the path on the line.
     public static func classifyGitFile(contents: String) -> GitFileClassification {
-        fatalError("OWNER: packet 2.4 — classify a `.git` file's gitdir: line as a worktree checkout, a submodule, or a candidate repo.")
+        for rawLine in contents.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.hasPrefix(Self.gitdirPrefix) else { continue }
+            let gitDirectory = String(line.dropFirst(Self.gitdirPrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !gitDirectory.isEmpty else { return .unrecognized }
+
+            if let marker = gitDirectory.range(of: Self.worktreesMarker, options: .backwards) {
+                // `<common>/.git/worktrees/<name>` — the common directory is the main repo's
+                // `.git`, which is also the dedupe key the checkout would otherwise collide on.
+                let commonDirectory = String(gitDirectory[gitDirectory.startIndex..<marker.lowerBound]) + "/.git"
+                return .worktreeCheckout(commonDirectory: commonDirectory)
+            }
+            if gitDirectory.range(of: Self.modulesMarker, options: .backwards) != nil {
+                return .submodule(gitDirectory: gitDirectory)
+            }
+            return .candidate(gitDirectory: gitDirectory)
+        }
+        return .unrecognized
     }
+
+    private static let gitdirPrefix = "gitdir:"
+    private static let worktreesMarker = "/.git/worktrees/"
+    private static let modulesMarker = "/.git/modules/"
 
     public enum GitFileClassification: Hashable, Codable, Sendable {
         case worktreeCheckout(commonDirectory: String)
         case submodule(gitDirectory: String)
         case candidate(gitDirectory: String)
         case unrecognized
+    }
+
+    // MARK: - Traversal
+
+    /// A directory that carried a repo marker, before any git command has run against it.
+    private struct Candidate {
+        var path: String
+        /// The common directory the filesystem alone can tell us: `<path>/.git` for a marker
+        /// directory, the `gitdir:` line for a `.git` file.
+        var commonDirectoryHint: String
+        /// `.git` is a real directory here, which is what breaks a dedupe tie.
+        var gitIsDirectory: Bool
+    }
+
+    /// Everything one or more root walks accumulated.
+    private struct Walk {
+        var candidates: [Candidate] = []
+        var candidatesExamined = 0
+        var unreadableDirectories: [String] = []
+        var depthCutDirectories = 0
+        var skippedHiddenDirectories = 0
+        var skippedWorktreeCheckouts: [String] = []
+        var skippedSubmodules: [String] = []
+    }
+
+    /// Breadth-first with an explicit `(path, depth)` queue. `maxDepth` is `nil` for an
+    /// "Add folder…" root, which has no limit at all (PLAN.md §3).
+    private func walk(
+        root: String,
+        maxDepth: Int?,
+        policy: ScanPolicy,
+        into accumulator: inout Walk
+    ) {
+        var queue: [(path: String, depth: Int)] = [(Self.normalized(root), 0)]
+        var next = 0
+
+        while next < queue.count {
+            let (path, depth) = queue[next]
+            next += 1
+
+            let entries: [DirectoryEntry]
+            do {
+                entries = try fileSystem.contentsOfDirectory(atPath: path)
+            } catch {
+                // A TCC denial is the normal case on a managed Mac: reported, never swallowed.
+                if !accumulator.unreadableDirectories.contains(path) {
+                    accumulator.unreadableDirectories.append(path)
+                }
+                continue
+            }
+            accumulator.candidatesExamined += 1
+
+            if let marker = entries.first(where: { $0.name == ".git" }) {
+                if marker.isDirectory {
+                    accumulator.candidates.append(
+                        Candidate(path: path, commonDirectoryHint: path + "/.git", gitIsDirectory: true)
+                    )
+                    continue
+                }
+                let contents = (try? fileSystem.readFile(atPath: marker.path))
+                    .map { String(decoding: $0, as: UTF8.self) } ?? ""
+                switch Self.classifyGitFile(contents: contents) {
+                case .worktreeCheckout:
+                    accumulator.skippedWorktreeCheckouts.append(path)
+                    continue
+                case .submodule:
+                    accumulator.skippedSubmodules.append(path)
+                    continue
+                case .candidate(let gitDirectory):
+                    accumulator.candidates.append(
+                        Candidate(path: path, commonDirectoryHint: gitDirectory, gitIsDirectory: false)
+                    )
+                    continue
+                case .unrecognized:
+                    // Not a repo marker we can vouch for; keep walking rather than inventing a row.
+                    break
+                }
+            }
+
+            for entry in entries where entry.isDirectory {
+                // Following a symlink turns the home scan into an unbounded walk and can list the
+                // same repo twice; the target is reachable by adding it as a root.
+                if entry.isSymbolicLink { continue }
+                if entry.name == ".git" { continue }
+                if policy.skipHiddenDirectories, entry.name.hasPrefix(".") {
+                    accumulator.skippedHiddenDirectories += 1
+                    continue
+                }
+                if Self.isSkipped(path: entry.path, name: entry.name, names: policy.skipDirectoryNames) {
+                    continue
+                }
+                if let maxDepth, depth + 1 > maxDepth {
+                    accumulator.depthCutDirectories += 1
+                    continue
+                }
+                queue.append((Self.normalized(entry.path), depth + 1))
+            }
+        }
+    }
+
+    /// A single-component entry matches a directory **name** at any depth; a multi-component
+    /// entry (the frozen list holds one, `"go/pkg"`) matches a **path suffix**, so `~/go/pkg` is
+    /// skipped while `~/src/pkg` and `~/go/src` are walked.
+    private static func isSkipped(path: String, name: String, names: [String]) -> Bool {
+        for entry in names {
+            if entry.contains("/") {
+                if path == entry || path.hasSuffix("/" + entry) { return true }
+            } else if name == entry {
+                return true
+            }
+        }
+        return false
+    }
+
+    // MARK: - Dedupe
+
+    /// Groups candidates by `--git-common-dir` and keeps one working tree per repo: the first
+    /// whose `.git` is a real directory, falling back to the first seen. Sorted by path so a
+    /// rescan of an unchanged machine produces an identical `ScanResult`.
+    private func resolve(_ candidates: [Candidate]) async -> [DiscoveredRepo] {
+        var order: [String] = []
+        var winners: [String: (path: String, gitIsDirectory: Bool)] = [:]
+
+        for candidate in candidates {
+            let resolved = await identify(candidate)
+            let key = Self.normalized(resolved.commonDirectory)
+
+            guard let existing = winners[key] else {
+                order.append(key)
+                winners[key] = (resolved.path, candidate.gitIsDirectory)
+                continue
+            }
+            // "The `.git` directory wins", not "whichever the walk reached first".
+            if candidate.gitIsDirectory && !existing.gitIsDirectory {
+                winners[key] = (resolved.path, true)
+            }
+        }
+
+        return order
+            .map { DiscoveredRepo(path: winners[$0]!.path, id: RepoID(commonDir: $0)) }
+            .sorted { $0.path < $1.path }
+    }
+
+    /// `git -C <path> rev-parse --path-format=absolute --git-common-dir --show-toplevel` when a
+    /// runner is available; otherwise the common directory the filesystem already told us and the
+    /// directory that carried the marker.
+    private func identify(_ candidate: Candidate) async -> (commonDirectory: String, path: String) {
+        guard let commandRunner else {
+            return (candidate.commonDirectoryHint, candidate.path)
+        }
+
+        let command = Command(
+            executable: gitExecutable,
+            arguments: [
+                "-C", candidate.path,
+                "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel",
+            ],
+            workingDirectory: candidate.path
+        )
+
+        guard
+            let output = try? await commandRunner.run(command),
+            output.exitCode == 0
+        else {
+            return (candidate.commonDirectoryHint, candidate.path)
+        }
+
+        let lines = output.standardOutputText
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        guard lines.count >= 2 else {
+            return (candidate.commonDirectoryHint, candidate.path)
+        }
+        return (lines[0], lines[1])
+    }
+
+    private static func normalized(_ path: String) -> String {
+        var trimmed = path
+        while trimmed.count > 1 && trimmed.hasSuffix("/") { trimmed.removeLast() }
+        return trimmed
     }
 }
