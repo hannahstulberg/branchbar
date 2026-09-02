@@ -1,19 +1,19 @@
 # SESSION HANDOFF — BranchBar
 
-**Last updated:** 2026-09-01 23:30 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+**Last updated:** 2026-09-02 00:20 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
 
 ## Current state
 
-- **Phase / packet:** Phase 0 done (0.1 committed, 0.2 spike PASSED Gate 0 on CLT). Packets 0.3 (spike zip for NYT) and 1.1 (freeze contracts) dispatched concurrently.
-- **Suite:** 1 passing (`make test`)
-- **In-flight agents:** packet 0.3 (Opus: ToolLocator, SpikeChecks, spike UI, runbook) and packet 1.1 (Opus: §5 types, seams, stubs, doubles, record-fixtures, live-repo tests). Disjoint boundaries: 0.3 owns ToolLocator.swift + SpikeChecks.swift + BranchBarApp.swift; 1.1 owns the rest of Core + Tests.
+- **Phase / packet:** Phase 1 done (0.3 spike zip published as v0.0.1-spike; 1.1 contracts frozen). Phase 2 lanes + 4.0 dispatched concurrently: 4.0 (Strings/UI contract), 2.1-T, 2.3-T, 2.4-T (test authors), 2.5 (runner/cache/fs, single agent).
+- **Suite:** 43 passing (`make test`)
+- **In-flight agents:** 4.0, 2.1-T, 2.3-T, 2.4-T, 2.5 (specs in the session scratchpad `packets/`). Each uses its own `--scratch-path .build/pk-<name>` to avoid build-lock contention. Stub files are flat under `Sources/BranchBarCore/`.
 - **Blocked on:** nothing. Hannah's own packet 0.0 items are open: ask Andrew Lisy whether JobRunner opened on NYT-managed Macs; name the NYT tester and their macOS version.
 
 ## Next steps (in order)
 
-1. Accept 0.3: verify `make test`, `make zip`, GUI gh report in the log; commit; tag `v0.0.1-spike` pre-release; send the runbook + zip URL to the NYT tester (Gate 0b by 09-04).
-2. Accept 1.1: verify red SHA, `make record-fixtures` output, live-repo tests; commit.
-3. Dispatch 4.0 (UI contract) and the phase-2 lanes (2.1 test-author → implementer, 2.3, 2.4, 2.5) per PLAN.md §8.
+1. Accept the three test-author packets (2.1-T, 2.3-T, 2.4-T): tests exist and fail for the right reason; commit as `red(2.x)`; then dispatch the matching implementers (specs 2.1-impl.md; 2.3.md and 2.4.md implementer role).
+2. Accept 4.0 (Hannah reads the string table = Gate 4.0) and 2.5; commit.
+3. After 2.1/2.2/2.3 green: dispatch 3.1, then 3.2 (with `branchbar-cli`), then 4.1.
 4. Hannah: Cursor push test (spike item 10, commands in DECISION-LOG), Andrew Lisy question, NYT tester named.
 
 ## Re-read order for a fresh session

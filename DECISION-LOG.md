@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-01 — Packet 1.1: contracts frozen, 19 recorded fixtures, 43 tests green
+
+- **What:** Every PLAN.md §5 type under `Sources/BranchBarCore/Models/`, the three seams under `Seams/`, 16 stub components with 68 `OWNER:` fatalError sites, test doubles, `Fixture` loader, `scripts/record-fixtures.sh` (19 byte-exact recordings from `/usr/bin/git` 2.39.5 and `gh` 2.89.0; fails non-zero on empty output where rows are expected, including `[]`), 15 synthetic fixtures each with a sibling `.md` header, two live-repo sanity tests (skip on CI with a reason), three structural guards, `docs/TEST-PLAN.md` mapping all 59 §7 invariants.
+- **Why:** Later packets code against types, not each other; fixtures are ground truth from real tools, not model transcription.
+- **Limits:** Stubs live flat under `Sources/BranchBarCore/` (not `Git/`, `GitHub/` subfolders as §4 sketches); packet specs address the flat files. `CacheFile.prCache` keyed by `RepoID` encodes as an alternating array under `JSONEncoder`; round-trip tested, packet 2.5 may switch to a string key.
+- **Cost accepted:** `TimeInterval` not `Duration` (Codable); `PRAvailability: Error` so `GHClient` returns `Result`; `FileSystem` synchronous.
+- **Deliberately not changed:** `ToolLocator.swift` and `SpikeChecks.swift` (packet 0.3's). `Package.swift` final. The live reflog test also pins that `reflog show -- <ref>` still returns zero rows, so the CLAUDE.md footgun cannot go stale silently.
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-01 — Packet 0.3: spike zip published as v0.0.1-spike; Gatekeeper dialog observed; keyring gh works from a GUI process
 
 - **What:** `dist/BranchBar-spike-mac.zip` (415 KB, arm64, ad-hoc signed) attached to pre-release `v0.0.1-spike`. The app carries Check GitHub CLI, Add folder…, and Copy report buttons plus a `BRANCHBAR_SPIKE_AUTORUN=1` hook. `docs/runbooks/gate-0b-nyt-spike-test.md` is the tester's 14-step checklist. `ToolLocator` is real (4 tests) and found `/opt/homebrew/bin/gh` from a process launched with the stock launchd PATH (`env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin open …`); `gh auth status` returned exit 0 with the keyring token.
