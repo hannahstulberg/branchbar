@@ -391,7 +391,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | **Core: seams** | | | |
 | The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:90` | Argument arrays only, never a shell string |
 | The real process implementation: concurrent draining, timeout, cancellation | `ProcessCommandRunner` | `Sources/BranchBarCore/ProcessCommandRunner.swift:5` | Both pipes drain on dedicated threads, then SIGTERM and SIGKILL |
-| Termination that reaches the child's helpers, not just the child | `signalGroup` | `Sources/BranchBarCore/ProcessCommandRunner.swift:404` | pgid captured at spawn and signalled whichever process leads it |
+| Termination that reaches the child's helpers, not just the child | `signalGroup` | `Sources/BranchBarCore/ProcessCommandRunner.swift:449` | pgid captured at spawn and signalled whichever process leads it |
 | A killed child's output kept beside the reason it stopped | `PartialOutputCommandRunning` | `Sources/BranchBarCore/ScanRunner.swift:75` | Only for a stream of independent lines; a truncated document is a lie |
 | The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:53` | Synchronous by contract; the scan's bound lives one level up |
 | The real filesystem, listing once with resource values | `RealFileSystem` | `Sources/BranchBarCore/RealFileSystem.swift:16` | No per-entry `attributesOfItem`: that call blocks behind folder-access dialogs |

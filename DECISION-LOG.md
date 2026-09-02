@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-03 — F19: command deadlines could never fire under load; v0.9.1 tag moved to bfbfc6f
+
+- **What:** The first `v0.9.1` tag build failed two wall-clock tests on the 3-core runner. Root cause 1: `RunningCommand` armed its timeout on a private **concurrent** dispatch queue, which drains on the non-overcommit root pool, and parked that same pool with its own blocking pipe drains and waiter; with roughly 20 commands in flight the timeout item never got a thread (measured: a 0.3 s deadline unfired after 120 s at 1038a4c; 0.32 s after the fix). Root cause 2: `terminateChild` re-read `didLaunchChild` outside the lock that recorded the timeout, so a pid appearing between the two reads pushed the caller onto the 3 s force-finish grace. Fix: a serial `deadlineQueue` for every timer, dedicated threads for the drains and the waiter, `childExisted` captured under the timeout's own lock, and the launcher's orphan branch reaps its child. Tests hardened with the ≥ 3× margin pattern (10 s hook vs 4 s bound; 30 s gate vs 10 s bound); every remaining wall-clock bound audited and listed in the packet report. 444 tests green unloaded and under 8 CPU hogs. Tag `v0.9.1` deleted and re-created at bfbfc6f; the release is built from that commit.
+- **Why:** Every deadline in the app (git 10 s, gh 25 s, scan 20 s, overall 45 s) runs through this runner; on a small-core Mac under load none of them was guaranteed to fire.
+- **Limits:** No regression test for root cause 2 (a sub-3 s wall-clock bound would reintroduce flakiness); the throughput test `realFileSystemListsFiveThousandEntriesUnderOneSecond` is the one remaining load-sensitive bound.
+- **Cost accepted:** Three dedicated threads per in-flight command (cap 4 repos × a few commands).
+- **Deliberately not changed:** `Process` stays (no `posix_spawn`).
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-02 — F18 accepted (444 tests); v0.9.1 cut at 1038a4c
 
 - **What:** F18: `PRCacheEntry` bound to `(repoID, slug)` and pre-F18 entries discarded; upstreamless branches matched by head name plus `headRefOid == tipSHA`, ambiguity → notChecked; `PushInfo.Source` gains `checkedNoObservation` and `unavailable` with `HistoryRead` per branch and new copy "No push from this Mac recorded for origin/<name>"; `FetchHeadState` tri-state ("Fetch time not checked" when refused); a detached primary checkout is a row; `--deadline` validated; unreadable `.git` markers reported; cache entries claiming an observation without a date downgraded on load. Version constants bumped to 0.9.1 (`VERSION`, `BranchBarCore.version`, smoke test). Tag `v0.9.1` at 1038a4c; CI builds and attaches the zip.
