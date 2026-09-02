@@ -28,10 +28,41 @@ enum LaunchAtLogin {
     /// Frozen in PLAN.md §3; also the LaunchAgent's `Label`.
     static let bundleID = "com.hannahstulberg.branchbar"
 
-    /// The handout's install path, and the only path the LaunchAgent will ever name. Never derived
-    /// from `Bundle.main` — see the type's note on translocation.
-    static let installedBundlePath = "/Applications/BranchBar.app"
-    static var installedExecutablePath: String { installedBundlePath + "/Contents/MacOS/BranchBar" }
+    /// The two paths a handout is ever installed to, and the only two paths the LaunchAgent will
+    /// ever name. Both are fixed literals: neither is derived from `Bundle.main` — see the type's
+    /// note on translocation — and the running bundle only ever *selects* between them.
+    ///
+    /// codex MAJOR 8: `/Applications` used to be the only accepted location, and a standard
+    /// non-admin account on a managed Mac cannot write it. Such an account installs into the
+    /// per-user `~/Applications`, where the whole feature was refused. macOS treats that folder as
+    /// an Applications folder for every purpose that matters here, so it is the second candidate.
+    static let systemBundlePath = "/Applications/BranchBar.app"
+
+    static var userBundlePath: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/BranchBar.app").path
+    }
+
+    /// Fixed order, and the order the fallbacks are tried in: the shared folder first.
+    static var installCandidateBundlePaths: [String] { [systemBundlePath, userBundlePath] }
+
+    static func executablePath(inBundleAt bundlePath: String) -> String {
+        bundlePath + "/Contents/MacOS/BranchBar"
+    }
+
+    /// Which candidate the running process *is*, or nil when it is neither. This is the one place a
+    /// path is chosen, and it chooses between two literals rather than trusting `Bundle.main`'s own
+    /// path: a translocated copy matches neither and is refused ahead of this by `isTranslocated`.
+    static var runningInstallBundlePath: String? {
+        let running = resolved(Bundle.main.bundlePath)
+        return installCandidateBundlePaths.first { resolved($0) == running }
+    }
+
+    /// The path the LaunchAgent names: the candidate this process is running from, and the shared
+    /// folder when it is running from neither (in which case `unavailableReason` has already
+    /// refused the toggle and nothing is written).
+    static var installedBundlePath: String { runningInstallBundlePath ?? systemBundlePath }
+    static var installedExecutablePath: String { executablePath(inBundleAt: installedBundlePath) }
 
     static var launchAgentURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -63,11 +94,9 @@ enum LaunchAtLogin {
         Bundle.main.bundlePath.contains("/AppTranslocation/")
     }
 
-    /// Whether the running bundle *is* `/Applications/BranchBar.app`, symlinks and `/private`
+    /// Whether the running bundle *is* one of the two install candidates, symlinks and `/private`
     /// prefixes resolved on both sides so `/tmp/…` and `/private/tmp/…` are not two answers.
-    static var isRunningFromApplications: Bool {
-        resolved(Bundle.main.bundlePath) == resolved(installedBundlePath)
-    }
+    static var isRunningFromApplications: Bool { runningInstallBundlePath != nil }
 
     private static func resolved(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
@@ -86,16 +115,40 @@ enum LaunchAtLogin {
         FileManager.default.fileExists(atPath: launchAgentURL.path)
     }
 
+    /// The complete set of keys BranchBar's own LaunchAgent has. Membership is checked by equality,
+    /// not by lookup, which is what makes an extra key a rejection rather than something ignored.
+    static let launchAgentPlistKeys: Set<String> = ["Label", "Program", "RunAtLoad"]
+
     /// The plist BranchBar would have written, rather than any file that happens to sit at that
     /// path (codex MINOR 1). A stale plist from an older install, or one someone dropped there,
     /// names a different `Program` and is not this app's login item.
+    ///
+    /// codex MAJOR 8: checking `Label` and `Program` was not enough. launchd reads every key it
+    /// finds, so a file carrying our label and our program *plus* `KeepAlive` relaunches the app
+    /// the user just quit, and one carrying `ProgramArguments` or `EnvironmentVariables` runs our
+    /// binary with an argv and an environment we never chose — while the toggle read "on" and the
+    /// disable path deleted the file as if it had been ours all along. The whole dictionary is now
+    /// the thing that is validated: exactly `Label`, `Program`, and `RunAtLoad`, nothing else.
     static var hasOwnLaunchAgentPlist: Bool {
         guard let data = try? Data(contentsOf: launchAgentURL),
               let plist = try? PropertyListSerialization.propertyList(
                   from: data, options: [], format: nil) as? [String: Any]
         else { return false }
-        return plist["Label"] as? String == bundleID
-            && plist["Program"] as? String == installedExecutablePath
+        return isOwnLaunchAgentPlist(plist)
+    }
+
+    /// Pure half of `hasOwnLaunchAgentPlist`, so the schema rule can be exercised without a file.
+    static func isOwnLaunchAgentPlist(_ plist: [String: Any]) -> Bool {
+        guard Set(plist.keys) == launchAgentPlistKeys else { return false }
+        guard plist["Label"] as? String == bundleID else { return false }
+        // Either install location is ours: a plist written by the copy in `/Applications` is still
+        // BranchBar's login item when the copy in `~/Applications` is the one asking.
+        let ourPrograms = installCandidateBundlePaths.map(executablePath(inBundleAt:))
+        guard let program = plist["Program"] as? String, ourPrograms.contains(program) else {
+            return false
+        }
+        guard let runAtLoad = plist["RunAtLoad"] as? Bool, runAtLoad else { return false }
+        return true
     }
 
     /// Whether launchd is actually holding the job right now. `launchctl print` exits 0 for a
@@ -121,10 +174,7 @@ enum LaunchAtLogin {
     /// launchd says is loaded.
     static var isEnabled: Bool {
         if hasOwnLaunchAgentPlist, isLaunchAgentLoaded { return true }
-        switch serviceStatus {
-        case .enabled, .requiresApproval: return true
-        default: return false
-        }
+        return isRegistered(serviceStatus)
     }
 
     static var needsApproval: Bool {
@@ -194,6 +244,17 @@ enum LaunchAtLogin {
             throw Failure.notInstalledInApplications
         }
 
+        // Nothing to do only when the file on disk is byte-for-byte the plist this build would
+        // write *and* launchd is holding it. Comparing the text rather than asking
+        // `hasOwnLaunchAgentPlist` matters now that there are two install locations: a job loaded
+        // from the `/Applications` plist is not the job the `~/Applications` copy wants.
+        let alreadyCorrect = (try? String(contentsOf: launchAgentURL, encoding: .utf8))
+            == launchAgentPlistXML
+        if alreadyCorrect, isLaunchAgentLoaded {
+            Log.info("launch at login: the agent is already loaded from the plist this build writes")
+            return
+        }
+
         do {
             try writeLaunchAgent()
         } catch {
@@ -201,19 +262,17 @@ enum LaunchAtLogin {
             throw Failure.bothMechanismsRefused(diagnostics.joined(separator: " · "))
         }
 
-        if isLaunchAgentLoaded {
-            Log.info("launch at login: the agent is already loaded; nothing to bootstrap")
-            return
-        }
-
         var bootstrap = launchctl(["bootstrap", guiDomain, launchAgentURL.path])
         Log.info(
             "launch at login: launchctl bootstrap exit=\(bootstrap.status) "
-                + "(\(errnoDescription(bootstrap.status))) \(bootstrap.output)")
+                + "(\(errnoDescription(bootstrap.status))) \(bootstrap.output) "
+                + "alreadyLoadedCode=\(Self.alreadyLoadedExitCodes.contains(bootstrap.status))")
 
-        // REVIEW WR-05: "already loaded" is errno 5 on older releases, 37 on newer ones, and 17
-        // where the plist path itself is already known. All three mean the state we wanted.
-        if !Self.alreadyLoadedExitCodes.contains(bootstrap.status), bootstrap.status != 0 {
+        // codex MAJOR 8: the exit code is no longer what decides. `launchctl print` is asked
+        // instead, because the codes overlap: errno 5, 17, and 37 are what a bootstrap of an
+        // already-loaded job reports (REVIEW WR-05) *and* what several unrelated refusals report,
+        // so treating them as success meant the toggle could read on with nothing registered.
+        if !isLaunchAgentLoaded {
             // One retry, through a bootout, rather than deleting the plist: the old code removed
             // the file it had just written while launchd kept the job for the session, so the
             // toggle read off, the app still opened at the next login, and stopped after that.
@@ -225,21 +284,29 @@ enum LaunchAtLogin {
                     + "(\(errnoDescription(bootstrap.status))) \(bootstrap.output)")
         }
 
-        guard bootstrap.status == 0 || Self.alreadyLoadedExitCodes.contains(bootstrap.status) else {
+        let verification = launchctl(["print", "\(guiDomain)/\(bundleID)"])
+        Log.info("launch at login: launchctl print exit=\(verification.status) (the loaded check)")
+        guard verification.status == 0 else {
             diagnostics.append(
                 "launchctl bootstrap exit \(bootstrap.status) "
-                    + "(\(errnoDescription(bootstrap.status))): \(bootstrap.output)")
+                    + "(\(errnoDescription(bootstrap.status))): \(bootstrap.output) · "
+                    + "launchctl print \(guiDomain)/\(bundleID) exit \(verification.status), "
+                    + "so nothing is loaded")
             throw Failure.bothMechanismsRefused(diagnostics.joined(separator: " · "))
         }
     }
 
     /// `launchctl error 5|17|37` on macOS 24 prints "Input/output error", "File exists", and
-    /// "Operation already in progress"; all three are what a bootstrap of an already-loaded job
-    /// reports, depending on the release.
+    /// "Operation already in progress". A bootstrap of an already-loaded job reports one of them
+    /// (REVIEW WR-05), which is why they were once accepted as success; they are logged now and
+    /// decide nothing, because `launchctl print` answers the same question without the ambiguity
+    /// (codex MAJOR 8).
     static let alreadyLoadedExitCodes: Set<Int32> = [5, 17, 37]
 
     /// The bundle the LaunchAgent would name, checked rather than assumed: `CFBundleIdentifier`
-    /// equal to ours and an executable file where the plist's `Program` points.
+    /// equal to ours and an executable file where the plist's `Program` points. The path checked is
+    /// the one this process resolved itself to, so a Mac holding a copy in both Applications
+    /// folders validates the copy the toggle was clicked in.
     static var isInstalledBundleValid: Bool {
         guard FileManager.default.isExecutableFile(atPath: installedExecutablePath) else {
             return false
@@ -259,17 +326,25 @@ enum LaunchAtLogin {
     /// have a plist on disk *and* a registration, and leaving either behind means the app still
     /// opens at login after the user turned the toggle off.
     private static func disable() throws {
-        if hasLaunchAgentPlist {
+        // codex MAJOR 8: the bootout used to be gated on a plist existing, and a loaded job whose
+        // plist was deleted — by an uninstall script, by a previous half-finished disable, by the
+        // user — therefore stayed live while the toggle reported off. launchd is keyed by label,
+        // not by file, so the question is whether anything is loaded under that label.
+        if isLaunchAgentLoaded {
             let bootout = launchctl(["bootout", "\(guiDomain)/\(bundleID)"])
             Log.info("launch at login: launchctl bootout exit=\(bootout.status) \(bootout.output)")
             // codex MINOR 1: a failed bootout used to be ignored and the plist deleted anyway, so
             // the toggle read off while the job stayed loaded for the session. The plist stays put
             // when the job is still loaded — it is the only record of what to boot out next time —
-            // and the failure is reported.
-            if bootout.status != 0, isLaunchAgentLoaded {
+            // and the failure is reported. What is checked is `launchctl print` after the fact,
+            // not the bootout's own exit code.
+            if isLaunchAgentLoaded {
                 throw Failure.couldNotUnload(
-                    "launchctl bootout exit \(bootout.status): \(bootout.output)")
+                    "launchctl bootout exit \(bootout.status): \(bootout.output) · the job is "
+                        + "still loaded in \(guiDomain)")
             }
+        }
+        if hasLaunchAgentPlist {
             do {
                 try FileManager.default.removeItem(at: launchAgentURL)
             } catch {
@@ -278,13 +353,42 @@ enum LaunchAtLogin {
             }
         }
         guard Bundle.main.bundleIdentifier != nil else { return }
+        // codex MAJOR 8: an `unregister()` that threw used to be logged and swallowed, so a
+        // registration the framework refused to drop was reported as a login item turned off. The
+        // failure is propagated — but only when the registration is still there afterwards, since
+        // `unregister()` throws on an app that was never registered and that is the state asked for.
         do {
             try SMAppService.mainApp.unregister()
+            let status = SMAppService.mainApp.status
             Log.info(
                 "launch at login: SMAppService.unregister() returned, status="
-                    + statusDescription(SMAppService.mainApp.status))
+                    + statusDescription(status))
+            if isRegistered(status) {
+                throw Failure.couldNotUnload(
+                    "SMAppService.unregister() returned but status is \(statusDescription(status))")
+            }
+        } catch let failure as Failure {
+            throw failure
         } catch {
-            Log.info("launch at login: SMAppService.unregister() threw \(error)")
+            let status = SMAppService.mainApp.status
+            Log.info(
+                "launch at login: SMAppService.unregister() threw \(error), status="
+                    + statusDescription(status))
+            if isRegistered(status) {
+                throw Failure.couldNotUnload(
+                    "SMAppService.unregister(): \(error) · status is still "
+                        + statusDescription(status))
+            }
+        }
+    }
+
+    /// Whether `SMAppService` still holds a registration. `.requiresApproval` counts, for the same
+    /// reason `isEnabled` counts it: the registration exists and the app will open at login once
+    /// the switch in System Settings is flipped.
+    static func isRegistered(_ status: SMAppService.Status?) -> Bool {
+        switch status {
+        case .enabled, .requiresApproval: return true
+        default: return false
         }
     }
 
@@ -359,6 +463,7 @@ enum LaunchAtLogin {
             "launch at login: available=\(isAvailable) enabled=\(isEnabled) "
                 + "mechanism=\(mechanism.rawValue) SMAppService status=\(statusDescription(serviceStatus)) "
                 + "translocated=\(isTranslocated) inApplications=\(isRunningFromApplications) "
+                + "installPath=\(runningInstallBundlePath ?? "—") "
                 + "ownPlist=\(hasOwnLaunchAgentPlist) agentLoaded=\(isLaunchAgentLoaded) "
                 + "bundleID=\(Bundle.main.bundleIdentifier ?? "—")")
     }

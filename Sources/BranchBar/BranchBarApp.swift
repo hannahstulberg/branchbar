@@ -40,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // codex MINOR 1: a sign-in click writes a `sign-in-<uuid>` directory under the app's
+        // temporary folder and nothing deletes it when Terminal is done, so launch is where the old
+        // ones go. Before the first refresh, because it touches only files this app wrote.
+        Actions.pruneSignInDirectories()
+
         // Read once, here, rather than per popover open: `SMAppService.status` is an XPC round trip
         // and the footer redraws on every progressive emit. Every later read follows a flip.
         LaunchAtLogin.logCurrentState()
@@ -92,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "action check: hostile sign-in payloads refused="
                 + "\(Actions.signInHostname(from: "gh auth login --hostname github.com;id") == nil) "
                 + "\(Actions.signInHostname(from: "gh auth login --hostname $(touch /tmp/pwned)") == nil)")
+        checkSignInDirectoriesAreUnique()
         Actions.openTerminalForSignIn(command: command)
 
         Actions.openPR(url: "https://github.com/hannahstulberg/branchbar", host: "github.com")
@@ -104,6 +110,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Log.info("action check: done")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.terminate(nil) }
+    }
+
+    /// codex MINOR 1: two sign-in clicks in a row used to share one directory and one
+    /// `gh-sign-in.host`, so the second click's hostname was what the first Terminal window
+    /// authenticated. Two clicks are made here and the three facts that fix it are logged: the
+    /// directories differ, each script's own sibling holds its own host, and the directory is 0700.
+    private func checkSignInDirectoriesAreUnique() {
+        guard let first = Actions.writeSignInScript(host: "github.com"),
+              let second = Actions.writeSignInScript(host: "ghe.example.com")
+        else {
+            Log.info("action check: no gh on this Mac, so the sign-in directories were not written")
+            return
+        }
+        func host(beside script: URL) -> String {
+            let sibling = script.deletingLastPathComponent()
+                .appendingPathComponent(SignInScript.hostFileName)
+            return ((try? String(contentsOf: sibling, encoding: .utf8)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let directory = first.deletingLastPathComponent()
+        let mode = (try? FileManager.default.attributesOfItem(atPath: directory.path))
+            .flatMap { $0[.posixPermissions] as? NSNumber }
+            .map { String($0.intValue, radix: 8) } ?? "—"
+        Log.info(
+            "action check: sign-in directories unique="
+                + "\(first.deletingLastPathComponent() != second.deletingLastPathComponent()) "
+                + "firstHost=\(host(beside: first)) secondHost=\(host(beside: second)) "
+                + "mode=\(mode)")
     }
 
     /// `status`, `on`, or `off` for the login item, so the toggle's two mechanisms can be exercised
@@ -126,7 +160,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info(
             "launch at login check: plist=\(LaunchAtLogin.hasLaunchAgentPlist) "
                 + "path=\(LaunchAtLogin.launchAgentURL.path) bundle=\(Bundle.main.bundlePath)")
+        checkLaunchAgentPlistSchema()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+    }
+
+    /// codex MAJOR 8: `Label` and `Program` were the whole check, so a plist carrying those two
+    /// plus `KeepAlive` — which relaunches the app the user just quit — or `ProgramArguments` or
+    /// `EnvironmentVariables` read as BranchBar's own login item. The schema rule is exercised here
+    /// against the dictionary rather than against a file, so nothing has to be written to prove it.
+    private func checkLaunchAgentPlistSchema() {
+        let program = LaunchAtLogin.executablePath(inBundleAt: LaunchAtLogin.systemBundlePath)
+        let userProgram = LaunchAtLogin.executablePath(inBundleAt: LaunchAtLogin.userBundlePath)
+        let good: [String: Any] = [
+            "Label": LaunchAtLogin.bundleID, "Program": program, "RunAtLoad": true,
+        ]
+        let cases: [(String, [String: Any])] = [
+            ("ours-in-applications", good),
+            ("ours-in-home-applications", [
+                "Label": LaunchAtLogin.bundleID, "Program": userProgram, "RunAtLoad": true,
+            ]),
+            ("keep-alive", good.merging(["KeepAlive": true]) { _, new in new }),
+            ("program-arguments", good.merging(["ProgramArguments": ["/bin/sh"]]) { _, new in new }),
+            ("environment", good.merging(
+                ["EnvironmentVariables": ["DYLD_INSERT_LIBRARIES": "/tmp/x.dylib"]]) { _, new in new }),
+            ("run-at-load-false", good.merging(["RunAtLoad": false]) { _, new in new }),
+            ("no-run-at-load", ["Label": LaunchAtLogin.bundleID, "Program": program]),
+            ("someone-elses-program", [
+                "Label": LaunchAtLogin.bundleID, "Program": "/tmp/BranchBar", "RunAtLoad": true,
+            ]),
+        ]
+        let verdicts = cases
+            .map { "\($0.0)=\(LaunchAtLogin.isOwnLaunchAgentPlist($0.1))" }
+            .joined(separator: " ")
+        Log.info("launch at login check: plist schema \(verdicts)")
+        Log.info(
+            "launch at login check: install candidates "
+                + LaunchAtLogin.installCandidateBundlePaths.joined(separator: " , ")
+                + " · running=\(LaunchAtLogin.runningInstallBundlePath ?? "neither")"
+                + " · agentWouldName=\(LaunchAtLogin.installedExecutablePath)")
     }
 
     /// Lays the popover's own view out in an ordinary window and logs `rendered state <id>` once

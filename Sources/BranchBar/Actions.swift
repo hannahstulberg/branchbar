@@ -177,11 +177,37 @@ enum Actions {
         return GitHubSlug.isValidHostname(host) ? host : nil
     }
 
+    // MARK: - Where a sign-in click writes
+
+    /// The folder the per-click sign-in directories live in.
+    static var signInParentDirectory: URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("BranchBar", isDirectory: true)
+    }
+
+    /// Every directory this app is allowed to delete under `signInParentDirectory` starts with it.
+    static let signInDirectoryPrefix = "sign-in-"
+
+    /// How long a sign-in directory is kept before the next launch removes it. A `gh auth login`
+    /// that a person has not finished within an hour is a Terminal window they abandoned.
+    ///
+    /// `nonisolated` because it is a default argument of `pruneSignInDirectories`, and a default
+    /// argument is evaluated at the call site rather than inside the main-actor member.
+    nonisolated static let signInDirectoryLifetime: TimeInterval = 3600
+
     /// Writes the fixed script plus the one-line hostname file it reads, and returns the script.
     ///
     /// The two files are siblings because `open` cannot pass an argument to the document it opens:
     /// a `.command` file is handed to Terminal as a document, so the hostname cannot ride as argv
     /// and has to be somewhere the script can find itself. `${0:A:h}` is that somewhere.
+    ///
+    /// codex MINOR 1: both files used to have fixed names in one shared directory, so the pair was
+    /// mutable state two clicks raced over. Clicking sign-in for `github.com` and then for
+    /// `ghe.example.com` before Terminal had launched rewrote `gh-sign-in.host` under the first
+    /// script, and the first window authenticated the second host — the script reads the file at
+    /// run time, not at write time. Each click now gets its own `sign-in-<uuid>` directory, created
+    /// mode 0700 so nothing outside this account can read or replace either file, and the script it
+    /// hands Terminal can only ever find the hostname written beside it.
     static func writeSignInScript(host: String) -> URL? {
         guard GitHubSlug.isValidHostname(host) else {
             Log.info("action: refusing to write a sign-in script for \(host)")
@@ -192,23 +218,76 @@ enum Actions {
             return nil
         }
 
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("BranchBar", isDirectory: true)
+        let directory = signInParentDirectory
+            .appendingPathComponent(
+                signInDirectoryPrefix + UUID().uuidString.lowercased(), isDirectory: true)
         let url = directory.appendingPathComponent(SignInScript.scriptFileName)
         let hostURL = directory.appendingPathComponent(SignInScript.hostFileName)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: signInParentDirectory, withIntermediateDirectories: true)
+            // The mode is set at creation rather than after it: a directory that is 0755 for even
+            // an instant is a directory another account could have opened in that instant.
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
             try (host + "\n").write(to: hostURL, atomically: true, encoding: .utf8)
             try SignInScript.render(ghPath: ghPath).write(to: url, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: hostURL.path)
             try FileManager.default.setAttributes(
-                [.posixPermissions: 0o755], ofItemAtPath: url.path)
+                [.posixPermissions: 0o700], ofItemAtPath: url.path)
+            Log.info("action: wrote a sign-in script for \(host) in \(directory.path)")
             return url
         } catch {
             Log.info("action: could not write the sign-in script at \(url.path): \(error)")
             return nil
         }
+    }
+
+    /// Removes sign-in directories older than an hour, plus the two fixed-name files older builds
+    /// left in the shared folder. Called once per launch (`AppDelegate`), never during a refresh:
+    /// a directory is only ever removed while nothing this process wrote is pointing at it.
+    ///
+    /// Only names beginning with `sign-in-` are touched, so a folder someone else put in the app's
+    /// temporary directory is left where it is.
+    @discardableResult
+    static func pruneSignInDirectories(
+        olderThan lifetime: TimeInterval = signInDirectoryLifetime, now: Date = Date()
+    ) -> Int {
+        let manager = FileManager.default
+        let parent = signInParentDirectory
+        var removed = 0
+
+        // The fixed pair the racing version wrote. They belong to no click any more.
+        for legacy in [SignInScript.scriptFileName, SignInScript.hostFileName] {
+            let url = parent.appendingPathComponent(legacy)
+            guard manager.fileExists(atPath: url.path) else { continue }
+            if (try? manager.removeItem(at: url)) != nil { removed += 1 }
+        }
+
+        guard let entries = try? manager.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles])
+        else { return removed }
+
+        for entry in entries where entry.lastPathComponent.hasPrefix(signInDirectoryPrefix) {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            guard now.timeIntervalSince(modified) > lifetime else { continue }
+            do {
+                try manager.removeItem(at: entry)
+                removed += 1
+            } catch {
+                Log.info("action: could not remove \(entry.path): \(error)")
+            }
+        }
+        if removed > 0 {
+            Log.info("action: removed \(removed) stale sign-in file(s) under \(parent.path)")
+        }
+        return removed
     }
 
     // MARK: - Folder access

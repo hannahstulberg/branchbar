@@ -76,6 +76,19 @@ final class AppModel: ObservableObject {
     private var isRefreshInFlight = false
     /// A rescan that arrived during a refresh and was therefore coalesced into it. Run once, after.
     private var pendingRescan = false
+
+    /// Whether the refresh currently in flight was cancelled by the user.
+    ///
+    /// codex MAJOR 9: `RefreshCoordinator.refresh` returns the same type whether it finished or was
+    /// cancelled — the last emitted snapshot, carrying *this* run's `refreshedAt` — so the shell
+    /// could not tell the two apart and treated both as a completed refresh. It published
+    /// "Updated just now" over a list most of whose rows had not been reloaded, and then ran the PR
+    /// warm-up or the queued rescan, which started the work the user had just stopped.
+    ///
+    /// This flag is the shell's own record, read alongside `RefreshCoordinator.lastOutcome`. It is
+    /// cleared by the call that *starts* a refresh rather than by the one that finishes it, so
+    /// every caller coalesced into one refresh reads the same answer.
+    private var cancelRequested = false
     /// One-shot: the launch refresh may need a second pass to fetch PRs for the repo the collapse
     /// defaults expanded (REVIEW WR-03). Only ever true after that second pass was decided.
     private var hasWarmedExpandedPRs = false
@@ -254,6 +267,10 @@ final class AppModel: ObservableObject {
     }
 
     private func performRefresh(reason: RefreshReason) async {
+        // What the footer says now, kept for the case where the refresh is cancelled: the label
+        // belongs to the last refresh that actually finished (codex MAJOR 9).
+        let priorRefreshedAt = snapshot.refreshedAt
+
         // The state moves before the preflight, not after it: `resolvedEnvironment` runs
         // `git --version`, and a model that is still `.idle` while a process runs is a model whose
         // footer offers a Refresh button that does nothing (REVIEW CR-04).
@@ -275,6 +292,9 @@ final class AppModel: ObservableObject {
             "refresh: reason=\(reason.rawValue) force=\(force) rescan=\(rescan) "
                 + "bypassPRCache=\(bypassPRCache) expanded=\(expanded.count)")
 
+        // Cleared by the call that starts the refresh, never by one coalescing into a running one,
+        // so a cancel is still visible to every caller when the shared refresh returns.
+        if !isRefreshInFlight { cancelRequested = false }
         isRefreshInFlight = true
         environment.ghClients.startRefresh()
         let final = await environment.coordinator.refresh(
@@ -287,6 +307,14 @@ final class AppModel: ObservableObject {
             rescan: rescan,
             bypassPRCache: bypassPRCache)
         isRefreshInFlight = false
+        // codex MAJOR 9: Core's own verdict where it has one, this shell's record of the click
+        // otherwise. `RefreshCoordinator.lastOutcome` is the authority — a cancellation that
+        // arrived inside Core without passing through `cancelRefresh` is still a cancellation —
+        // and `cancelRequested` keeps the rule working while that value is still being filled in.
+        // `.deadline` is deliberately not a cancellation: a deadline persists what it reached and
+        // Core already marks the rest stale, so the refresh did happen and may say so.
+        let outcome = await environment.coordinator.lastOutcome
+        let wasCancelled = outcome == .cancelled || cancelRequested
 
         // REVIEW CR-03: the coordinator loads the cache file at the start of a refresh and writes
         // the whole struct back at the end, so a hide, a collapse, or an "Add folder…" made during
@@ -295,16 +323,58 @@ final class AppModel: ObservableObject {
         persistUserOwnedFields()
         reloadScanFromCache()
 
+        // codex MAJOR 9: a cancelled refresh publishes what it managed to reload and nothing more.
+        // The "Updated" label stays on the last refresh that finished, every row the run did not
+        // reach is marked stale, and no follow-up work is started — the cancel would otherwise be
+        // undone by the PR warm-up or by a rescan that had queued behind it.
+        guard !wasCancelled else {
+            var partial = Self.markingUnfinishedRowsStale(final)
+            partial.refreshedAt = priorRefreshedAt
+            snapshot = partial
+            refreshState = .idle(lastRefreshedAt: priorRefreshedAt)
+            adoptCollapseDefaults()
+            present()
+            let stale = partial.repos.filter(\.isStale).count
+            Log.info(
+                "refresh: cancelled reason=\(reason.rawValue) repos=\(partial.repos.count) "
+                    + "staleRows=\(stale) coreOutcome=\(outcome?.rawValue ?? "—") "
+                    + "updatedLabelKeptAt="
+                    + "\(priorRefreshedAt.map(ISO8601DateFormatter().string(from:)) ?? "never") "
+                    + "suppressedRescan=\(pendingRescan) suppressedPRWarmUp=true")
+            pendingRescan = false
+            logRendered()
+            return
+        }
+
         refreshState = .idle(lastRefreshedAt: final.refreshedAt)
         snapshot = final
         adoptCollapseDefaults()
         present()
         Log.info(
             "refresh: finished reason=\(reason.rawValue) repos=\(final.repos.count) "
-                + "rows=\(final.repos.reduce(0) { $0 + $1.branches.count })")
+                + "rows=\(final.repos.reduce(0) { $0 + $1.branches.count }) "
+                + "outcome=\(outcome?.rawValue ?? "—")")
         logRendered()
 
         runFollowUp()
+    }
+
+    /// Marks every row a cancelled refresh did not finish, and never clears a mark it finds.
+    ///
+    /// A repo is finished when this run stamped it: `RefreshCoordinator` hands each repo task the
+    /// run's start date, `RepoLoader` writes it to `Repo.lastRefreshed`, and the same date is the
+    /// snapshot's `refreshedAt`. Everything else in the list is the previous run's row carried
+    /// forward, which is exactly what "showing the list from last time" means.
+    static func markingUnfinishedRowsStale(_ snapshot: Snapshot) -> Snapshot {
+        guard let runStartedAt = snapshot.refreshedAt else { return snapshot }
+        var snapshot = snapshot
+        snapshot.repos = snapshot.repos.map { repo in
+            guard repo.lastRefreshed != runStartedAt else { return repo }
+            var repo = repo
+            repo.isStale = true
+            return repo
+        }
+        return snapshot
     }
 
     /// The two things a finished refresh can owe the user.
@@ -373,8 +443,17 @@ final class AppModel: ObservableObject {
         present()
     }
 
+    /// Stops the running refresh. The flag is set here, synchronously on the main actor, ahead of
+    /// the actor hop that reaches the coordinator, so the refresh cannot land between the click and
+    /// the record of it (codex MAJOR 9).
     func cancelRefresh() {
         guard let environment else { return }
+        guard isRefreshInFlight else {
+            Log.info("action: cancel refresh with nothing running")
+            return
+        }
+        cancelRequested = true
+        Log.info("action: cancel the running refresh")
         Task { await environment.coordinator.cancel() }
     }
 
@@ -702,6 +781,33 @@ final class AppModel: ObservableObject {
             gh: nil,
             reflog: ReflogFileReader(fileSystem: fileSystem),
             policy: policy)
+        // codex round 2 BLOCKER 1: discovery runs in the `branchbar-cli` helper whenever that
+        // helper is beside this executable, because a *process* can be killed at the deadline and a
+        // task blocked inside `open()`/`readdir()` cannot — which is how first launch could stay on
+        // "Looking for repos…" forever behind an unanswered TCC dialog or a dead network volume.
+        //
+        // The path is derived from `Bundle.main.executableURL`, never from `bundlePath`: a
+        // quarantined copy is app-translocated and its bundle path is a mirror, while the executable
+        // URL is the binary that is actually running (ARCHITECTURE.md §8). No helper — a `swift run`
+        // build, or a bundle built before `scripts/bundle.sh` shipped one — means the in-process
+        // walk, which is the behaviour that existed before this seam.
+        let helper = HelperProcessScanRunner.helperExecutableURL(
+            besideExecutableAt: Bundle.main.executableURL, fileSystem: fileSystem)
+        let scanRunner: any ScanRunning
+        if let helper {
+            scanRunner = HelperProcessScanRunner(
+                helperExecutable: helper.path,
+                runner: runner,
+                scanDeadline: policy.scanDeadline,
+                gitExecutable: gitPath)
+            Log.info("scan runner: helper process \(helper.path)")
+        } else {
+            scanRunner = InProcessScanRunner(scanner: scanner)
+            Log.info(
+                "scan runner: in-process — no \(HelperProcessScanRunner.helperExecutableName) "
+                    + "beside \(Bundle.main.executableURL?.path ?? "an unknown executable")")
+        }
+
         let coordinator = RefreshCoordinator(
             scanner: scanner,
             loader: loader,
@@ -709,7 +815,8 @@ final class AppModel: ObservableObject {
             policy: policy,
             makeLoader: makeLoader,
             scanPolicy: ScanPolicy(homeRoot: fileSystem.homeDirectory()),
-            fileSystem: fileSystem)
+            fileSystem: fileSystem,
+            scanRunner: scanRunner)
 
         let environment = Environment(
             coordinator: coordinator, tools: tools, cache: cache, ghClients: ghClients)
