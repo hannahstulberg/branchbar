@@ -574,6 +574,50 @@ public enum Strings {
         "BranchBar found something it could not read in this repo's record of pushes, so it stopped "
         + "there rather than report a date it cannot stand behind."
 
+    /// State: `push-not-recorded` — BranchBar read this branch's record of pushes for
+    /// `<remote>/<name>` and found no usable line (codex round 5, MAJOR 3). It replaced
+    /// `noTrackedRemoteBranch` on every row where the read really happened: a branch with no
+    /// tracking configuration behind a same-named branch on origin, and a branch whose upstream is
+    /// missing. Both used to read "push history not checked" under a tooltip saying BranchBar only
+    /// reads push history for tracking branches — about a branch whose file it had just read.
+    /// Literal: `No push from this Mac recorded for origin/feature`
+    public static func noPushRecorded(remoteRef: String) -> String {
+        "No push from this Mac recorded for \(remoteRef)"
+    }
+
+    /// State: `push-not-recorded` — the same sentence with the remote tip's commit date appended
+    /// as what it is: a date about a commit, labelled, never a push. The remote-tip date is the
+    /// only date this row has, and the fallback names the branch it belongs to so it cannot be
+    /// read as the local tip's.
+    /// Literal: `No push from this Mac recorded for origin/feature · newest commit on origin/feature dated 2 days ago`
+    public static func noPushRecorded(remoteRef: String, remoteTipCommitDate: Date?, now: Date) -> String {
+        let base = noPushRecorded(remoteRef: remoteRef)
+        guard let remoteTipCommitDate else { return base }
+        return "\(base) · newest commit on \(remoteRef) dated \(relative(remoteTipCommitDate, now: now))"
+    }
+
+    /// State: `push-not-recorded` — tooltip stating what was read and what it holds, without
+    /// claiming that nothing left this Mac: the record only covers what this clone did.
+    /// Literal: `BranchBar read this repo's record of pushes for this branch and found none it can date. It cannot see pushes made from your other computers.`
+    public static let noPushRecordedTooltip =
+        "BranchBar read this repo's record of pushes for this branch and found none it can date. "
+        + "It cannot see pushes made from your other computers."
+
+    /// State: `push-history-unavailable` — the read was skipped or refused, so nothing about this
+    /// branch's pushes was established (codex round 5, MAJOR 3). The label is the same three words
+    /// as `pushHistoryNotChecked` because that is exactly what happened; the tooltip differs,
+    /// because the reason does.
+    /// Literal: `Push history not checked`
+    public static let pushHistoryUnavailable = pushHistoryNotChecked
+
+    /// State: `push-history-unavailable` — tooltip naming what BranchBar declined to do. A repo on
+    /// a network volume is read through git alone, because a direct read of a file on a mount
+    /// whose server has gone away cannot be cancelled (codex round 4, BLOCKER 3).
+    /// Literal: `BranchBar did not read this repo's record of pushes this time, so it is not saying when this branch last went out.`
+    public static let pushHistoryUnavailableTooltip =
+        "BranchBar did not read this repo's record of pushes this time, so it is not saying when "
+        + "this branch last went out."
+
     /// State: `remote-branches-unread` — reading this repo's branches on origin failed, so
     /// BranchBar knows nothing about the remote side of this row (codex round 3, MAJOR 6). It may
     /// not say there is no matching branch and it may not say the branch is in sync: a failed read
@@ -591,13 +635,33 @@ public enum Strings {
     /// origin. `remoteObservedAt` is the `FETCH_HEAD` modification date, which is a local
     /// observation; it used to be the remote tip's committer date, so fetching a two-year-old
     /// commit today read as "last seen 2 years ago" (codex MAJOR 7).
+    /// The anchor is a tri-state since codex round 5 MAJOR 4: a nil date used to be read as proof
+    /// that the repo had never fetched, and F15 refuses the `FETCH_HEAD` read outright on a
+    /// network volume, so an ahead branch on a file share announced that a repo which fetches
+    /// daily had never fetched. Only `notFetchedYet` says that now, and it takes an `ENOENT`.
     /// Literal: `Counted against last-known origin. This repo's last fetch changed FETCH_HEAD 3 hours ago. BranchBar never fetches, so origin may have moved.`
-    public static func aheadTooltip(remote: String = "origin", remoteObservedAt: Date?, now: Date) -> String {
-        let anchor = remoteObservedAt
-            .map { " This repo's last fetch changed FETCH_HEAD \(relative($0, now: now))." }
-            ?? " \(notFetchedYet)"
+    public static func aheadTooltip(
+        remote: String = "origin",
+        fetchHead: FetchHeadState,
+        now: Date
+    ) -> String {
+        let anchor: String
+        switch fetchHead {
+        case .observed(let date):
+            anchor = " This repo's last fetch changed FETCH_HEAD \(relative(date, now: now))."
+        case .notFetchedYet:
+            anchor = " \(notFetchedYet)"
+        case .unavailable:
+            anchor = " \(fetchTimeNotChecked)"
+        }
         return "Counted against last-known \(remote).\(anchor) BranchBar never fetches, so \(remote) may have moved."
     }
+
+    /// State: `fetch-time-not-checked` — the anchor clause when BranchBar did not establish when
+    /// this repo last fetched: the read was skipped on a network volume, refused, or failed
+    /// (codex round 5, MAJOR 4). It is not "has not fetched yet", which is a claim about the repo.
+    /// Literal: `Fetch time not checked.`
+    public static let fetchTimeNotChecked = "Fetch time not checked."
 
     /// State: `origin-not-fetched` — the anchor clause when there is no `FETCH_HEAD` to date. A
     /// clone that has only ever been pushed from has never fetched, and saying so is honest where

@@ -64,7 +64,9 @@ public struct FileCacheStore: CacheStore {
         guard !data.isEmpty else { return nil }
         guard let cache = try? Self.makeDecoder().decode(CacheFile.self, from: data) else { return nil }
         guard cache.schemaVersion == CacheFile.currentSchemaVersion else { return nil }
-        return Self.withoutFutureDates(cache)
+        // Schema, then dates, then meaning (codex round 5, MINOR 8): a file can satisfy the first
+        // two and still hold a `PushInfo` that says a push was observed and does not say when.
+        return Self.withoutFutureDates(cache).validated()
     }
 
     /// Drops every part of the cache whose timestamp has not happened yet (codex MAJOR 2).

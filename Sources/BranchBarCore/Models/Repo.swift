@@ -78,6 +78,14 @@ public struct GitHubSlug: Hashable, Codable, Sendable {
     /// `--repo` operand and a PR link are built from.
     public var ownerKey: String { owner.lowercased() }
 
+    /// The other two parts folded the same way, for the same reason (codex round 5, MAJOR 1).
+    /// A hostname is case-insensitive by definition and a GitHub repository name is too, so the
+    /// cache-identity comparison folds all three rather than comparing the bytes a clone URL
+    /// happened to carry. Neither is used for display: `host` and `name` keep the casing the
+    /// `--repo` operand and the PR link are built from.
+    public var hostKey: String { host.lowercased() }
+    public var nameKey: String { name.lowercased() }
+
     /// Parses the string `git config --get remote.origin.url` prints.
     ///
     /// Handles the four shapes git writes — `https://host/owner/name(.git)`,

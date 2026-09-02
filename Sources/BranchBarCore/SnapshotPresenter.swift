@@ -156,7 +156,13 @@ public struct SnapshotPresenter: Sendable {
                 : PRPillVM(text: pillText, status: branch.prStatus),
             // Every group carries it, not just `.active`: a merged or closed row's PR is the one
             // page that says what happened to the branch.
-            prURL: branch.pr?.url,
+            //
+            // codex round 5, MAJOR 1: and only when the address belongs to the repository this row
+            // is under. A PR URL is serialized into `cache.json`, so an entry fetched before the
+            // checkout's origin was repointed carried a link to another repository — on an allowed
+            // GitHub host, which is all the shell's own check can ask about. The row offers no
+            // link rather than the wrong one.
+            prURL: branch.pr.flatMap { Self.prURL($0.url, in: repo) },
             pushLabel: push.label,
             pushTooltip: push.tooltip,
             aheadLabel: aheadLabel(for: branch),
@@ -179,13 +185,24 @@ public struct SnapshotPresenter: Sendable {
     /// PLAN.md §3: a worktree with no branch is listed under its repo and no branch claims it
     /// (`noBranchWorktreeAppearsUnderRepoAndNoBranchClaimsIt`). It gets a row of its own, titled by
     /// its folder, with the commit marker in place of a branch name and no PR to show.
+    ///
+    /// codex round 5, MAJOR 5: the **primary** worktree is one of them. The filter excluded it, on
+    /// the reasoning that the repo's own checkout is represented by whichever branch row is checked
+    /// out in it — which is true right up until the main checkout sits on a commit with no branch,
+    /// and then no row anywhere represents it. A repo the user is working in disappeared from its
+    /// own section while `branchbar-cli` printed it. Its row is the repo root, which is both what
+    /// the porcelain gives as the primary worktree's path and what a click has to open.
     private func noBranchWorktreeRows(of repo: Repo) -> [BranchRowVM] {
         repo.worktrees
-            .filter { !$0.isPrimary && !$0.isBare && $0.branch == nil }
+            .filter { !$0.isBare && $0.branch == nil }
             .map { worktree in
                 let marker = Strings.detachedWorktree(shortSHA: String(worktree.headSHA.prefix(7)))
+                let path = worktree.isPrimary ? repo.path : worktree.path
+                let openable = worktree.isPrimary
+                    ? repo.pathIsDirectory
+                    : !worktree.isPrunable
                 return BranchRowVM(
-                    title: folderName(worktree.path),
+                    title: folderName(path),
                     worktreeMarker: marker,
                     prPill: nil,
                     prURL: nil,
@@ -197,8 +214,9 @@ public struct SnapshotPresenter: Sendable {
                     // The row still lists the worktree — it is part of the repo and saying so is
                     // information — but a record git calls prunable, or one whose path this
                     // refresh could not open as a directory, has nothing to offer a click
-                    // (codex round 3, BLOCKER 1).
-                    primaryAction: worktree.isPrunable ? nil : openAction(path: worktree.path),
+                    // (codex round 3, BLOCKER 1). The primary worktree is judged by the repo's own
+                    // `pathIsDirectory`, which is the verdict already recorded for that folder.
+                    primaryAction: openable ? openAction(path: path) : nil,
                     accessibilityLabel: marker
                 )
             }
@@ -222,7 +240,7 @@ public struct SnapshotPresenter: Sendable {
         let remote = Self.remoteName(for: branch)
 
         switch push.source {
-        case .reflogObserved:
+        case .reflogObserved where push.observedPushAt != nil:
             label = Strings.pushed(
                 reflogAt: push.observedPushAt ?? branch.committerDate,
                 now: now,
@@ -230,6 +248,27 @@ public struct SnapshotPresenter: Sendable {
                 originMovedSince: push.originMovedSince
             )
             tooltip = Strings.pushedTooltip
+        case .reflogObserved:
+            // codex round 5, MINOR 8. `?? branch.committerDate` used to fill this hole, so a
+            // `cache.json` claiming an observation with no date rendered the branch's own commit
+            // date as "Pushed from this Mac". A record that says a push was seen and does not say
+            // when is a record of nothing; `FileCacheStore.load` downgrades it, and this arm is
+            // what makes the substitution impossible even if one reaches here.
+            label = Strings.pushHistoryUnavailable
+            tooltip = Strings.pushHistoryUnavailableTooltip
+        case .checkedNoObservation:
+            // codex round 5, MAJOR 3: read, and empty. The remote tip's commit date rides along
+            // labelled as a commit date, never as a push.
+            label = Strings.noPushRecorded(
+                remoteRef: Self.remoteRef(for: branch),
+                remoteTipCommitDate: push.remoteTipCommitDate,
+                now: now)
+            tooltip = Strings.noPushRecordedTooltip
+        case .unavailable:
+            // codex round 5, MAJOR 3: the read was skipped or refused. Nothing was established
+            // about this branch's pushes, and the tooltip says which of the two happened.
+            label = Strings.pushHistoryUnavailable
+            tooltip = Strings.pushHistoryUnavailableTooltip
         case .tipCommitDate:
             // The **remote** tip's commit date, which is what `.tipCommitDate` was selected on.
             // The local tip can sit many commits ahead of what origin holds, so reading
@@ -266,9 +305,34 @@ public struct SnapshotPresenter: Sendable {
         // `BranchRowVM` has one tooltip field, so the anchor rides along when there is a count.
         if aheadCount(for: branch) > 0 {
             tooltip += " " + Strings.aheadTooltip(
-                remote: remote, remoteObservedAt: push.remoteRefObservedAt, now: now)
+                remote: remote, fetchHead: push.fetchHead, now: now)
         }
         return (label, tooltip)
+    }
+
+    /// The remote-tracking branch this row's push facts were read from: the upstream when there is
+    /// one, and `<remote>/<name>` when an untracked branch's same-named remote branch supplied
+    /// them (codex round 5, MAJOR 3). It is what "No push from this Mac recorded for …" names, so
+    /// it has to be the thing that was actually read.
+    private static func remoteRef(for branch: Branch) -> String {
+        if let ref = branch.upstream?.ref, !ref.isEmpty { return ref }
+        return "\(remoteName(for: branch))/\(branch.name)"
+    }
+
+    /// The address, when its path really is this repo's `/<owner>/<name>/…` (codex round 5,
+    /// MAJOR 1).
+    ///
+    /// The host is checked again in the shell before anything opens; what only this layer knows is
+    /// which repository the row belongs to. A repo with no slug has nothing to compare against, so
+    /// it offers no link: a PR row exists only where a slug does, and a link that cannot be
+    /// checked is one the app is not willing to vouch for.
+    static func prURL(_ url: String, in repo: Repo) -> String? {
+        guard let slug = repo.githubSlug else { return nil }
+        guard let parsed = URL(string: url), let host = parsed.host?.lowercased() else { return nil }
+        guard host == slug.hostKey else { return nil }
+        let expected = "/\(slug.ownerKey)/\(slug.nameKey)/"
+        guard parsed.path.lowercased().hasPrefix(expected) else { return nil }
+        return url
     }
 
     /// The remote every wording on this row names: the one the counts and the moved-since
@@ -347,6 +411,10 @@ public struct SnapshotPresenter: Sendable {
     /// only — there is no branch on this Mac, so there is nothing to open in an editor.
     private func prRows(of repo: Repo) -> [PRRowVM] {
         repo.openPRsNotOnThisMac
+            // The link is the whole of this row, so a link this repo cannot vouch for takes the
+            // row with it rather than leaving a heading with nothing behind it (codex round 5,
+            // MAJOR 1).
+            .filter { Self.prURL($0.url, in: repo) != nil }
             .sorted { left, right in
                 left.updatedAt == right.updatedAt
                     ? left.number > right.number

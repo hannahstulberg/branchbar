@@ -35,6 +35,29 @@ public struct CacheFile: Hashable, Codable, Sendable {
         self.prCache = prCache
         self.lastSnapshot = lastSnapshot
     }
+
+    /// This cache with every model invariant enforced (codex round 5, MINOR 8).
+    ///
+    /// `FileCacheStore.load` already checks the schema version, the size, and the dates; none of
+    /// those look at whether a value means anything. A decoded `PushInfo` claiming an observation
+    /// it carries no date for is the one that reaches the screen as a sentence — "Pushed from this
+    /// Mac" over a date taken from somewhere else — so the restored snapshot is walked and each
+    /// branch's push facts are held to what they can support.
+    public func validated() -> CacheFile {
+        guard var snapshot = lastSnapshot else { return self }
+        snapshot.repos = snapshot.repos.map { repo in
+            var repo = repo
+            repo.branches = repo.branches.map { branch in
+                var branch = branch
+                branch.push = branch.push.withoutUnsupportedClaims()
+                return branch
+            }
+            return repo
+        }
+        var validated = self
+        validated.lastSnapshot = snapshot
+        return validated
+    }
 }
 
 /// One repo's cached `gh` results. TTL is `RefreshPolicy.prCacheTTL` (600 s); "Refresh PRs now"
@@ -53,17 +76,48 @@ public struct PRCacheEntry: Hashable, Codable, Sendable {
     /// read in the other direction). Read with `decodeIfPresent` below, so an entry written
     /// before the field existed loads as "recorded nothing about what it asked".
     public var queriedHeads: [String] = []
+    /// The repository this entry was fetched **for**, both halves of it (codex round 5, MAJOR 1).
+    ///
+    /// The map is keyed by `RepoID` alone, and a `RepoID` is a path: point the same checkout at a
+    /// second GitHub repository, or delete and recreate a repo at the cached path, and a fresh
+    /// entry fetched for `nytimes/repo-a` answered for `nytimes/repo-b` — its pills, and an
+    /// "Open PR" that led to another repository's pull request on an allowed host. An entry is
+    /// therefore used only when it names both the slug the refresh has just resolved and the
+    /// common directory `git rev-parse` has just re-resolved; anything else is treated as no
+    /// cache at all and refetched. Read with `decodeIfPresent`, so an entry written before this
+    /// field records neither and is discarded rather than believed.
+    public var repoID: RepoID?
+    /// The `origin` slug the PRs in this entry were fetched from (codex round 5, MAJOR 1).
+    public var slug: GitHubSlug?
 
     public init(
         fetchedAt: Date,
         prs: [PRInfo] = [],
         authorPRs: [PRInfo] = [],
-        queriedHeads: [String] = []
+        queriedHeads: [String] = [],
+        repoID: RepoID? = nil,
+        slug: GitHubSlug? = nil
     ) {
         self.fetchedAt = fetchedAt
         self.prs = prs
         self.authorPRs = authorPRs
         self.queriedHeads = queriedHeads
+        self.repoID = repoID
+        self.slug = slug
+    }
+
+    /// Does this entry answer for the repository this refresh is looking at?
+    ///
+    /// Both halves have to match, and an entry that recorded neither matches nothing: "no slug
+    /// recorded" is not "the slug you have". Slug comparison is case-folded on all three parts
+    /// because GitHub hosts, owners, and repository names are case-insensitive and the casing in
+    /// a clone URL is whatever was typed.
+    public func answers(repoID: RepoID, slug: GitHubSlug?) -> Bool {
+        guard let recordedID = self.repoID, recordedID == repoID else { return false }
+        guard let recordedSlug = self.slug, let slug else { return false }
+        return recordedSlug.hostKey == slug.hostKey
+            && recordedSlug.ownerKey == slug.ownerKey
+            && recordedSlug.nameKey == slug.nameKey
     }
 
     /// Explicit because a *synthesized* `init(from:)` calls `decode(_:forKey:)` for every
@@ -81,5 +135,7 @@ public struct PRCacheEntry: Hashable, Codable, Sendable {
         prs = try container.decode([PRInfo].self, forKey: .prs)
         authorPRs = try container.decode([PRInfo].self, forKey: .authorPRs)
         queriedHeads = try container.decodeIfPresent([String].self, forKey: .queriedHeads) ?? []
+        repoID = try container.decodeIfPresent(RepoID.self, forKey: .repoID)
+        slug = try container.decodeIfPresent(GitHubSlug.self, forKey: .slug)
     }
 }

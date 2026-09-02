@@ -160,6 +160,18 @@ public struct PRQueryCoverage: Hashable, Codable, Sendable {
         return ownedHeads.contains(OwnedHead(ownerLogin: ownerLogin, headRefName: headRefName))
     }
 
+    /// Was this head asked about with a query that answers for **every** owner of it?
+    ///
+    /// The owner-free half of `covers`, and the only coverage a branch with no configured upstream
+    /// can appeal to (codex round 5, MAJOR 2): with no upstream there is no owner to have asked
+    /// about, and `covers` refuses a nil owner. A `gh pr list --head <name>` that ended before its
+    /// limit did answer for that branch, whoever owns the head, so "GitHub was asked and named
+    /// nothing" is a fact about it — which is what keeps the modal case ("one branch, no PR, never
+    /// pushed") reading `none` rather than `notChecked`.
+    public func coversAnyOwner(headRefName: String) -> Bool {
+        anyOwnerHeads.contains(headRefName)
+    }
+
     /// Records the head a `--head` query asked about, for every owner.
     public mutating func recordAnyOwner(head: String) {
         anyOwnerHeads.insert(head)

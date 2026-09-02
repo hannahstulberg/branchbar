@@ -417,24 +417,37 @@ public struct RepoScanner: Sendable {
                 } else {
                     // Bounded: a `.git` file holds one short `gitdir:` line, and the file is
                     // repository-controlled (codex MAJOR 15).
-                    let contents = (try? fileSystem.readFile(
-                        atPath: marker.path, maximumBytes: Self.maximumGitFileBytes))
-                        .map { String(decoding: $0, as: UTF8.self) } ?? ""
-                    switch Self.classifyGitFile(contents: contents) {
-                    case .worktreeCheckout:
-                        accumulator.skippedWorktreeCheckouts.append(path)
+                    //
+                    // codex round 5, MINOR 7: a read that **failed** is not an empty marker.
+                    // `try?` turned a refusal, a FIFO where the marker belongs, and a TCC denial
+                    // into `""`, which classifies as `unrecognized` — so a linked worktree or a
+                    // separate-git-directory checkout vanished from the list with nothing saying
+                    // it had been passed over. It is reported the way an unreadable directory is,
+                    // named by the folder the user would look for.
+                    if let markerBytes = try? fileSystem.readFile(
+                        atPath: marker.path, maximumBytes: Self.maximumGitFileBytes) {
+                        switch Self.classifyGitFile(contents: String(decoding: markerBytes, as: UTF8.self)) {
+                        case .worktreeCheckout:
+                            accumulator.skippedWorktreeCheckouts.append(path)
+                            if !isWalkRoot { continue }
+                        case .submodule:
+                            accumulator.skippedSubmodules.append(path)
+                            if !isWalkRoot { continue }
+                        case .candidate(let gitDirectory):
+                            await claim(
+                                Candidate(path: path, commonDirectoryHint: gitDirectory, gitIsDirectory: false),
+                                into: &accumulator)
+                            if !isWalkRoot { continue }
+                        case .unrecognized:
+                            // Not a repo marker we can vouch for; keep walking rather than
+                            // inventing a row.
+                            break
+                        }
+                    } else {
+                        if accumulator.reportNotScanned(path) { onProgress?(.unreadable(path)) }
+                        // Not descended into, for the same reason a claimed repo is not — except
+                        // at the home root, which is walked whatever its own marker says (WR-08).
                         if !isWalkRoot { continue }
-                    case .submodule:
-                        accumulator.skippedSubmodules.append(path)
-                        if !isWalkRoot { continue }
-                    case .candidate(let gitDirectory):
-                        await claim(
-                            Candidate(path: path, commonDirectoryHint: gitDirectory, gitIsDirectory: false),
-                            into: &accumulator)
-                        if !isWalkRoot { continue }
-                    case .unrecognized:
-                        // Not a repo marker we can vouch for; keep walking rather than inventing a row.
-                        break
                     }
                 }
             }

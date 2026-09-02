@@ -107,6 +107,43 @@ public enum PRStatusMapper {
         return candidates.max { rank($0) < rank($1) }
     }
 
+    /// What a branch with **no configured upstream** can conclude about the PRs sharing its head
+    /// name (codex round 5, MAJOR 2).
+    public enum UpstreamlessMatch: Hashable, Sendable {
+        /// Exactly one candidate is at this branch's tip commit, so it is this branch's PR.
+        case matched(PRInfo)
+        /// Candidates exist and the commit does not single one out: several at the tip, or none
+        /// at it. The row renders `notChecked` — nothing here establishes which head is this
+        /// branch's, and "No PR" would answer a question nobody asked.
+        case ambiguous
+        /// No PR carries this head name at all.
+        case noCandidate
+    }
+
+    /// Matches a branch that tracks nothing by head name and then by commit.
+    ///
+    /// The fork workflow this restores: origin is `nytimes/project`, the local branch is `feature`
+    /// with no upstream, and the PR's head is `alice:feature`. The old rule invented origin's own
+    /// owner for an untracked branch, rejected the PR as somebody else's head, and — because an
+    /// exhaustive `--head feature` query counts as full coverage — rendered "No PR" beside an open
+    /// one. Nothing about a branch with no tracking configuration says who owns its head, so the
+    /// owner is unresolved and the only evidence left is the commit: a candidate whose
+    /// `headRefOid` is this branch's tip is the same work, and a unique one is this branch's PR.
+    ///
+    /// Ambiguity is not resolved by preferring an owner or a state, because both would be a guess
+    /// dressed as an answer. `notChecked` is what the row says instead.
+    public static func matchWithoutUpstream(
+        branchName: String,
+        tipSHA: String,
+        in prs: [PRInfo]
+    ) -> UpstreamlessMatch {
+        let candidates = prs.filter { $0.headRefName == branchName }
+        guard !candidates.isEmpty else { return .noCandidate }
+        let atTip = candidates.filter { !$0.headRefOid.isEmpty && $0.headRefOid == tipSHA }
+        guard atTip.count == 1, let match = atTip.first else { return .ambiguous }
+        return .matched(match)
+    }
+
     /// Returns the author-@me PRs that neither match an entry in `localHeads` — the (upstream
     /// owner login, branch name) pair of every local branch — nor share a name with anything in
     /// `localBranchNames`.

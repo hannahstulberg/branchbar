@@ -130,6 +130,16 @@ public struct RepoLoader: Sendable {
         }
         let slug = remoteURL.flatMap(GitHubSlug.init(remoteURL:))
 
+        // codex round 5, MAJOR 1. `prCache` is keyed by `RepoID`, which is a path, so a fresh
+        // entry fetched for one GitHub repository answered for whatever repository now sits at
+        // that path: repoint `origin`, or delete and recreate the checkout, and repo B wore repo
+        // A's pills and repo A's "Open PR" link. An entry is used only when it names both the slug
+        // this refresh has just read and the common directory `rev-parse` has just re-resolved;
+        // anything else — including an entry that names neither, which is every entry written
+        // before this field — is treated as no cache and refetched.
+        let currentID = RepoID(commonDir: commonDirectory)
+        let usableCache = cachedPRs.flatMap { $0.answers(repoID: currentID, slug: slug) ? $0 : nil }
+
         // Stage 3 — the branch list. This one is the repo: with no rows there is nothing honest to
         // render, so the previous refresh's repo comes back marked stale.
         let branchRefs: [ParsedBranchRef]
@@ -147,7 +157,7 @@ public struct RepoLoader: Sendable {
                     remoteURL: remoteURL,
                     slug: slug,
                     errors: errors),
-                prCache: cachedPRs)
+                prCache: usableCache)
         }
 
         // Stage 4 — the remote-tracking tips, which back `originMovedSince` and the last-known
@@ -230,10 +240,26 @@ public struct RepoLoader: Sendable {
         }
         let mayReadRepoFiles = directReadRefusal == nil
 
+        // codex round 5, MAJOR 4: three answers, not a `Date?`. `statRegularFile` returns nil only
+        // when the open answered `ENOENT`/`ENOTDIR`, which is the one result that means this clone
+        // has never fetched; a throw, and the deliberate refusal above, mean the read did not
+        // happen. Collapsing all three into nil made an ahead branch on a network share announce
+        // that a repo which fetches daily had never fetched.
         let fetchHeadPath = (commonDirectory as NSString).appendingPathComponent("FETCH_HEAD")
-        let fetchHeadObservedAt = mayReadRepoFiles
-            ? (try? fileSystem.statRegularFile(atPath: fetchHeadPath))??.modificationDate
-            : nil
+        let fetchHead: FetchHeadState
+        if !mayReadRepoFiles {
+            fetchHead = .unavailable
+        } else {
+            do {
+                if let stat = try fileSystem.statRegularFile(atPath: fetchHeadPath) {
+                    fetchHead = .observed(stat.modificationDate)
+                } else {
+                    fetchHead = .notFetchedYet
+                }
+            } catch {
+                fetchHead = .unavailable
+            }
+        }
 
         // Stage 6 — one reflog file per upstream branch, isolated per branch. An absent file is
         // nil and not an error (a branch that was never pushed has no reflog); a file that exists
@@ -244,10 +270,15 @@ public struct RepoLoader: Sendable {
         // only when `for-each-ref -- refs/remotes/` actually listed that ref: `git push origin
         // <branch>` without `-u` leaves a real push record and no tracking configuration, and
         // calling that "never pushed" was a claim the data never supported (codex MAJOR 6).
+        //
+        // codex round 5, MAJOR 3: what each branch's read actually did travels with it.
+        // "No observation" was indistinguishable from "never looked", so a branch whose
+        // `origin/<name>` record this loop had just read rendered "push history not checked".
         let remoteShortNames = Set(remoteRefs.map(\.shortName))
         var observations: [String: ReflogObservation] = [:]
         var uncertainPushHistory: Set<String> = []
-        for row in branchRefs where mayReadRepoFiles && row.refName.hasPrefix("refs/heads/") {
+        var pushHistoryReads: [String: PushInfo.HistoryRead] = [:]
+        for row in branchRefs where row.refName.hasPrefix("refs/heads/") {
             let remote: String
             let remoteBranch: String
             if let upstream = ForEachRefParser.upstream(from: row) {
@@ -257,6 +288,13 @@ public struct RepoLoader: Sendable {
                 remote = "origin"
                 remoteBranch = row.branchName
             } else {
+                // Nothing to read: no tracking configuration and no same-named branch on origin.
+                // This is the one state whose row may say the push history was not checked.
+                continue
+            }
+
+            guard mayReadRepoFiles else {
+                pushHistoryReads[row.branchName] = .unavailable
                 continue
             }
 
@@ -268,7 +306,7 @@ public struct RepoLoader: Sendable {
                 case .observed(let observation):
                     observations[row.branchName] = observation
                 case .nothingObserved:
-                    break
+                    pushHistoryReads[row.branchName] = .nothingObserved
                 // codex round 3, MAJOR 7: a line the reader could not vouch for stopped its walk,
                 // and what sits below it may be the deletion that makes everything above it a lie.
                 // The row says so instead of falling back to a date.
@@ -276,6 +314,7 @@ public struct RepoLoader: Sendable {
                     uncertainPushHistory.insert(row.branchName)
                 }
             } catch {
+                pushHistoryReads[row.branchName] = .unavailable
                 let file = ReflogFileReader.reflogPath(
                     commonDirectory: commonDirectory, remote: remote, branch: remoteBranch)
                 errors.append(RepoError(stage: .reflog, message: "\(file): \(Self.describe(error))"))
@@ -285,10 +324,10 @@ public struct RepoLoader: Sendable {
         // Stage 7 — PRs, and only if asked. PLAN.md §3: `gh` runs when the repo is expanded or in
         // the 5 most recently active, and the cache exists "for latency, not quota".
         var pr = PRStage()
-        var entry: PRCacheEntry? = cachedPRs
-        let cacheIsFresh = cachedPRs.map { now.timeIntervalSince($0.fetchedAt) < policy.prCacheTTL } ?? false
+        var entry: PRCacheEntry? = usableCache
+        let cacheIsFresh = usableCache.map { now.timeIntervalSince($0.fetchedAt) < policy.prCacheTTL } ?? false
 
-        if let cachedPRs, cacheIsFresh {
+        if let cachedPRs = usableCache, cacheIsFresh {
             // `prCacheWithinTTLIssuesNoGhCalls`: a warm entry answers outright. The heads that
             // fetch asked about are carried in the entry, so a branch it asked about and found
             // nothing for still reads `none`; a branch it never asked about still reads
@@ -320,9 +359,13 @@ public struct RepoLoader: Sendable {
                     fetchedAt: fetchedAt,
                     prs: pr.pullRequests,
                     authorPRs: pr.authored,
-                    queriedHeads: pr.coverage.anyOwnerHeads.sorted())
+                    queriedHeads: pr.coverage.anyOwnerHeads.sorted(),
+                    // The repository this answer is about, so the next refresh can tell whether it
+                    // is still looking at it (codex round 5, MAJOR 1).
+                    repoID: currentID,
+                    slug: slug)
             }
-        } else if let cachedPRs {
+        } else if let cachedPRs = usableCache {
             // Not eager, and the entry is past its TTL: show what was last known rather than
             // blanking the pills, and say it is stale.
             pr.pullRequests = cachedPRs.prs
@@ -342,8 +385,9 @@ public struct RepoLoader: Sendable {
             remoteRefs: remoteRefs,
             worktrees: worktrees,
             worktreesEnumerated: worktreesEnumerated,
-            fetchHeadObservedAt: fetchHeadObservedAt,
+            fetchHead: fetchHead,
             pushObservations: observations,
+            pushHistoryReads: pushHistoryReads,
             pullRequests: pr.pullRequests,
             authoredOpenPullRequests: pr.authored,
             queryCoverage: pr.coverage,

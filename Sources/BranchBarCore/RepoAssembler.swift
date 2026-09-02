@@ -20,11 +20,16 @@ public enum RepoAssembler {
         /// False when `git worktree list` failed, so `worktrees` is "unknown" rather than "none".
         /// The Merged group is suppressed in that case (codex MAJOR 12).
         public var worktreesEnumerated: Bool
-        /// `FETCH_HEAD`'s modification date: when this clone last heard from origin. Nil when the
-        /// clone has never fetched (codex MAJOR 7).
-        public var fetchHeadObservedAt: Date?
+        /// What the `FETCH_HEAD` read established: when this clone last heard from origin, that it
+        /// has never fetched, or that the read did not happen (codex MAJOR 7, made a tri-state by
+        /// codex round 5 MAJOR 4).
+        public var fetchHead: FetchHeadState
         /// Keyed by local branch name.
         public var pushObservations: [String: ReflogObservation]
+        /// What this refresh did about each branch's push record, keyed by local branch name
+        /// (codex round 5, MAJOR 3). A name absent from the map was never looked at, which is the
+        /// only state whose row may say the history was not checked.
+        public var pushHistoryReads: [String: PushInfo.HistoryRead]
         /// The recent-100 list plus anything the per-head fallback returned.
         public var pullRequests: [PRInfo]
         public var authoredOpenPullRequests: [PRInfo]
@@ -61,8 +66,9 @@ public enum RepoAssembler {
             remoteRefs: [ParsedRemoteRef] = [],
             worktrees: [Worktree] = [],
             worktreesEnumerated: Bool = true,
-            fetchHeadObservedAt: Date? = nil,
+            fetchHead: FetchHeadState = .notFetchedYet,
             pushObservations: [String: ReflogObservation] = [:],
+            pushHistoryReads: [String: PushInfo.HistoryRead] = [:],
             pullRequests: [PRInfo] = [],
             authoredOpenPullRequests: [PRInfo] = [],
             queryCoverage: PRQueryCoverage = PRQueryCoverage(),
@@ -84,8 +90,9 @@ public enum RepoAssembler {
             self.remoteRefs = remoteRefs
             self.worktrees = worktrees
             self.worktreesEnumerated = worktreesEnumerated
-            self.fetchHeadObservedAt = fetchHeadObservedAt
+            self.fetchHead = fetchHead
             self.pushObservations = pushObservations
+            self.pushHistoryReads = pushHistoryReads
             self.pullRequests = pullRequests
             self.authoredOpenPullRequests = authoredOpenPullRequests
             self.queryCoverage = queryCoverage
@@ -154,14 +161,33 @@ public enum RepoAssembler {
                 localHeads.insert(PRStatusMapper.LocalHead(ownerLogin: owner, branchName: name))
             }
 
-            let matched = (isUnavailable || isNotLoaded)
-                ? nil
-                : PRStatusMapper.match(
+            // codex round 5, MAJOR 2. A branch with no tracking configuration has an owner nobody
+            // established, so its PR is found by head name and then by commit rather than by an
+            // owner invented from the repo's own slug — which rejected every fork PR and then
+            // called the rejection "No PR".
+            let matched: PRInfo?
+            var candidatesAreAmbiguous = false
+            if isUnavailable || isNotLoaded {
+                matched = nil
+            } else if upstream == nil {
+                switch PRStatusMapper.matchWithoutUpstream(
+                    branchName: name, tipSHA: row.objectName, in: inputs.pullRequests) {
+                case .matched(let pr):
+                    matched = pr
+                case .ambiguous:
+                    matched = nil
+                    candidatesAreAmbiguous = true
+                case .noCandidate:
+                    matched = nil
+                }
+            } else {
+                matched = PRStatusMapper.match(
                     branchName: name,
                     upstreamOwnerLogin: owner,
                     repoOwnerLogin: slug?.owner,
                     upstreamOwnerUnresolved: ownerUnresolved,
                     in: inputs.pullRequests)
+            }
 
             let status: PRStatus
             if isUnavailable {
@@ -170,6 +196,15 @@ public enum RepoAssembler {
                 status = .notLoaded
             } else if let matched {
                 status = PRStatusMapper.status(for: matched)
+            } else if candidatesAreAmbiguous {
+                // PRs carry this head name and no commit says which one is this branch's. Never
+                // `none`: GitHub answered, and the answer was more than one head.
+                status = .notChecked
+            } else if upstream == nil {
+                // No candidate at all. A `--head <name>` query that ended before its limit answers
+                // for every owner of the head, so it — and only it — proves the absence for a
+                // branch whose owner was never established.
+                status = inputs.queryCoverage.coversAnyOwner(headRefName: name) ? .none : .notChecked
             } else {
                 // The `none` versus `notChecked` distinction: `none` is only reachable after this
                 // branch's own head — owner included — was queried
@@ -195,10 +230,11 @@ public enum RepoAssembler {
                     upstream: upstream,
                     remoteTipOID: tip?.objectName,
                     remoteTipCommitDate: tip?.committerDate,
-                    fetchHeadObservedAt: inputs.fetchHeadObservedAt,
+                    fetchHead: inputs.fetchHead,
                     remoteName: remoteName,
                     pushHistoryUnreadable: inputs.uncertainPushHistory.contains(name),
-                    remoteRefsState: inputs.remoteFacts.remoteRefs),
+                    remoteRefsState: inputs.remoteFacts.remoteRefs,
+                    historyRead: inputs.pushHistoryReads[name] ?? .notAttempted),
                 group: group(
                     status: status,
                     tipSHA: row.objectName,

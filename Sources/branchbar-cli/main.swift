@@ -43,6 +43,10 @@ struct Options {
     /// a slightly later hard deadline; this is what gives a walk that *can* still answer the
     /// chance to print the repos it already found.
     var deadline: TimeInterval?
+    /// The largest `--deadline` this process accepts, in seconds (codex round 5, MINOR 6). An hour
+    /// is far past any scan worth waiting for and keeps the nanosecond conversion inside `UInt64`
+    /// with room to spare.
+    static let maximumDeadline: TimeInterval = 3_600
 }
 
 let usage = """
@@ -65,7 +69,7 @@ scan
 
   --policy-json PATH  file holding the JSON-encoded ScanPolicy to walk under
   --deadline SECONDS  bound the walk and print what it found; the caller kills this
-                      process at its own, later, hard deadline
+                      process at its own, later, hard deadline. Above 0 and at most 3600
   --git PATH          git to dedupe with; overrides BRANCHBAR_GIT
 """
 
@@ -121,8 +125,17 @@ func parse(_ arguments: [String]) -> Result<Options, String> {
         case "--deadline":
             switch value("--deadline") {
             case .success(let seconds):
-                guard let parsed = TimeInterval(seconds), parsed > 0 else {
-                    return .failure("--deadline needs a positive number of seconds")
+                // codex round 5, MINOR 6. `TimeInterval("inf")` is a positive `Double`, and so is
+                // `1e30`: both passed the old check and then `UInt64(seconds * 1_000_000_000)`
+                // trapped, so a mistyped flag crashed the helper the app spawns instead of being
+                // rejected. Finite, positive, and inside a bound the conversion cannot overflow.
+                guard let parsed = TimeInterval(seconds),
+                      parsed.isFinite,
+                      parsed > 0,
+                      parsed <= Options.maximumDeadline else {
+                    return .failure(
+                        "--deadline needs a number of seconds above 0 and at most "
+                            + "\(Int(Options.maximumDeadline))")
                 }
                 options.deadline = parsed
             case .failure: return .failure("--deadline needs a number of seconds")
@@ -232,7 +245,10 @@ if options.command == .scan {
     let scanned = await withTaskGroup(of: ScanResult?.self, returning: ScanResult.self) { group in
         group.addTask { try? await helperScanner.scan(policy: requested) }
         group.addTask {
-            try? await Task.sleep(nanoseconds: UInt64(max(0, softDeadline) * 1_000_000_000))
+            // Clamped, then converted: the parse above bounds `--deadline`, and this bounds
+            // every other way a value reaches here (codex round 5, MINOR 6).
+            let seconds = min(max(0, softDeadline), Options.maximumDeadline)
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             return nil
         }
 
@@ -542,8 +558,9 @@ for (section, repo) in zip(viewModel.sections, snapshot.repos) {
     // The second kind. Looked up by worktree rather than by branch, which is the whole finding:
     // a detached worktree has no branch name to be found by, so the branch-keyed lookup printed
     // `—` in the WORKTREE column — the one column that had its answer. The primary worktree is
-    // included, and it is the case the popover cannot show at all: a repo whose own root is on a
-    // detached HEAD has a checkout that belongs to no branch row anywhere.
+    // included: a repo whose own root is on a detached HEAD has a checkout that belongs to no
+    // branch row anywhere. Since codex round 5 MAJOR 5 the popover shows that row too, titled by
+    // the repo folder, so this table and the popover list the same checkouts.
     //
     // The BRANCH cell carries `Strings.detachedWorktree`, the same sentence the popover puts under
     // such a row, so this file still composes no copy of its own.

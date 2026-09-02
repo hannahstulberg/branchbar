@@ -54,14 +54,28 @@ public enum PushInfoDeriver {
         upstream: Upstream?,
         remoteTipOID: String?,
         remoteTipCommitDate: Date?,
-        fetchHeadObservedAt: Date? = nil,
+        fetchHead: FetchHeadState = .notFetchedYet,
         remoteName: String? = nil,
         pushHistoryUnreadable: Bool = false,
-        remoteRefsState: RemoteFactState = .known
+        remoteRefsState: RemoteFactState = .known,
+        historyRead: PushInfo.HistoryRead = .notAttempted
     ) -> PushInfo {
         let remote = remoteName ?? upstream?.remote
         let remoteRefExists = remoteTipOID != nil || remoteTipCommitDate != nil
         let remoteRefsKnown = remoteRefsState != .failed
+        let fetchHeadObservedAt = fetchHead.observedAt
+
+        // codex round 5, MAJOR 3. What a refresh did about this branch's push record, for the two
+        // arms below that have no observation to report: it read and found nothing, it could not
+        // read, or there was nothing to read. Only the last of the three may render the "not
+        // checked" wording, and only the first two are reachable when a ref was actually there.
+        func sourceWithoutObservation(_ fallback: PushInfo.Source) -> PushInfo.Source {
+            switch historyRead {
+            case .nothingObserved: return .checkedNoObservation
+            case .unavailable: return .unavailable
+            case .notAttempted: return fallback
+            }
+        }
 
         // The uncertainty boundary short-circuits both arms below: no date, no OID, no
         // "has moved since" comparison against an OID this reader refused to trust.
@@ -75,7 +89,8 @@ public enum PushInfoDeriver {
                 remoteTipCommitDate: remoteTipCommitDate,
                 remoteName: remote,
                 remoteRefExists: remoteRefExists,
-                remoteRefsKnown: remoteRefsKnown)
+                remoteRefsKnown: remoteRefsKnown,
+                fetchHead: fetchHead)
         }
 
         guard let upstream else {
@@ -83,12 +98,19 @@ public enum PushInfoDeriver {
             // a real push. The count stays nil — there is no upstream to be ahead of — while the
             // observation is reported for what it is.
             guard let observation else {
+                // codex round 5, MAJOR 3: `RepoLoader` reads `origin/<name>`'s record whenever
+                // that ref exists, so "no observation" here is often "read it, nothing in it" —
+                // which the row said was "not checked", under a tooltip claiming BranchBar only
+                // looks at tracking branches. It looked.
                 return PushInfo(
-                    source: .none,
+                    source: sourceWithoutObservation(.none),
                     hasUpstream: false,
+                    remoteRefObservedAt: fetchHeadObservedAt,
+                    remoteTipCommitDate: remoteTipCommitDate,
                     remoteName: remote,
                     remoteRefExists: remoteRefExists,
-                    remoteRefsKnown: remoteRefsKnown)
+                    remoteRefsKnown: remoteRefsKnown,
+                    fetchHead: fetchHead)
             }
             return PushInfo(
                 observedPushAt: observation.pushedAt,
@@ -101,19 +123,28 @@ public enum PushInfoDeriver {
                 remoteTipCommitDate: remoteTipCommitDate,
                 remoteName: remote,
                 remoteRefExists: remoteRefExists,
-                remoteRefsKnown: remoteRefsKnown)
+                remoteRefsKnown: remoteRefsKnown,
+                fetchHead: fetchHead)
         }
 
         let source: PushInfo.Source
         if observation != nil {
             source = .reflogObserved
+        } else if historyRead == .unavailable {
+            // codex round 5, MAJOR 3 and MAJOR 4: a read that did not happen outranks the
+            // tip-commit fallback, whose own copy says "BranchBar has no record of this branch
+            // going out from this Mac" — an absence nobody looked for on a repo whose files this
+            // app deliberately did not open.
+            source = .unavailable
         } else if remoteTipCommitDate != nil {
             source = .tipCommitDate
         } else {
             // An upstream whose ref is gone or was never fetched: no observation and no tip date
             // is nothing to show, and a `.tipCommitDate` with no date would be a label with a
-            // hole in it.
-            source = .none
+            // hole in it. Which of the three no-date states it is comes from what the read did
+            // (codex round 5, MAJOR 3): a gone upstream whose record was read and held nothing
+            // said "not checked" here too.
+            source = sourceWithoutObservation(.none)
         }
 
         return PushInfo(
@@ -128,7 +159,8 @@ public enum PushInfoDeriver {
             remoteTipCommitDate: remoteTipCommitDate,
             remoteName: remote,
             remoteRefExists: remoteRefExists,
-            remoteRefsKnown: remoteRefsKnown
+            remoteRefsKnown: remoteRefsKnown,
+            fetchHead: fetchHead
         )
     }
 
