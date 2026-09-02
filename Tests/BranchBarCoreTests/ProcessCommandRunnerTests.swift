@@ -612,7 +612,10 @@ struct ProcessLaunchDeadlineTests {
             try await ProcessCommandRunner(hooks: hooks).run(
                 Command(
                     executable: "/bin/sh",
-                    arguments: ["-c", "echo $$ > '\(pidFile)'; exec sleep 2"],
+                    // The child must outlive any scheduling delay before the cancel lands: a 2 s sleep
+                    // exited first on a loaded 3-core CI runner (2026-09-02), returning exit 0 instead of
+                    // being signalled. 30 s leaves a ≥ 3× margin; cancellation kills it long before that.
+                    arguments: ["-c", "echo $$ > '\(pidFile)'; exec sleep 30"],
                     timeout: 120))
         }
         let childPID = try await ProcessCommandRunnerGroupAndReadTests.awaitPID(inFile: pidFile)
