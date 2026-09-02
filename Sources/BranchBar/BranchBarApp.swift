@@ -78,17 +78,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("action check: clipboard now holds \(pasted) · matches=\(pasted == path)")
 
         let command = Strings.ghAuthLoginCommand(host: "github.com")
-        if let script = Actions.writeSignInScript(command: command) {
+        if let script = Actions.writeSignInScript(host: "github.com") {
             let body = (try? String(contentsOf: script, encoding: .utf8)) ?? ""
             Log.info(
                 "action check: sign-in script at \(script.path) executable="
                     + "\(FileManager.default.isExecutableFile(atPath: script.path)) "
-                    + "carries-command=\(body.contains(command))")
+                    + "carries-no-host=\(!body.contains("github.com")) "
+                    + "carries-guard=\(body.contains(SignInScript.hostnamePattern))")
         }
+        // codex BLOCKER 1: the two shapes that used to become shell source. Both must log a refusal
+        // and neither may write a script.
+        Log.info(
+            "action check: hostile sign-in payloads refused="
+                + "\(Actions.signInHostname(from: "gh auth login --hostname github.com;id") == nil) "
+                + "\(Actions.signInHostname(from: "gh auth login --hostname $(touch /tmp/pwned)") == nil)")
         Actions.openTerminalForSignIn(command: command)
 
-        Actions.openPR(url: "https://github.com/hannahstulberg/branchbar")
-        Actions.openPR(url: "file:///etc/passwd")
+        Actions.openPR(url: "https://github.com/hannahstulberg/branchbar", host: "github.com")
+        Actions.openPR(url: "http://github.com/hannahstulberg/branchbar", host: "github.com")
+        Actions.openPR(url: "file:///etc/passwd", host: "github.com")
+        Actions.openPR(url: "https://evil.example.com/o/n/pull/1", host: "github.com")
+        Actions.openPR(url: "https://user:pw@github.com/o/n/pull/1", host: "github.com")
+        Actions.openPR(url: "https://github.com/o/n/pull/1", host: nil)
         Actions.openFilesAndFoldersSettings()
 
         Log.info("action check: done")

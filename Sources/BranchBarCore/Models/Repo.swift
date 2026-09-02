@@ -32,6 +32,36 @@ public struct GitHubSlug: Hashable, Codable, Sendable {
         self.name = name
     }
 
+    /// The hostname grammar every decode boundary applies (codex BLOCKER 1).
+    ///
+    /// A host is not merely displayed text: it reaches `Strings.ghAuthLoginCommand` and, through
+    /// the sign-in action, the zsh script `SignInScript.render` writes. A remote URL is repo-owned
+    /// data — anyone who can put a folder under `~` can write `.git/config` — so the host is held
+    /// to RFC 1123 rather than to "whatever sat between `://` and the first `/`": labels of
+    /// `[A-Za-z0-9-]`, 1–63 characters each, no leading or trailing hyphen, separated by single
+    /// dots, 253 characters in total. Nothing a shell reads as syntax survives that.
+    ///
+    /// Case-insensitive by design, because `openPR` checks a `URL.host` that macOS may hand back
+    /// in any case; `init?(remoteURL:)` still stores the lower-cased form, which is what the zsh
+    /// re-check in `SignInScript` is written against.
+    public static func isValidHostname(_ host: String) -> Bool {
+        guard !host.isEmpty, host.utf8.count <= 253 else { return false }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard !labels.isEmpty else { return false }
+        for label in labels {
+            guard (1...63).contains(label.count) else { return false }
+            guard label.first != "-", label.last != "-" else { return false }
+            let isLegal = label.unicodeScalars.allSatisfy { scalar in
+                ("a"..."z").contains(scalar)
+                    || ("A"..."Z").contains(scalar)
+                    || ("0"..."9").contains(scalar)
+                    || scalar == "-"
+            }
+            guard isLegal else { return false }
+        }
+        return true
+    }
+
     /// The `--repo` operand of every `gh pr list` invocation in PLAN.md §5.
     public var ghRepoArgument: String { "\(host)/\(owner)/\(name)" }
 
@@ -92,7 +122,13 @@ public struct GitHubSlug: Hashable, Codable, Sendable {
         if last.hasSuffix(".git") { last.removeLast(4) }
         guard !last.isEmpty, let owner = components.last, !owner.isEmpty else { return nil }
 
-        self.host = hostAndPath.host.lowercased()
+        // codex BLOCKER 1: a host that is not a hostname is not a slug. Returning nil here is what
+        // sends a hostile remote to `PRUnavailableReason.notGitHubRemote` — the same place a
+        // `file://` remote goes — instead of into a `gh` argument, a notice, and a shell script.
+        let lowered = hostAndPath.host.lowercased()
+        guard Self.isValidHostname(lowered) else { return nil }
+
+        self.host = lowered
         self.owner = owner
         self.name = last
     }

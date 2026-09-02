@@ -191,7 +191,8 @@ struct RepoSectionView: View {
                     BranchRowView(
                         row: row,
                         isFocused: focus == .branchRow(section.id, kind, index),
-                        perform: perform)
+                        perform: perform,
+                        prHost: section.host)
                 }
             }
             .padding(.top, Metrics.groupSpacing)

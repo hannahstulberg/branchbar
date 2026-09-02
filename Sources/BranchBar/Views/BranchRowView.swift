@@ -8,6 +8,9 @@ struct BranchRowView: View {
     let row: BranchRowVM
     let isFocused: Bool
     let perform: (UserFacingFailure.Action) -> Void
+    /// The repo's validated GitHub host (`RepoSectionVM.host`). `Actions.openPR` refuses a link
+    /// that does not match it, so the row cannot open an address the repo does not own.
+    let prHost: String?
 
     var body: some View {
         Button(action: { perform(row.primaryAction) }) {
@@ -72,7 +75,7 @@ struct BranchRowView: View {
         // an accessibility action too (§5a: a control the mouse has, the keyboard has).
         .accessibilityActions {
             if let url = row.prURL, !url.isEmpty {
-                Button(Strings.openPRActionLabel) { Actions.openPR(url: url) }
+                Button(Strings.openPRActionLabel) { Actions.openPR(url: url, host: prHost) }
             }
         }
     }
@@ -89,7 +92,7 @@ struct BranchRowView: View {
         // item that opens nothing is worse than no item.
         if let url = row.prURL, !url.isEmpty {
             Button {
-                Actions.openPR(url: url)
+                Actions.openPR(url: url, host: prHost)
             } label: {
                 Label(Strings.openPRActionLabel, systemImage: Glyph.openPR)
             }

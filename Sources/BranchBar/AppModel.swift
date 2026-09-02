@@ -31,7 +31,11 @@ final class AppModel: ObservableObject {
     // MARK: - What the views render
 
     @Published private(set) var vm: SnapshotVM
-    @Published private(set) var refreshState: RefreshState = .running(completed: 0, total: 0)
+    /// REVIEW CR-04: idle, not `.running(0, 0)`. A model that says it is refreshing before any
+    /// refresh has started is a model that can never stop saying it — which is exactly what a Mac
+    /// with no git used to see, with every footer button disabled behind `isRefreshing`. The launch
+    /// refresh moves this to `.running` itself.
+    @Published private(set) var refreshState: RefreshState = .idle(lastRefreshedAt: nil)
     @Published private(set) var collapsedRepoIDs: Set<RepoID> = []
 
     /// Repos the user hid. Published because the footer's "Show hidden (N)" carries the count, and
@@ -67,12 +71,62 @@ final class AppModel: ObservableObject {
     private var isBootstrapping = false
     private var progressCount = 0
 
+    /// True between handing the coordinator a refresh and getting its snapshot back. What makes a
+    /// user action taken during a refresh detectable (REVIEW CR-03).
+    private var isRefreshInFlight = false
+    /// A rescan that arrived during a refresh and was therefore coalesced into it. Run once, after.
+    private var pendingRescan = false
+    /// One-shot: the launch refresh may need a second pass to fetch PRs for the repo the collapse
+    /// defaults expanded (REVIEW WR-03). Only ever true after that second pass was decided.
+    private var hasWarmedExpandedPRs = false
+    /// Scan roots this process added or removed, so `persistUserOwnedFields` can put them back over
+    /// a coordinator save that predates them.
+    private var manuallyAddedRoots: Set<String> = []
+    private var removedRoots: Set<String> = []
+
     /// Everything a refresh needs, built once. `git --version` is a process, so this cannot be
     /// assembled in `init`.
     private struct Environment {
         let coordinator: RefreshCoordinator
         let tools: ToolStatus
         let cache: FileCacheStore
+        /// REVIEW CR-02: one `GHClient` per refresh rather than one per process.
+        let ghClients: GHClientPerRefresh
+    }
+
+    /// Hands the coordinator's `makeLoader` seam a `GHClient` that lives exactly one refresh.
+    ///
+    /// REVIEW CR-02: `GHClient` memoizes `gh auth status` per host and caches PR lists for ten
+    /// minutes, and its own doc comment says that memo lasts "one refresh". It did not: `AppModel`
+    /// built one client and kept it for the life of the process, so signing in and pressing Refresh
+    /// still said "Not signed in", a transient failure stayed on screen for the session, and
+    /// "Refresh PRs now" issued no `gh` call for ten minutes. `makeLoader` is called once per repo,
+    /// so the client is created on the first repo of a refresh and shared by the rest of that
+    /// refresh's repos — which is the lifetime the memo was written for.
+    ///
+    /// A lock rather than an actor because `makeLoader` is a synchronous `@Sendable` closure.
+    final class GHClientPerRefresh: @unchecked Sendable {
+        private let lock = NSLock()
+        private let make: @Sendable () -> GHClient?
+        private var client: GHClient?
+
+        init(make: @escaping @Sendable () -> GHClient?) { self.make = make }
+
+        /// Called on the main actor immediately before each `coordinator.refresh`.
+        func startRefresh() {
+            lock.lock()
+            client = nil
+            lock.unlock()
+        }
+
+        func current() -> GHClient? {
+            lock.lock()
+            defer { lock.unlock() }
+            if let client { return client }
+            let fresh = make()
+            client = fresh
+            return fresh
+        }
     }
 
     private let cacheURL: URL
@@ -97,7 +151,7 @@ final class AppModel: ObservableObject {
         editors = Actions.editors
         vm = SnapshotPresenter(editors: editors).present(
             Snapshot(),
-            refreshState: .running(completed: 0, total: 0),
+            refreshState: .idle(lastRefreshedAt: nil),
             collapsedRepoIDs: [],
             scanResult: nil,
             appVersion: appVersion,
@@ -200,7 +254,20 @@ final class AppModel: ObservableObject {
     }
 
     private func performRefresh(reason: RefreshReason) async {
-        guard let environment = await resolvedEnvironment() else { return }
+        // The state moves before the preflight, not after it: `resolvedEnvironment` runs
+        // `git --version`, and a model that is still `.idle` while a process runs is a model whose
+        // footer offers a Refresh button that does nothing (REVIEW CR-04).
+        progressCount = 0
+        if case .idle = refreshState {
+            refreshState = .running(completed: 0, total: snapshot.repos.count)
+            present()
+        }
+
+        guard let environment = await resolvedEnvironment() else {
+            // Either the preflight found no git — in which case it has already published
+            // `.failed` — or another call is bootstrapping and will publish for both of us.
+            return
+        }
 
         let expanded = Set(snapshot.repos.map(\.id)).subtracting(collapsedRepoIDs)
         let (force, rescan, bypassPRCache) = Self.coordinatorArguments(for: reason)
@@ -208,12 +275,8 @@ final class AppModel: ObservableObject {
             "refresh: reason=\(reason.rawValue) force=\(force) rescan=\(rescan) "
                 + "bypassPRCache=\(bypassPRCache) expanded=\(expanded.count)")
 
-        progressCount = 0
-        if case .idle = refreshState {
-            refreshState = .running(completed: 0, total: snapshot.repos.count)
-            present()
-        }
-
+        isRefreshInFlight = true
+        environment.ghClients.startRefresh()
         let final = await environment.coordinator.refresh(
             force: force,
             expandedRepoIDs: expanded,
@@ -223,8 +286,15 @@ final class AppModel: ObservableObject {
             },
             rescan: rescan,
             bypassPRCache: bypassPRCache)
+        isRefreshInFlight = false
 
+        // REVIEW CR-03: the coordinator loads the cache file at the start of a refresh and writes
+        // the whole struct back at the end, so a hide, a collapse, or an "Add folder…" made during
+        // those 65 seconds is gone from disk. The model is the authority on those three fields, so
+        // it writes them back after every refresh rather than hoping the window was small.
+        persistUserOwnedFields()
         reloadScanFromCache()
+
         refreshState = .idle(lastRefreshedAt: final.refreshedAt)
         snapshot = final
         adoptCollapseDefaults()
@@ -233,6 +303,50 @@ final class AppModel: ObservableObject {
             "refresh: finished reason=\(reason.rawValue) repos=\(final.repos.count) "
                 + "rows=\(final.repos.reduce(0) { $0 + $1.branches.count })")
         logRendered()
+
+        runFollowUp()
+    }
+
+    /// The two things a finished refresh can owe the user.
+    ///
+    /// REVIEW CR-03: a rescan asked for while a refresh was running coalesced into that refresh,
+    /// which had already read the roots — so the folder the user just added was never scanned and
+    /// nothing said so. REVIEW WR-03: on a Mac with no cache the launch refresh has no expanded set
+    /// to fetch PRs for, so the one repo the collapse defaults then expand draws "PR status loads
+    /// when expanded" under an expanded section, which is a sentence that contradicts itself.
+    /// Both are answered by one more refresh, and both are one-shot so neither can loop.
+    private func runFollowUp() {
+        if pendingRescan {
+            pendingRescan = false
+            Log.info("refresh: running the rescan that arrived during the last refresh")
+            refresh(reason: .rescan)
+            return
+        }
+        guard !hasWarmedExpandedPRs else { return }
+        hasWarmedExpandedPRs = true
+        let expanded = snapshot.repos.filter { !collapsedRepoIDs.contains($0.id) }
+        guard expanded.contains(where: { $0.prLoadState == .notLoaded }) else { return }
+        Log.info("refresh: an expanded repo has no PR status yet; refreshing once more")
+        refresh(reason: .manual)
+    }
+
+    /// Writes the three fields the user owns back over whatever the coordinator's end-of-refresh
+    /// save left on disk. In-memory state is the authority for all three.
+    private func persistUserOwnedFields() {
+        persist { cache in
+            cache.hiddenRepoIDs = Array(self.hiddenRepoIDs)
+            cache.collapsedRepoIDs = Array(self.collapsedRepoIDs)
+            for root in self.manuallyAddedRoots where !cache.manuallyAddedRepos.contains(root) {
+                cache.manuallyAddedRepos.append(root)
+            }
+            cache.manuallyAddedRepos.removeAll { self.removedRoots.contains($0) }
+            if cache.scan != nil {
+                let roots = Set(cache.scan?.policy.extraRoots ?? [])
+                    .union(self.manuallyAddedRoots)
+                    .subtracting(self.removedRoots)
+                cache.scan?.policy.extraRoots = roots.sorted()
+            }
+        }
     }
 
     /// PLAN.md §3: the manual Refresh bypasses the 30 s debounce, a popover open does not.
@@ -347,16 +461,20 @@ final class AppModel: ObservableObject {
 
     func addFolder(_ url: URL) {
         let path = url.path
+        manuallyAddedRoots.insert(path)
+        removedRoots.remove(path)
         persist { cache in
             if !cache.manuallyAddedRepos.contains(path) { cache.manuallyAddedRepos.append(path) }
             let roots = Array(Set((cache.scan?.policy.extraRoots ?? []) + [path])).sorted()
             cache.scan?.policy.extraRoots = roots
         }
         Log.info("action: added scan root \(path)")
-        refresh(reason: .rescan)
+        requestRescan()
     }
 
     func removeRoot(_ path: String) {
+        removedRoots.insert(path)
+        manuallyAddedRoots.remove(path)
         persist { cache in
             cache.manuallyAddedRepos.removeAll { $0 == path }
             cache.scan?.policy.extraRoots.removeAll { $0 == path }
@@ -364,6 +482,18 @@ final class AppModel: ObservableObject {
         Log.info("action: removed scan root \(path)")
         reloadScanFromCache()
         present()
+        requestRescan()
+    }
+
+    /// REVIEW CR-03: a rescan asked for while a refresh is running is answered by that refresh —
+    /// which read the roots before this one existed — so the folder the user just picked would
+    /// never be walked. Queue it instead and run it when the current refresh lands.
+    private func requestRescan() {
+        guard !isRefreshInFlight else {
+            pendingRescan = true
+            Log.info("action: a refresh is running; the rescan is queued behind it")
+            return
+        }
         refresh(reason: .rescan)
     }
 
@@ -378,7 +508,10 @@ final class AppModel: ObservableObject {
             if payload.hasPrefix("/") {
                 Actions.openInAvailableEditor(path: payload)
             } else {
-                Actions.openPR(url: payload)
+                // The only non-path `.openURL` payload the presenter builds is
+                // `Strings.installGitHubCLIURL`, which belongs to no repo, so it is pinned to
+                // https rather than to a repo's host (codex MINOR 3).
+                Actions.openWebPage(url: payload)
             }
         case .addFolder:
             if let url = Actions.pickFolder() { addFolder(url) }
@@ -528,7 +661,21 @@ final class AppModel: ObservableObject {
                 + "cursor=\(Actions.editors.cursor) vscode=\(Actions.editors.vsCode)")
 
         guard let gitPath = gitLocation.path else {
+            // codex MAJOR 4 / REVIEW CR-04: returning nil here used to leave `refreshState` at
+            // `.running` for the life of the process — "Looking for repos…", every footer button
+            // disabled, and nothing on screen naming git. The Core path this mirrors is
+            // `missingGitFailsRefreshWithUserFacingFailureNotCrash`, which returns the snapshot
+            // carrying `ToolStatus(gitPath: nil)` and issues no command; the shell owes the same
+            // outcome a sentence and a way out.
             Log.info("tools: git not found; searched \(gitLocation.searched.joined(separator: ", "))")
+            refreshState = .failed(
+                UserFacingFailure(
+                    title: Self.gitNotFoundTitle,
+                    message: Self.gitNotFoundMessage,
+                    action: UserFacingFailure.Action(
+                        label: Strings.refreshActionLabel, kind: .retryRefresh),
+                    diagnostic: "searched \(gitLocation.searched.joined(separator: ", "))"))
+            present()
             return nil
         }
 
@@ -539,9 +686,24 @@ final class AppModel: ObservableObject {
         let tools = ToolStatus(gitPath: gitPath, gitVersion: gitVersion, ghPath: ghPath)
         let cache = FileCacheStore(fileURL: cacheURL)
         let scanner = RepoScanner(fileSystem: fileSystem, commandRunner: runner, gitExecutable: gitPath)
+
+        // REVIEW CR-02: the `gh` client is rebuilt per refresh through the coordinator's
+        // `makeLoader` seam, so `gh auth status` is asked again after the user signs in, a
+        // transient failure does not outlive the refresh that saw it, and "Refresh PRs now" is not
+        // answered out of a ten-minute in-memory cache. `loader` stays as the seam's fallback.
+        let ghClients = GHClientPerRefresh {
+            ghPath.map { GHClient(runner: runner, ghPath: $0, policy: policy) }
+        }
+        let makeLoader: @Sendable (DiscoveredRepo) -> RepoLoader = { _ in
+            RepoLoader(
+                git: GitClient(runner: runner, gitPath: gitPath, timeout: policy.gitTimeout),
+                gh: ghClients.current(),
+                reflog: ReflogFileReader(fileSystem: fileSystem),
+                policy: policy)
+        }
         let loader = RepoLoader(
             git: GitClient(runner: runner, gitPath: gitPath, timeout: policy.gitTimeout),
-            gh: ghPath.map { GHClient(runner: runner, ghPath: $0, policy: policy) },
+            gh: nil,
             reflog: ReflogFileReader(fileSystem: fileSystem),
             policy: policy)
         let coordinator = RefreshCoordinator(
@@ -549,11 +711,24 @@ final class AppModel: ObservableObject {
             loader: loader,
             cache: cache,
             policy: policy,
+            makeLoader: makeLoader,
             scanPolicy: ScanPolicy(homeRoot: fileSystem.homeDirectory()),
             fileSystem: fileSystem)
 
-        let environment = Environment(coordinator: coordinator, tools: tools, cache: cache)
+        let environment = Environment(
+            coordinator: coordinator, tools: tools, cache: cache, ghClients: ghClients)
         self.environment = environment
         return environment
     }
+
+    // MARK: - Copy this file owns
+
+    /// codex MAJOR 4 / REVIEW CR-04's two sentences. Every other user-facing string in BranchBar is
+    /// produced in Core by `Strings.swift`, and these belong there too; they are here because
+    /// `Strings.swift` is outside this packet's write boundary and a second packet is editing it in
+    /// the same checkout. Moving them is a one-line change plus `make doc-strings`.
+    static let gitNotFoundTitle = "git not found"
+    static let gitNotFoundMessage =
+        "BranchBar could not find git on this Mac, so it cannot read any repo. Run "
+        + "xcode-select --install in Terminal, then try again."
 }

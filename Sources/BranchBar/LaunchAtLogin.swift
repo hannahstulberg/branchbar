@@ -41,9 +41,18 @@ enum LaunchAtLogin {
     // MARK: - Whether the toggle can be offered at all
 
     /// Nil when the toggle is usable; otherwise the sentence to put beside a disabled toggle.
+    ///
+    /// codex MAJOR 14: the path check is here, ahead of both mechanisms, rather than inside the
+    /// LaunchAgent branch. `SMAppService.register()` registers whatever bundle is running, so a
+    /// copy opened from `~/Downloads` — non-translocated, correct identifier — used to reach
+    /// `register()` and pin the login item to a folder the user will empty, while the LaunchAgent
+    /// branch it fell back to named `/Applications/BranchBar.app` unconditionally. One toggle
+    /// registering two different bundles depending on which branch ran is why this is a
+    /// precondition of the toggle rather than a step inside it.
     static var unavailableReason: String? {
         guard Bundle.main.bundleIdentifier != nil else { return Strings.launchAtLoginUnbundled }
         if isTranslocated { return Strings.launchAtLoginTranslocated }
+        if !isRunningFromApplications { return Strings.launchAtLoginNotInApplications }
         return nil
     }
 
@@ -52,6 +61,16 @@ enum LaunchAtLogin {
     /// The one place `Bundle.main.bundlePath` is read, and it is read only to distrust it.
     static var isTranslocated: Bool {
         Bundle.main.bundlePath.contains("/AppTranslocation/")
+    }
+
+    /// Whether the running bundle *is* `/Applications/BranchBar.app`, symlinks and `/private`
+    /// prefixes resolved on both sides so `/tmp/…` and `/private/tmp/…` are not two answers.
+    static var isRunningFromApplications: Bool {
+        resolved(Bundle.main.bundlePath) == resolved(installedBundlePath)
+    }
+
+    private static func resolved(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     // MARK: - Current state
@@ -67,8 +86,28 @@ enum LaunchAtLogin {
         FileManager.default.fileExists(atPath: launchAgentURL.path)
     }
 
+    /// The plist BranchBar would have written, rather than any file that happens to sit at that
+    /// path (codex MINOR 1). A stale plist from an older install, or one someone dropped there,
+    /// names a different `Program` and is not this app's login item.
+    static var hasOwnLaunchAgentPlist: Bool {
+        guard let data = try? Data(contentsOf: launchAgentURL),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: data, options: [], format: nil) as? [String: Any]
+        else { return false }
+        return plist["Label"] as? String == bundleID
+            && plist["Program"] as? String == installedExecutablePath
+    }
+
+    /// Whether launchd is actually holding the job right now. `launchctl print` exits 0 for a
+    /// loaded job and non-zero otherwise, which is the only question a file on disk cannot answer:
+    /// a plist can exist while nothing is loaded, and a job can stay loaded for the session after
+    /// its plist is gone.
+    static var isLaunchAgentLoaded: Bool {
+        launchctl(["print", "\(guiDomain)/\(bundleID)"]).status == 0
+    }
+
     static var mechanism: Mechanism {
-        if hasLaunchAgentPlist { return .launchAgent }
+        if hasOwnLaunchAgentPlist, isLaunchAgentLoaded { return .launchAgent }
         if serviceStatus == .enabled { return .serviceManagement }
         return .off
     }
@@ -76,8 +115,12 @@ enum LaunchAtLogin {
     /// The toggle's value. `.requiresApproval` counts as on: BranchBar asked, the registration
     /// exists, and the only thing left is the switch in System Settings — showing the toggle off
     /// there would ask the user to register something that is already registered.
+    ///
+    /// codex MINOR 1: the fallback's half of this used to be "a file exists at that path", so any
+    /// stale or tampered file made the toggle read on. It is now this app's own plist *and* a job
+    /// launchd says is loaded.
     static var isEnabled: Bool {
-        if hasLaunchAgentPlist { return true }
+        if hasOwnLaunchAgentPlist, isLaunchAgentLoaded { return true }
         switch serviceStatus {
         case .enabled, .requiresApproval: return true
         default: return false
@@ -85,7 +128,7 @@ enum LaunchAtLogin {
     }
 
     static var needsApproval: Bool {
-        !hasLaunchAgentPlist && serviceStatus == .requiresApproval
+        !(hasOwnLaunchAgentPlist && isLaunchAgentLoaded) && serviceStatus == .requiresApproval
     }
 
     // MARK: - Flipping it
@@ -94,12 +137,15 @@ enum LaunchAtLogin {
         case unavailable(String)
         case notInstalledInApplications
         case bothMechanismsRefused(String)
+        /// `launchctl bootout` failed and the job is still loaded, so the login item is still live
+        /// (codex MINOR 1). Reported rather than swallowed, and the plist is left where it is.
+        case couldNotUnload(String)
 
         var errorDescription: String? {
             switch self {
             case .unavailable(let copy): return copy
             case .notInstalledInApplications: return Strings.launchAtLoginNotInApplications
-            case .bothMechanismsRefused: return Strings.launchAtLoginFailed
+            case .bothMechanismsRefused, .couldNotUnload: return Strings.launchAtLoginFailed
             }
         }
 
@@ -107,8 +153,9 @@ enum LaunchAtLogin {
         var diagnostic: String {
             switch self {
             case .unavailable(let copy): return copy
-            case .notInstalledInApplications: return "no bundle at /Applications/BranchBar.app"
+            case .notInstalledInApplications: return "no valid bundle at /Applications/BranchBar.app"
             case .bothMechanismsRefused(let detail): return detail
+            case .couldNotUnload(let detail): return detail
             }
         }
     }
@@ -121,7 +168,7 @@ enum LaunchAtLogin {
             Log.info("launch at login: refused, \(reason)")
             throw Failure.unavailable(reason)
         }
-        if enabled { try enable() } else { disable() }
+        if enabled { try enable() } else { try disable() }
         Log.info(
             "launch at login: now \(isEnabled ? "on" : "off") · mechanism=\(mechanism.rawValue) "
                 + "· SMAppService status=\(statusDescription(serviceStatus))")
@@ -141,8 +188,9 @@ enum LaunchAtLogin {
             diagnostics.append("SMAppService.register(): \(error)")
         }
 
-        // The fallback names an absolute path, so that path has to hold a bundle.
-        guard FileManager.default.fileExists(atPath: installedExecutablePath) else {
+        // The fallback names an absolute path, so that path has to hold *this* app's bundle —
+        // the right identifier and a real executable, not merely a file (codex MAJOR 14).
+        guard isInstalledBundleValid else {
             throw Failure.notInstalledInApplications
         }
 
@@ -153,27 +201,80 @@ enum LaunchAtLogin {
             throw Failure.bothMechanismsRefused(diagnostics.joined(separator: " · "))
         }
 
-        let bootstrap = launchctl(["bootstrap", guiDomain, launchAgentURL.path])
-        Log.info("launch at login: launchctl bootstrap exit=\(bootstrap.status) \(bootstrap.output)")
-        // Exit 17 is EEXIST — the agent is already loaded, which is the state we wanted.
-        guard bootstrap.status == 0 || bootstrap.status == 17 else {
-            try? FileManager.default.removeItem(at: launchAgentURL)
-            diagnostics.append("launchctl bootstrap exit \(bootstrap.status): \(bootstrap.output)")
+        if isLaunchAgentLoaded {
+            Log.info("launch at login: the agent is already loaded; nothing to bootstrap")
+            return
+        }
+
+        var bootstrap = launchctl(["bootstrap", guiDomain, launchAgentURL.path])
+        Log.info(
+            "launch at login: launchctl bootstrap exit=\(bootstrap.status) "
+                + "(\(errnoDescription(bootstrap.status))) \(bootstrap.output)")
+
+        // REVIEW WR-05: "already loaded" is errno 5 on older releases, 37 on newer ones, and 17
+        // where the plist path itself is already known. All three mean the state we wanted.
+        if !Self.alreadyLoadedExitCodes.contains(bootstrap.status), bootstrap.status != 0 {
+            // One retry, through a bootout, rather than deleting the plist: the old code removed
+            // the file it had just written while launchd kept the job for the session, so the
+            // toggle read off, the app still opened at the next login, and stopped after that.
+            let bootout = launchctl(["bootout", "\(guiDomain)/\(bundleID)"])
+            Log.info("launch at login: bootout before retry exit=\(bootout.status) \(bootout.output)")
+            bootstrap = launchctl(["bootstrap", guiDomain, launchAgentURL.path])
+            Log.info(
+                "launch at login: launchctl bootstrap retry exit=\(bootstrap.status) "
+                    + "(\(errnoDescription(bootstrap.status))) \(bootstrap.output)")
+        }
+
+        guard bootstrap.status == 0 || Self.alreadyLoadedExitCodes.contains(bootstrap.status) else {
+            diagnostics.append(
+                "launchctl bootstrap exit \(bootstrap.status) "
+                    + "(\(errnoDescription(bootstrap.status))): \(bootstrap.output)")
             throw Failure.bothMechanismsRefused(diagnostics.joined(separator: " · "))
         }
+    }
+
+    /// `launchctl error 5|17|37` on macOS 24 prints "Input/output error", "File exists", and
+    /// "Operation already in progress"; all three are what a bootstrap of an already-loaded job
+    /// reports, depending on the release.
+    static let alreadyLoadedExitCodes: Set<Int32> = [5, 17, 37]
+
+    /// The bundle the LaunchAgent would name, checked rather than assumed: `CFBundleIdentifier`
+    /// equal to ours and an executable file where the plist's `Program` points.
+    static var isInstalledBundleValid: Bool {
+        guard FileManager.default.isExecutableFile(atPath: installedExecutablePath) else {
+            return false
+        }
+        guard let bundle = Bundle(path: installedBundlePath),
+              bundle.bundleIdentifier == bundleID
+        else { return false }
+        return true
+    }
+
+    private static func errnoDescription(_ status: Int32) -> String {
+        guard status > 0 else { return "—" }
+        return String(cString: strerror(status))
     }
 
     /// Both mechanisms are torn down, not just the one that is live: a Mac that fell back once can
     /// have a plist on disk *and* a registration, and leaving either behind means the app still
     /// opens at login after the user turned the toggle off.
-    private static func disable() {
+    private static func disable() throws {
         if hasLaunchAgentPlist {
             let bootout = launchctl(["bootout", "\(guiDomain)/\(bundleID)"])
             Log.info("launch at login: launchctl bootout exit=\(bootout.status) \(bootout.output)")
+            // codex MINOR 1: a failed bootout used to be ignored and the plist deleted anyway, so
+            // the toggle read off while the job stayed loaded for the session. The plist stays put
+            // when the job is still loaded — it is the only record of what to boot out next time —
+            // and the failure is reported.
+            if bootout.status != 0, isLaunchAgentLoaded {
+                throw Failure.couldNotUnload(
+                    "launchctl bootout exit \(bootout.status): \(bootout.output)")
+            }
             do {
                 try FileManager.default.removeItem(at: launchAgentURL)
             } catch {
                 Log.info("launch at login: could not remove \(launchAgentURL.path): \(error)")
+                throw Failure.couldNotUnload("removing \(launchAgentURL.path): \(error)")
             }
         }
         guard Bundle.main.bundleIdentifier != nil else { return }
@@ -257,6 +358,8 @@ enum LaunchAtLogin {
         Log.info(
             "launch at login: available=\(isAvailable) enabled=\(isEnabled) "
                 + "mechanism=\(mechanism.rawValue) SMAppService status=\(statusDescription(serviceStatus)) "
-                + "translocated=\(isTranslocated) bundleID=\(Bundle.main.bundleIdentifier ?? "—")")
+                + "translocated=\(isTranslocated) inApplications=\(isRunningFromApplications) "
+                + "ownPlist=\(hasOwnLaunchAgentPlist) agentLoaded=\(isLaunchAgentLoaded) "
+                + "bundleID=\(Bundle.main.bundleIdentifier ?? "—")")
     }
 }
