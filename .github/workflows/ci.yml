@@ -54,5 +54,7 @@ jobs:
             dist/*.sha256
           generate_release_notes: true
           body: |
-            Unsigned build. First-open steps are in the README "Install" section
-            (System Settings > Privacy & Security > Open Anyway).
+            BranchBar for macOS 13 or newer (Apple silicon). Unsigned build: on first open macOS says it
+            cannot verify the app. Click Done (not Move to Trash, which is the highlighted button), then
+            open System Settings > Privacy & Security, scroll to Security, and click Open Anyway.
+            Needs git and the GitHub CLI signed in (`gh auth login`). Full steps: README.md.
