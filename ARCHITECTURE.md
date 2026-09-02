@@ -312,7 +312,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | `Snapshot` to view models, the only place a user-facing sentence is built | `SnapshotPresenter` | `Sources/BranchBarCore/SnapshotPresenter.swift:49` | Six frozen arguments; `EditorAvailability` is an initializer property |
 | Every user-facing literal, one static member per string | `Strings` | `Sources/BranchBarCore/Strings.swift:27` | `make doc-strings` regenerates the UI-CONTRACT table from its doc comments |
 | **Core: seams** | | | |
-| The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:82` | Argument arrays only, never a shell string |
+| The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:84` | Argument arrays only, never a shell string |
 | The real process implementation: concurrent draining, timeout, cancellation | `ProcessCommandRunner` | `Sources/BranchBarCore/ProcessCommandRunner.swift:5` | Both pipes drain on dedicated threads, then SIGTERM and SIGKILL |
 | The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:25` | Synchronous by contract; the scan's bound lives one level up |
 | The real filesystem, listing once with resource values | `RealFileSystem` | `Sources/BranchBarCore/RealFileSystem.swift:8` | No per-entry `attributesOfItem`: that call blocks behind folder-access dialogs |

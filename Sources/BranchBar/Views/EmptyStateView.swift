@@ -21,12 +21,18 @@ struct EmptyStateView: View {
                 Button {
                     perform(state.action)
                 } label: {
-                    Label(state.action.label, systemImage: Glyph.addFolder)
+                    if let glyph = primaryGlyph {
+                        Label(state.action.label, systemImage: glyph)
+                    } else {
+                        Text(state.action.label)
+                    }
                 }
-                Button {
-                    perform(UserFacingFailure.Action(label: Strings.rescanActionLabel, kind: .rescan))
-                } label: {
-                    Label(Strings.rescanActionLabel, systemImage: Glyph.rescan)
+                if showsRescan {
+                    Button {
+                        perform(UserFacingFailure.Action(label: Strings.rescanActionLabel, kind: .rescan))
+                    } label: {
+                        Label(Strings.rescanActionLabel, systemImage: Glyph.rescan)
+                    }
                 }
             }
             .font(.caption)
@@ -35,4 +41,23 @@ struct EmptyStateView: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// The glyph follows the action the presenter actually chose. The empty state is not only
+    /// "Add folder…": a refresh that failed before it produced a snapshot hands its own action
+    /// through (`git not found` offers Refresh), and a folder-plus beside "Refresh" names the
+    /// wrong thing. A kind with no glyph of its own gets a plain text label rather than a
+    /// borrowed one.
+    private var primaryGlyph: String? {
+        switch state.action.kind {
+        case .addFolder: return Glyph.addFolder
+        case .retryRefresh: return Glyph.refresh
+        case .rescan: return Glyph.rescan
+        case .openTerminalWithGhAuthLogin, .openURL, .grantFolderAccess: return nil
+        }
+    }
+
+    /// Rescan is the second half of "no repos found" — it only makes sense when the primary action
+    /// is the other half of that pair. On a `git not found` empty state there is nothing to rescan
+    /// with, so offering it would be a button that cannot work.
+    private var showsRescan: Bool { state.action.kind == .addFolder }
 }

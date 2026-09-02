@@ -9,7 +9,9 @@ public struct Command: Hashable, Codable, Sendable {
     public var executable: String
     public var arguments: [String]
     public var workingDirectory: String?
-    /// Replaces the inherited environment entirely when non-nil.
+    /// Merged over the inherited environment, never a replacement for it: these entries win on a
+    /// key the parent also sets, and every other inherited key survives
+    /// (`environmentMergesCommandEnvOverInherited`).
     public var environment: [String: String]?
     /// Seconds. PLAN.md §5: git 10 s, `gh auth status` 10 s, `gh pr list` 25 s.
     public var timeout: TimeInterval
