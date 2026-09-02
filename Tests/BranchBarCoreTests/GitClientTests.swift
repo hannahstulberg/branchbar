@@ -31,7 +31,7 @@ struct GitClientTests {
 
         static let branchRefs = ["-C", repo, "for-each-ref", headsFormat, "--", "refs/heads"]
         static let remoteRefs = ["-C", repo, "for-each-ref", remotesFormat, "--", "refs/remotes/"]
-        static let worktrees = ["-C", repo, "worktree", "list", "--porcelain"]
+        static let worktrees = ["-C", repo, "worktree", "list", "--porcelain", "-z"]
         static let identity = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"]
         static let remoteOriginURL = ["-C", repo, "config", "--get", "remote.origin.url"]
 
@@ -160,7 +160,10 @@ struct GitClientTests {
         let call = try #require(runner.calls.first)
         Self.expectFrozenShape(call, arguments: Argv.worktrees)
         #expect(!call.arguments.contains("--"), "`worktree list` takes no separator in the frozen list")
-        #expect(!call.arguments.contains("-z"), "the porcelain is newline-delimited, as recorded")
+        // Was `!contains("-z")` until the codex pre-ship review (MAJOR 12): git 2.39.5 prints a
+        // path containing a newline raw under the newline-delimited porcelain, so one record
+        // splits into several and the whole stage throws. `-z` is now part of the frozen argv.
+        #expect(call.arguments.contains("-z"), "the porcelain is NUL-delimited, as recorded")
     }
 
     // MARK: reflog show
@@ -229,6 +232,41 @@ struct GitClientTests {
         #expect(refs.calls.first?.arguments.last == "refs/heads")
     }
 
+    /// codex MAJOR 1. PLAN.md §6 promises BranchBar stores no secret, but the whole
+    /// `remote.origin.url` was retained on every `Repo` and serialized into `cache.json`, and an
+    /// HTTPS remote can carry a personal access token as its user info. The URL is sanitized at
+    /// the one place it enters the app, so nothing downstream has to remember to.
+    @Test("remoteURLUserinfoIsStrippedBeforeStorage")
+    func remoteURLUserinfoIsStrippedBeforeStorage() async throws {
+        let runner = RecordedCommandRunner()
+        runner.stubGit(Argv.remoteOriginURL, stdout: "https://user:token@github.com/o/r.git\n")
+
+        let url = try await Self.client(runner).remoteOriginURL(at: Self.repo)
+        #expect(url == "https://github.com/o/r.git")
+        #expect(!(url ?? "").contains("token"))
+        #expect(!(url ?? "").contains("@"))
+        // And the sanitized form still names the same repository.
+        #expect(GitHubSlug(remoteURL: try #require(url))
+            == GitHubSlug(host: "github.com", owner: "o", name: "r"))
+
+        // Bare user info is how a GitHub token is written, so it goes too — a username and a
+        // token are the same shape and cannot be told apart.
+        #expect(GitClient.sanitize(remoteURL: "https://ghp_deadbeef@github.com/o/r.git")
+            == "https://github.com/o/r.git")
+        #expect(GitClient.sanitize(remoteURL: "ssh://git@github.com:22/o/r.git")
+            == "ssh://github.com:22/o/r.git")
+        #expect(GitClient.sanitize(remoteURL: "git@github.com:o/r.git") == "github.com:o/r.git")
+        // A query or fragment is never part of a remote's identity and is the other place a
+        // credential arrives.
+        #expect(GitClient.sanitize(remoteURL: "https://github.com/o/r.git?access_token=abc#frag")
+            == "https://github.com/o/r.git")
+        // A remote with nothing to strip is returned byte for byte.
+        #expect(GitClient.sanitize(remoteURL: "https://github.com/o/r.git")
+            == "https://github.com/o/r.git")
+        #expect(GitClient.sanitize(remoteURL: "/Users/tester/mirrors/archive.git")
+            == "/Users/tester/mirrors/archive.git")
+    }
+
     // MARK: Environment, working directory, and tool path
 
     /// One test that walks every frozen invocation, because the environment and the working
@@ -263,12 +301,18 @@ struct GitClientTests {
             #expect(call.workingDirectory == Self.repo)
             #expect(call.environment?["LC_ALL"] == "C")
             #expect(call.environment?["GIT_OPTIONAL_LOCKS"] == "0")
+            #expect(call.environment?["GIT_NO_LAZY_FETCH"] == "1")
             #expect(call.timeout == 10)
             #expect(Array(call.arguments.prefix(2)) == ["-C", Self.repo], "`-C <repo>` leads every invocation")
         }
 
-        #expect(GitClient.frozenEnvironment == ["LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"],
-                "the frozen set is exactly these two; PLAN.md §5")
+        // Two until the codex pre-ship review (MAJOR 13, the git half): `GIT_NO_LAZY_FETCH=1` stops
+        // a partial clone from reaching the network behind a read that is contracted never to
+        // fetch, and stops the fetch helper that read would spawn from outliving cancellation.
+        #expect(
+            GitClient.frozenEnvironment
+                == ["LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"],
+            "the frozen set is exactly these three; PLAN.md §5 plus codex MAJOR 13")
 
         // The one `--` rule, across the whole session: for-each-ref only.
         let withSeparator = runner.calls.filter { $0.arguments.contains("--") }
@@ -281,7 +325,7 @@ struct GitClientTests {
     @Test("repoPathWithSpacesStaysOneArgument")
     func repoPathWithSpacesStaysOneArgument() async throws {
         let spaced = "/Users/tester/Developer/repos with spaces/design tokens"
-        let arguments = ["-C", spaced, "worktree", "list", "--porcelain"]
+        let arguments = ["-C", spaced, "worktree", "list", "--porcelain", "-z"]
 
         let runner = RecordedCommandRunner()
         runner.stubGit(arguments, stdout: Fixture.text("recorded-branchbar-worktree-list.txt"))
@@ -290,7 +334,8 @@ struct GitClientTests {
 
         let call = try #require(runner.calls.first)
         #expect(call.arguments == arguments)
-        #expect(call.arguments.count == 5, "the path is one element, spaces and all")
+        // Six, not five, since codex MAJOR 12 added `-z` to the frozen argv.
+        #expect(call.arguments.count == 6, "the path is one element, spaces and all")
         #expect(call.workingDirectory == spaced)
     }
 }

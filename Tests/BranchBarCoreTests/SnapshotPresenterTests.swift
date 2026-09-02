@@ -21,6 +21,9 @@ extension SnapshotVM {
 
         if let empty = emptyState {
             out.append(contentsOf: [empty.title, empty.message, empty.action.label, empty.action.payload ?? ""])
+            // The empty state carries the not-scanned notice when there is no section to hang it
+            // on (codex MAJOR 3).
+            out.append(contentsOf: empty.notice?.renderedStrings ?? [])
         }
 
         for section in sections {
@@ -181,9 +184,12 @@ struct SnapshotPresenterTests {
     func everyFixtureStringIsRenderedOrOnAFrozenExemptionList() throws {
         #expect(Self.viewOwnedChrome.count == 28)
         #expect(Self.fixtureDataGaps.keys.sorted() == ["repo-failed", "single-branch-no-pr-never-pushed"])
+        // 32 + 2 until the codex pre-ship review, which added one state per finding that named a
+        // state the contract had no row for: `zero-repos-documents-denied` (MAJOR 3),
+        // `origin-not-fetched` (MAJOR 7), and `behind-only` (MAJOR 5).
         #expect(
-            stateFixtureIDs.count == 34,
-            "packet 4.0 recorded 32 states and packet 4.3 added 2; found \(stateFixtureIDs.count)")
+            stateFixtureIDs.count == 37,
+            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3; found \(stateFixtureIDs.count)")
 
         // Nothing is exempted that no fixture actually asks for.
         var contracted: Set<String> = []
@@ -220,17 +226,116 @@ struct SnapshotPresenterTests {
         #expect(fallback.pushTooltip == Strings.pushUnknownTooltip)
     }
 
+    /// The invariant the name states — no upstream never renders as a count — is unchanged. The
+    /// label it renders instead is not: "Never pushed" was a claim the absence of tracking never
+    /// proved, since `git push origin <branch>` without `-u` pushes and configures nothing
+    /// (codex MAJOR 6).
     @Test("noUpstreamRendersNeverPushedNotZeroCommits")
     func noUpstreamRendersNeverPushedNotZeroCommits() throws {
         let row = try Self.onlyRow(of: Self.singleBranchSnapshot(upstream: nil, push: PushInfo(source: .none)))
 
-        #expect(row.pushLabel == Strings.neverPushed)
+        #expect(row.pushLabel == Strings.noTrackedRemoteBranch)
+        #expect(row.pushLabel != "Never pushed")
         #expect(row.aheadLabel?.contains(Strings.noUpstream) == true)
-        #expect(row.pushTooltip == Strings.neverPushedTooltip)
+        #expect(row.pushTooltip == Strings.noTrackedRemoteBranchTooltip)
         for forbidden in ["0 ahead", "0 commits", "In sync"] {
-            #expect(!(row.aheadLabel ?? "").contains(forbidden), "never-pushed row claims \"\(forbidden)\"")
+            #expect(!(row.aheadLabel ?? "").contains(forbidden), "untracked row claims \"\(forbidden)\"")
             #expect(!row.pushLabel.contains(forbidden))
         }
+        // The tooltip says what BranchBar did, never what the branch did.
+        #expect(!row.pushTooltip.contains("nothing has gone out"))
+
+        // A branch with no upstream whose `origin/<branch>` reflog did hold a push says so.
+        let observed = try Self.onlyRow(of: Self.singleBranchSnapshot(
+            upstream: nil,
+            push: PushInfo(
+                observedPushAt: UIClock.ago(2 * UIClock.day),
+                observedPushOID: UIFixtures.tipSHA,
+                source: .reflogObserved,
+                hasUpstream: false)))
+        #expect(observed.pushLabel == "Pushed from this Mac 2 days ago")
+        #expect(observed.aheadLabel?.contains(Strings.noUpstream) == true,
+                "it still tracks nothing, and the tertiary line still says so")
+    }
+
+    /// codex MAJOR 5. `behind` is parsed and never shown, but "In sync with last-known origin" is
+    /// a claim about both directions: a branch that is 0 ahead and 20 behind is not in sync with
+    /// anything. The row states the half BranchBar is willing to say, and the number stays out.
+    @Test("behindOnlyBranchIsNotCalledInSync")
+    func behindOnlyBranchIsNotCalledInSync() throws {
+        let behind = try Self.onlyRow(of: Self.singleBranchSnapshot(
+            upstream: Upstream(ref: "origin/feature", remote: "origin", ahead: 0, behind: 20),
+            push: PushInfo(
+                observedPushAt: UIClock.ago(9 * UIClock.day),
+                observedPushOID: UIFixtures.tipSHA,
+                source: .reflogObserved,
+                hasUpstream: true,
+                aheadOfLastKnownRemote: 0)))
+
+        let label = try #require(behind.aheadLabel)
+        #expect(label == Strings.noLocalCommitsAhead)
+        #expect(!label.contains(Strings.inSync))
+        #expect(!label.contains("20"), "PLAN.md §3 still forbids showing the behind count")
+        #expect(!label.lowercased().contains("behind"))
+
+        // Both counts zero is still "In sync", which is the only case that claim is true.
+        let synced = try Self.onlyRow(of: Self.singleBranchSnapshot(
+            upstream: Upstream(ref: "origin/feature", remote: "origin", ahead: 0, behind: 0),
+            push: PushInfo(
+                observedPushAt: UIClock.ago(2 * UIClock.day),
+                observedPushOID: UIFixtures.tipSHA,
+                source: .reflogObserved,
+                hasUpstream: true,
+                aheadOfLastKnownRemote: 0)))
+        #expect(synced.aheadLabel == Strings.inSync)
+    }
+
+    /// codex MAJOR 3. The Not-scanned notice used to ride the first repo section, and with every
+    /// repo inside a denied Documents folder there is no first section — so the one user who
+    /// needs "Allow access…" got the generic empty state instead.
+    @Test("tccDenialWithZeroReposRendersTheNotScannedNoticeInTheEmptyState")
+    func tccDenialWithZeroReposRendersTheNotScannedNoticeInTheEmptyState() throws {
+        let scanResult = UIFixtures.scanResult(repoCount: 0, unreadable: ["/Users/tester/Documents"])
+        let vm = SnapshotPresenter().present(
+            UIFixtures.snapshot([]),
+            refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+            collapsedRepoIDs: [],
+            scanResult: scanResult,
+            appVersion: uiAppVersion,
+            now: UIClock.now
+        )
+
+        #expect(vm.sections.isEmpty, "the case only arises when there is no section to carry it")
+        let empty = try #require(vm.emptyState)
+        let notice = try #require(empty.notice, "the denial reached the user nowhere at all")
+        #expect(notice.text.contains(Strings.notScanned(folders: ["Documents"])))
+        #expect(notice.text.contains(Strings.skippedCategoriesSummary))
+        #expect(notice.action?.label == Strings.grantFolderAccessActionLabel)
+        #expect(notice.action?.kind == .grantFolderAccess)
+        // The empty state keeps its own primary action.
+        #expect(empty.action.kind == .addFolder)
+
+        // A scan that read everything raises no notice, so the ordinary empty state is unchanged.
+        let clean = SnapshotPresenter().present(
+            UIFixtures.snapshot([]),
+            refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+            collapsedRepoIDs: [],
+            scanResult: UIFixtures.scanResult(repoCount: 0),
+            appVersion: uiAppVersion,
+            now: UIClock.now
+        )
+        #expect(clean.emptyState?.notice == nil)
+
+        // And it reaches the user while the first scan is still running, too.
+        let scanning = SnapshotPresenter().present(
+            UIFixtures.snapshot([], refreshedAt: nil),
+            refreshState: .running(completed: 0, total: 0),
+            collapsedRepoIDs: [],
+            scanResult: scanResult,
+            appVersion: uiAppVersion,
+            now: UIClock.now
+        )
+        #expect(scanning.emptyState?.notice?.action?.kind == .grantFolderAccess)
     }
 
     @Test("aheadCountLabelledRelativeToLastKnownRemoteNotAbsolute")
@@ -305,6 +410,13 @@ struct SnapshotPresenterTests {
                 "merged copy makes a deletion claim: \(copy)"
             )
         }
+        // Was "No later local commits found." until codex MAJOR 8. GitHub documents `headRefOid`
+        // as the PR's **current** head, not a snapshot of what was merged: if the head branch
+        // advanced after the merge and the same later commit exists locally, the equality still
+        // holds and the old sentence claimed there was no later work when there was.
+        #expect(copy.contains(Strings.mergedGroupCopy(base: "release/2026-09")))
+        #expect(copy.hasSuffix("Local tip matches GitHub's current PR head."))
+        #expect(!copy.contains("No later local commits found"))
     }
 
     @Test("upstreamGoneCopySaysLastKnownOriginNotDeletedOnGitHub")

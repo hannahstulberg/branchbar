@@ -30,7 +30,8 @@
               "aheadOfLastKnownRemote" : 0,
               "hasUpstream" : true,
               "originMovedSince" : false,
-              "remoteRefObservedAt" : 810129600,
+              "remoteRefObservedAt" : 810298800,
+              "remoteTipCommitDate" : 810129600,
               "source" : "tipCommitDate",
               "upstreamGone" : false
             },

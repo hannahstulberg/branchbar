@@ -6,7 +6,7 @@
   "expectedStrings" : [
     "Merged",
     "Merged",
-    "PR merged into main. No later local commits found."
+    "PR merged into main. Local tip matches GitHub's current PR head."
   ],
   "id" : "merged-group",
   "now" : 810302400,

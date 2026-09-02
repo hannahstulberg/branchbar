@@ -36,7 +36,7 @@ struct RepoLoaderTests {
         static let remoteOriginURL = ["-C", repo, "config", "--get", "remote.origin.url"]
         static let branchRefs = ["-C", repo, "for-each-ref", headsFormat, "--", "refs/heads"]
         static let remoteRefs = ["-C", repo, "for-each-ref", remotesFormat, "--", "refs/remotes/"]
-        static let worktrees = ["-C", repo, "worktree", "list", "--porcelain"]
+        static let worktrees = ["-C", repo, "worktree", "list", "--porcelain", "-z"]
     }
 
     private enum GH {
@@ -117,10 +117,14 @@ struct RepoLoaderTests {
         gh: GHClient? = nil,
         policy: RefreshPolicy = .default
     ) -> RepoLoader {
-        RepoLoader(
+        let fs = fileSystem ?? Self.fileSystem()
+        return RepoLoader(
             git: GitClient(runner: runner, gitPath: "/usr/bin/git", timeout: policy.gitTimeout),
             gh: gh ?? GHClient(runner: runner, ghPath: GH.path, policy: policy),
-            reflog: ReflogFileReader(fileSystem: fileSystem ?? Self.fileSystem()),
+            reflog: ReflogFileReader(fileSystem: fs),
+            // The loader stats `FETCH_HEAD` for the "last seen" anchor (codex MAJOR 7), so the
+            // same in-memory filesystem the reflog reads through is handed to it directly.
+            fileSystem: fs,
             policy: policy)
     }
 
@@ -200,7 +204,7 @@ struct RepoLoaderTests {
             ["-C", brokenPath, "config", "--get", "remote.origin.url"],
             ["-C", brokenPath, "for-each-ref", Argv.headsFormat, "--", "refs/heads"],
             ["-C", brokenPath, "for-each-ref", Argv.remotesFormat, "--", "refs/remotes/"],
-            ["-C", brokenPath, "worktree", "list", "--porcelain"],
+            ["-C", brokenPath, "worktree", "list", "--porcelain", "-z"],
         ] {
             runner.stub(.init(executableName: "git", arguments: arguments,
                               result: .failure(.launchFailed(executable: "/usr/bin/git", message: "no such file"))))
@@ -433,5 +437,145 @@ struct RepoLoaderTests {
         }
         #expect(repo.branches.allSatisfy { $0.prStatus == .unavailable })
         #expect(repo.errors.isEmpty, "an unset remote is not a stage failure")
+    }
+
+    // MARK: - Push history without tracking configuration — codex MAJOR 6
+
+    /// `git push origin <branch>` without `-u` writes a real reflog line and leaves no upstream
+    /// behind, and so does removing an upstream after a push. The loader used to skip the reflog
+    /// for such a branch entirely and render "Never pushed", which the absence of tracking never
+    /// proved. It now reads `origin/<branch>` whenever `for-each-ref -- refs/remotes/` listed it.
+    @Test("branchWithoutUpstreamButMatchingRemoteRefReadsItsReflog")
+    func branchWithoutUpstreamButMatchingRemoteRefReadsItsReflog() async throws {
+        let runner = RecordedCommandRunner()
+        // The shared remotes fixture has no `origin/no-upstream`; this one adds it, which is the
+        // shape a `git push origin no-upstream` without `-u` leaves behind. Registered before
+        // `stubGitStages`, since the first matching stub wins.
+        runner.stub(.init(
+            executableName: "git", arguments: Argv.remoteRefs,
+            result: .stdout(Fixture.text("synthetic-for-each-ref-remotes.txt")
+                + "refs/remotes/origin/no-upstream\u{1F}"
+                + "cccccccccccccccccccccccccccccccccccccccc\u{1F}1787900000\n")))
+        Self.stubGitStages(runner)
+
+        // The heads fixture's `no-upstream` row has an empty `upstream:short`.
+        let fs = Self.fileSystem()
+        fs.addFile(
+            ReflogFileReader.reflogPath(
+                commonDirectory: Argv.commonDirectory, remote: "origin", branch: "no-upstream"),
+            contents: Fixture.text("synthetic-reflog-push-and-fetch.txt"))
+
+        let repo = await Self.loader(runner, fileSystem: fs).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let branch = try #require(Self.branch(repo, "no-upstream"))
+        #expect(branch.upstream == nil, "it still tracks nothing")
+        #expect(branch.push.source == .reflogObserved, "and it was still pushed from this Mac")
+        #expect(branch.push.observedPushAt == Date(timeIntervalSince1970: 1_788_200_000))
+        #expect(branch.push.hasUpstream == false)
+        #expect(branch.push.aheadOfLastKnownRemote == nil, "nothing to be ahead of")
+        #expect(repo.errors.isEmpty)
+    }
+
+    /// The other half: no upstream and no `origin/<branch>` either. There is nothing to read, so
+    /// the row says BranchBar has not checked rather than claiming the branch never went out.
+    @Test("branchWithoutUpstreamOrRemoteRefSaysHistoryNotChecked")
+    func branchWithoutUpstreamOrRemoteRefSaysHistoryNotChecked() async throws {
+        let runner = RecordedCommandRunner()
+        // No remote-tracking refs at all, so `origin/no-upstream` is not a candidate.
+        runner.stub(.init(executableName: "git", arguments: Argv.remoteRefs, result: .stdout("")))
+        Self.stubGitStages(runner)
+
+        let repo = await Self.loader(runner).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let branch = try #require(Self.branch(repo, "no-upstream"))
+        #expect(branch.push.source == .none)
+        #expect(branch.push.hasUpstream == false)
+
+        let vm = SnapshotPresenter().present(
+            Snapshot(repos: [repo], refreshedAt: Self.now, tools: ToolStatus(gitPath: "/usr/bin/git")),
+            refreshState: .idle(lastRefreshedAt: Self.now),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: uiAppVersion,
+            now: Self.now
+        )
+        let row = try #require(vm.sections.first?.active.first { $0.title == "no-upstream" })
+        #expect(row.pushLabel == Strings.noTrackedRemoteBranch)
+        #expect(row.pushTooltip == Strings.noTrackedRemoteBranchTooltip)
+        #expect(row.pushLabel != "Never pushed", "the app cannot see what other machines pushed")
+    }
+
+    // MARK: - FETCH_HEAD is the "last seen" anchor — codex MAJOR 7
+
+    /// `FETCH_HEAD` is rewritten by every fetch and by nothing else, so its modification date is
+    /// something this Mac did. The remote tip's committer date, which used to fill this field, is
+    /// a fact about a commit and could predate the fetch by years.
+    @Test("loaderReadsFetchHeadModificationDateAsTheLastSeenAnchor")
+    func loaderReadsFetchHeadModificationDateAsTheLastSeenAnchor() async throws {
+        let fetchedAt = Date(timeIntervalSince1970: 1_788_390_000)
+        let runner = RecordedCommandRunner()
+        Self.stubGitStages(runner)
+
+        let fs = Self.fileSystem()
+        fs.addFile(
+            (Argv.commonDirectory as NSString).appendingPathComponent("FETCH_HEAD"),
+            contents: "deadbeef\t\tbranch 'main' of github.com:tester/demo\n",
+            modified: fetchedAt)
+
+        let repo = await Self.loader(runner, fileSystem: fs).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let main = try #require(Self.branch(repo, "main"))
+        #expect(main.push.remoteRefObservedAt == fetchedAt)
+        #expect(main.push.remoteTipCommitDate != nil, "the tip's commit date travels separately")
+        #expect(main.push.remoteRefObservedAt != main.push.remoteTipCommitDate)
+
+        // A clone that has only ever been pushed from has no FETCH_HEAD, and that is not an error.
+        let withoutFetchHead = await Self.loader(runner).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+        #expect(Self.branch(withoutFetchHead, "main")?.push.remoteRefObservedAt == nil)
+        #expect(withoutFetchHead.errors.isEmpty, "an absent FETCH_HEAD is an answer, not a failure")
+    }
+
+    // MARK: - Unknown worktrees are not "no worktrees" — codex MAJOR 12
+
+    /// The loader half of `worktreeEnumerationFailureSuppressesMergedGroup`: the failed stage is
+    /// recorded, and the assembler is told the list is unknown rather than empty.
+    @Test("worktreeStageFailureIsRecordedAndSuppressesTheMergedGroup")
+    func worktreeStageFailureIsRecordedAndSuppressesTheMergedGroup() async throws {
+        let merged = try PRListDecoder.decode(Fixture.data("synthetic-gh-pr-list-mixed.json"))
+            .first { $0.number == 106 }
+        let mergedPR = try #require(merged)
+
+        func load(worktreesFail: Bool) async -> Repo {
+            let runner = RecordedCommandRunner()
+            if worktreesFail {
+                runner.stub(.init(executableName: "git", arguments: Argv.worktrees,
+                                  result: .exit(128, stderr: "fatal: not a git repository")))
+            }
+            // Registered before `stubGitStages`: the first matching stub wins. `shipped`'s tip is
+            // the merged PR's head, and no worktree in the fixture holds it.
+            runner.stub(.init(
+                executableName: "git", arguments: Argv.branchRefs,
+                result: .stdout("refs/heads/shipped\u{1F}\(mergedPR.headRefOid)\u{1F}1788310842"
+                    + "\u{1F}origin/shipped\u{1F}origin\u{1F}\u{1F}*\n")))
+            Self.stubGitStages(runner)
+            let cached = PRCacheEntry(
+                fetchedAt: Self.now, prs: [mergedPR], authorPRs: [], queriedHeads: ["shipped"])
+            return await Self.loader(runner).load(
+                Self.discovered, wantsPullRequests: true, cachedPRs: cached, now: Self.now)
+        }
+
+        let ok = await load(worktreesFail: false)
+        #expect(Self.branch(ok, "shipped")?.group == .merged, "the baseline: worktrees were listed")
+
+        let failed = await load(worktreesFail: true)
+        #expect(failed.worktrees.isEmpty)
+        #expect(failed.errors.map(\.stage).contains(.worktrees), "the stage says it failed")
+        #expect(Self.branch(failed, "shipped")?.prStatus == .merged)
+        #expect(Self.branch(failed, "shipped")?.group == .active,
+                "unknown worktrees may not be read as no worktrees")
     }
 }

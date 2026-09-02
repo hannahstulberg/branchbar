@@ -4,11 +4,13 @@ import Testing
 @testable import BranchBarCore
 
 /// Acceptance tests for `WorktreeListParser`, packet 2.1, written from the frozen contract
-/// (PLAN.md §5 invocation `git worktree list --porcelain`, §7 named invariants, and the OWNER
+/// (PLAN.md §5 invocation `git worktree list --porcelain -z`, §7 named invariants, and the OWNER
 /// comment on the stub) by an agent that does not write the implementation.
 ///
-/// Porcelain shape: records separated by blank lines, each line `key` or `key value`, and only the
-/// **first** space separates key from value, because paths and branch names carry spaces.
+/// Porcelain shape: NUL-terminated fields, a record closed by an empty field, each field `key` or
+/// `key value`, and only the **first** space separates key from value, because paths and branch
+/// names carry spaces. The invocation and the fixtures moved to `-z` after the codex pre-ship
+/// review (MAJOR 12), so the input is `Data` rather than `String`.
 @Suite("WorktreeListParser — the porcelain records")
 struct WorktreeListParserTests {
 
@@ -18,7 +20,7 @@ struct WorktreeListParserTests {
     @Test("firstStanzaIsPrimary")
     func firstStanzaIsPrimary() throws {
         let worktrees = try WorktreeListParser.parse(
-            Fixture.text("synthetic-worktree-list-multi.txt"))
+            Fixture.data("synthetic-worktree-list-multi.txt"))
 
         #expect(worktrees.count == 7, "the fixture holds seven records")
 
@@ -31,7 +33,7 @@ struct WorktreeListParserTests {
                 "exactly one record is the primary worktree")
 
         let recorded = try WorktreeListParser.parse(
-            Fixture.text("recorded-branchbar-worktree-list.txt"))
+            Fixture.data("recorded-branchbar-worktree-list.txt"))
         #expect(recorded.count == 1)
         #expect(recorded.first?.isPrimary == true, "a single-worktree repo's only record is the primary")
         #expect(recorded.first?.path == "/Users/hannahstulberg/branchbar")
@@ -44,7 +46,7 @@ struct WorktreeListParserTests {
     @Test("noBranchWorktreeAppearsUnderRepoAndNoBranchClaimsIt")
     func noBranchWorktreeAppearsUnderRepoAndNoBranchClaimsIt() throws {
         let worktrees = try WorktreeListParser.parse(
-            Fixture.text("synthetic-worktree-list-multi.txt"))
+            Fixture.data("synthetic-worktree-list-multi.txt"))
 
         let detached = try #require(worktrees.first {
             $0.path == "/Users/tester/monorepo/.claude/worktrees/detached-review"
@@ -71,7 +73,7 @@ struct WorktreeListParserTests {
     @Test("bareLockedAndPrunableFlagsParse")
     func bareLockedAndPrunableFlagsParse() throws {
         let worktrees = try WorktreeListParser.parse(
-            Fixture.text("synthetic-worktree-list-multi.txt"))
+            Fixture.data("synthetic-worktree-list-multi.txt"))
 
         let locked = try #require(worktrees.first { $0.path == "/Users/tester/monorepo/.claude/worktrees/held" })
         #expect(locked.isLocked)
@@ -100,7 +102,7 @@ struct WorktreeListParserTests {
     @Test("lockReasonIsCapturedWhenPresent")
     func lockReasonIsCapturedWhenPresent() throws {
         let worktrees = try WorktreeListParser.parse(
-            Fixture.text("synthetic-worktree-list-multi.txt"))
+            Fixture.data("synthetic-worktree-list-multi.txt"))
 
         let locked = try #require(worktrees.first { $0.isLocked })
         #expect(locked.lockReason == "waiting on the NYT tester to confirm Gate 0b")
@@ -115,7 +117,7 @@ struct WorktreeListParserTests {
     @Test("pathWithSpacesParses")
     func pathWithSpacesParses() throws {
         let worktrees = try WorktreeListParser.parse(
-            Fixture.text("synthetic-worktree-list-multi.txt"))
+            Fixture.data("synthetic-worktree-list-multi.txt"))
 
         let spaced = try #require(worktrees.first { $0.path.contains("repos with spaces") })
         #expect(spaced.path == "/Users/tester/Developer/repos with spaces/design tokens")
@@ -123,6 +125,34 @@ struct WorktreeListParserTests {
                 "only the first space separates key from value, so the branch name keeps its space")
         #expect(spaced.headSHA == "4444444444444444444444444444444444444444")
         #expect(spaced.isPrimary == false)
+    }
+
+    /// codex MAJOR 12. Under the newline-delimited porcelain git 2.39.5 prints a path containing
+    /// a newline raw, so the record splits and `parse` throws
+    /// `recordWithoutWorktreePath` — which `RepoLoader` turns into `worktrees = []`, and an empty
+    /// worktree list quietly moves a checked-out merged branch into the Merged group. Under `-z`
+    /// nothing but a NUL ends a field, so the bytes git wrote come back verbatim.
+    @Test("worktreePathWithNewlineParsesUnderZ")
+    func worktreePathWithNewlineParsesUnderZ() throws {
+        let worktrees = try WorktreeListParser.parse(
+            Fixture.data("synthetic-worktree-list-z-newline-path.txt"))
+
+        #expect(worktrees.count == 3, "three records, whatever bytes their paths carry")
+
+        let newline = try #require(worktrees.first { $0.path.contains("\n") })
+        #expect(newline.path == "/Users/tester/Developer/we\nird path")
+        #expect(newline.branch == "refs/heads/feature/new\nline",
+                "a branch name's own newline does not end its field either")
+        #expect(newline.headSHA == String(repeating: "2", count: 40))
+        #expect(newline.isPrimary == false)
+
+        let tabbed = try #require(worktrees.first { $0.path.contains("\t") })
+        #expect(tabbed.path == "/Users/tester/monorepo/.claude/worktrees/tabbed\tname")
+        #expect(tabbed.branch == nil, "the tabbed record is detached")
+
+        #expect(worktrees.first?.isPrimary == true)
+        #expect(worktrees.filter(\.isPrimary).count == 1,
+                "a newline inside record 2 must not start a fourth record")
     }
 
     /// PLAN.md §3: recorded fixtures are ground truth. Both recorded repos hold a single primary
@@ -135,7 +165,7 @@ struct WorktreeListParserTests {
         #expect(names.count >= 2, "the inventory records worktree list for two repos")
 
         for name in names {
-            let worktrees = try WorktreeListParser.parse(Fixture.text(name))
+            let worktrees = try WorktreeListParser.parse(Fixture.data(name))
             #expect(!worktrees.isEmpty, "\(name) parsed to no records")
             #expect(worktrees.first?.isPrimary == true, "\(name) did not mark its first record primary")
             #expect(worktrees.allSatisfy { $0.path.hasPrefix("/") }, "\(name) yielded a relative path")

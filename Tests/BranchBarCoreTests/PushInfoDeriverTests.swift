@@ -87,8 +87,24 @@ struct PushInfoDeriverTests {
         #expect(push.observedPushAt == nil, "there is no observed push to date")
         #expect(push.observedPushOID == nil)
         #expect(push.originMovedSince == false, "nothing was observed, so nothing can have moved since")
-        #expect(push.remoteRefObservedAt == tipCommitDate,
-                "the tip's committer date is the last-known-origin anchor the tooltip needs")
+        // Was `remoteRefObservedAt == tipCommitDate` until codex MAJOR 7. A commit date is not an
+        // observation date — fetching a two-year-old commit today reported origin as "last seen 2
+        // years ago" — so the two facts now travel in two fields, and only `FETCH_HEAD`'s
+        // modification date fills the one the "last seen" tooltip reads.
+        #expect(push.remoteTipCommitDate == tipCommitDate,
+                "the tip's committer date is what the fallback label dates")
+        #expect(push.remoteRefObservedAt == nil, "no FETCH_HEAD was handed in, so nothing was seen")
+
+        let fetched = Date(timeIntervalSince1970: 1_788_400_000)
+        let withFetchHead = PushInfoDeriver.derive(
+            observation: observation,
+            upstream: Self.upstream("ahead-two"),
+            remoteTipOID: Self.tip("origin/ahead-two")?.objectName,
+            remoteTipCommitDate: tipCommitDate,
+            fetchHeadObservedAt: fetched
+        )
+        #expect(withFetchHead.remoteRefObservedAt == fetched)
+        #expect(withFetchHead.remoteTipCommitDate == tipCommitDate)
     }
 
     // MARK: - PLAN.md §7 `noUpstreamRendersNeverPushedNotZeroCommits`
@@ -114,12 +130,15 @@ struct PushInfoDeriverTests {
         #expect(push.observedPushAt == nil)
     }
 
-    /// An observation without an upstream is not a push story the row can tell: PLAN.md §3 keys
-    /// the whole push line on the upstream, so the deriver reports `.none` rather than dating a
-    /// push against a remote branch that is not being tracked.
-    @Test("observationWithoutAnUpstreamIsStillSourceNone")
-    func observationWithoutAnUpstreamIsStillSourceNone() throws {
-        let observation = ReflogFileReader.parse(Fixture.text("synthetic-reflog-push-and-fetch.txt"))
+    /// codex MAJOR 6, the deriver half. This used to assert `.none`, on the rule that the whole
+    /// push line is keyed on the upstream — which made every branch pushed with a bare
+    /// `git push origin <branch>` read "Never pushed". `RepoLoader` now reads `origin/<branch>`'s
+    /// reflog whenever that ref exists, and an observation it finds is reported as the observation
+    /// it is. The count still has nothing to count against, so it stays nil.
+    @Test("observationWithoutAnUpstreamIsStillTheObservationItIs")
+    func observationWithoutAnUpstreamIsStillTheObservationItIs() throws {
+        let observation = try #require(
+            ReflogFileReader.parse(Fixture.text("synthetic-reflog-push-and-fetch.txt")))
 
         let push = PushInfoDeriver.derive(
             observation: observation,
@@ -128,10 +147,112 @@ struct PushInfoDeriverTests {
             remoteTipCommitDate: nil
         )
 
-        #expect(push.source == .none)
-        #expect(push.observedPushAt == nil)
-        #expect(push.hasUpstream == false)
-        #expect(push.aheadOfLastKnownRemote == nil)
+        #expect(push.source == .reflogObserved)
+        #expect(push.observedPushAt == observation.pushedAt)
+        #expect(push.observedPushOID == observation.newOID)
+        #expect(push.hasUpstream == false, "there is still no tracking configuration")
+        #expect(push.aheadOfLastKnownRemote == nil, "and so still nothing to be ahead of")
+        #expect(push.originMovedSince == false, "no tip was handed in, so nothing can have moved")
+
+        // With the candidate ref's tip the comparison means something again.
+        let moved = PushInfoDeriver.derive(
+            observation: observation,
+            upstream: nil,
+            remoteTipOID: String(repeating: "f", count: 40),
+            remoteTipCommitDate: Date(timeIntervalSince1970: 1_788_310_842)
+        )
+        #expect(moved.originMovedSince)
+        #expect(moved.remoteTipCommitDate == Date(timeIntervalSince1970: 1_788_310_842))
+    }
+
+    /// codex MAJOR 7, the label half: the fallback dates the **remote** tip's commit, not the
+    /// local one. A branch whose local tip is months ahead of what origin holds used to report
+    /// "newest commit dated" against a commit origin has never seen.
+    @Test("fallbackLabelUsesRemoteTipCommitDateNotLocalTip")
+    func fallbackLabelUsesRemoteTipCommitDateNotLocalTip() throws {
+        let remoteTipCommitDate = Date(timeIntervalSince1970: 1_787_000_000)
+        let localTipDate = Date(timeIntervalSince1970: 1_788_400_000)
+        #expect(remoteTipCommitDate != localTipDate)
+
+        let push = PushInfoDeriver.derive(
+            observation: nil,
+            upstream: Self.upstream("main"),
+            remoteTipOID: Self.tip("origin/main")?.objectName,
+            remoteTipCommitDate: remoteTipCommitDate
+        )
+        #expect(push.source == .tipCommitDate)
+        #expect(push.remoteTipCommitDate == remoteTipCommitDate)
+
+        let branch = Branch(
+            name: "main",
+            tipSHA: String(repeating: "1", count: 40),
+            committerDate: localTipDate,
+            upstream: Self.upstream("main"),
+            prStatus: .none,
+            push: push)
+        let vm = SnapshotPresenter().present(
+            UIFixtures.snapshot([UIFixtures.repo(branches: [branch])]),
+            refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: uiAppVersion,
+            now: UIClock.now
+        )
+        let row = try #require(vm.sections.first?.active.first)
+
+        #expect(row.pushLabel
+            == Strings.pushUnknown(tipCommitDate: remoteTipCommitDate, now: UIClock.now))
+        #expect(row.pushLabel
+            != Strings.pushUnknown(tipCommitDate: localTipDate, now: UIClock.now))
+    }
+
+    /// codex MAJOR 7, the tooltip half: "last seen" is `FETCH_HEAD`'s modification date, which is
+    /// something this Mac did, and it says so plainly when there is no `FETCH_HEAD` to read.
+    @Test("lastSeenTooltipUsesFetchHeadMtime")
+    func lastSeenTooltipUsesFetchHeadMtime() throws {
+        let fetchedAt = UIClock.ago(3 * UIClock.hour)
+        let ancientCommit = UIClock.ago(800 * UIClock.day)
+
+        let ahead = try #require(Self.upstream("ahead-two"))
+        let push = PushInfoDeriver.derive(
+            observation: nil,
+            upstream: ahead,
+            remoteTipOID: Self.tip("origin/ahead-two")?.objectName,
+            remoteTipCommitDate: ancientCommit,
+            fetchHeadObservedAt: fetchedAt
+        )
+        #expect(push.remoteRefObservedAt == fetchedAt)
+
+        func tooltip(_ push: PushInfo) throws -> String {
+            let branch = Branch(
+                name: "ahead-two",
+                tipSHA: String(repeating: "1", count: 40),
+                committerDate: UIClock.ago(UIClock.day),
+                upstream: ahead,
+                prStatus: .none,
+                push: push)
+            let vm = SnapshotPresenter().present(
+                UIFixtures.snapshot([UIFixtures.repo(branches: [branch])]),
+                refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+                collapsedRepoIDs: [],
+                scanResult: nil,
+                appVersion: uiAppVersion,
+                now: UIClock.now
+            )
+            return try #require(vm.sections.first?.active.first?.pushTooltip)
+        }
+
+        let seen = try tooltip(push)
+        #expect(seen.contains("last seen 3 hours ago"), "\(seen)")
+        #expect(!seen.contains("2 years ago"), "the remote tip's commit date is not an observation")
+
+        // No FETCH_HEAD: the clone has never fetched, and the tooltip says that rather than
+        // dropping the clause and letting the sentence read as if the date were merely omitted.
+        var neverFetched = push
+        neverFetched.remoteRefObservedAt = nil
+        let unfetched = try tooltip(neverFetched)
+        #expect(unfetched.contains(Strings.originNotFetchedYet), "\(unfetched)")
+        #expect(!unfetched.contains("last seen"))
     }
 
     // MARK: - PLAN.md §7 `observedPushWhoseOIDIsNotTheRemoteTipSetsOriginMovedSince`

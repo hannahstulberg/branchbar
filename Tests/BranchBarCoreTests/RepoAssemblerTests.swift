@@ -27,7 +27,7 @@ struct RepoAssemblerTests {
     }()
 
     private static let worktrees: [Worktree] = {
-        (try? WorktreeListParser.parse(Fixture.text("synthetic-worktree-list-multi.txt"))) ?? []
+        (try? WorktreeListParser.parse(Fixture.data("synthetic-worktree-list-multi.txt"))) ?? []
     }()
 
     private static func pr(_ number: Int) -> PRInfo {
@@ -64,6 +64,8 @@ struct RepoAssemblerTests {
         branchRefs: [ParsedBranchRef],
         remoteRefs: [ParsedRemoteRef] = [],
         worktrees: [Worktree] = [],
+        worktreesEnumerated: Bool = true,
+        fetchHeadObservedAt: Date? = nil,
         pushObservations: [String: ReflogObservation] = [:],
         pullRequests: [PRInfo] = [],
         authoredOpenPullRequests: [PRInfo] = [],
@@ -79,6 +81,8 @@ struct RepoAssemblerTests {
             branchRefs: branchRefs,
             remoteRefs: remoteRefs,
             worktrees: worktrees,
+            worktreesEnumerated: worktreesEnumerated,
+            fetchHeadObservedAt: fetchHeadObservedAt,
             pushObservations: pushObservations,
             pullRequests: pullRequests,
             authoredOpenPullRequests: authoredOpenPullRequests,
@@ -158,21 +162,38 @@ struct RepoAssemblerTests {
 
     // MARK: - PR join — PLAN.md §7 `forkOriginatedPRStillMatchesItsLocalBranch`
 
-    /// Matching is by `headRefName` **first**; a differing `headRepositoryOwner.login` never
-    /// excludes. PR 110's head owner is `contributor` while the repo's slug owner is `tester`, and
-    /// the local branch still gets its pill.
+    /// A clone **of the fork** — origin is `contributor/demo` — has a local `fork-feature` whose
+    /// head on GitHub is `contributor:fork-feature`, which is PR 110's head. It gets its pill.
+    ///
+    /// The repo this test assembles changed with codex MAJOR 9. It used to be `tester/demo`, on
+    /// the rule that a differing head owner never excludes — which is how an outside
+    /// contributor's PR came to supply the pill and the link for `tester`'s own branch. The
+    /// exclusion case is `singleSameNamedForkPRDoesNotAttachToAnUnrelatedLocalBranch` and is
+    /// asserted below.
     @Test("forkOriginatedPRStillMatchesItsLocalBranch")
     func forkOriginatedPRStillMatchesItsLocalBranch() throws {
         let repo = RepoAssembler.assemble(Self.inputs(
             branchRefs: [Self.ref("fork-feature")],
             pullRequests: Self.mixedPRs,
-            queriedHeads: ["fork-feature"]
+            queriedHeads: ["fork-feature"],
+            remoteURL: "https://github.com/contributor/demo.git"
         ))
 
         let branch = try #require(Self.branch(repo, "fork-feature"))
         #expect(branch.pr?.number == 110)
         #expect(branch.pr?.headRepositoryOwnerLogin == "contributor")
         #expect(branch.prStatus == .open)
+
+        // The same branch in `tester`'s own clone is a different head that shares a name, and the
+        // head was queried, so it reads `none` rather than `notChecked`.
+        let unrelated = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature")],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["fork-feature"]
+        ))
+        let unrelatedBranch = try #require(Self.branch(unrelated, "fork-feature"))
+        #expect(unrelatedBranch.pr == nil)
+        #expect(unrelatedBranch.prStatus == PRStatus.none)
     }
 
     /// Several PRs on one head: the tie-break prefers the same owner, then OPEN, then the latest
@@ -368,25 +389,37 @@ struct RepoAssemblerTests {
                 "the PR whose head has no local branch is the only one left")
     }
 
-    /// PLAN.md §7: the key is owner **and** branch. A local `fork-feature` tracking `origin`
-    /// (owner `tester`) must not hide the user's fork PR on `contributor:fork-feature` — they are
-    /// two different heads that happen to share a name.
+    /// PLAN.md §7's key is owner **and** branch, and `PRStatusMapperTests` still pins that key.
+    /// At the assembler the group is now the conservative one codex MAJOR 10 asked for: the
+    /// heading claims there is no branch of that name on this Mac, and a local `fork-feature`
+    /// makes that claim false whoever owns the PR's head. What the owner key still buys is a
+    /// repo whose local branches share **no** name with the PR.
     @Test("openElsewhereKeyedByOwnerAndBranchNotBranchAlone")
     func openElsewhereKeyedByOwnerAndBranchNotBranchAlone() throws {
         let fork = Self.pr(110)
         #expect(fork.headRepositoryOwnerLogin == "contributor")
 
+        // Was `== [110]` before codex MAJOR 10: a same-named local branch is on this Mac, and a
+        // group headed "not on this Mac" may not list it.
         let repo = RepoAssembler.assemble(Self.inputs(
             branchRefs: [Self.ref("fork-feature")],
             pullRequests: [],
             authoredOpenPullRequests: [fork],
             queriedHeads: ["fork-feature"]
         ))
+        #expect(repo.openPRsNotOnThisMac.isEmpty,
+                "a branch of that name is on this Mac, whoever owns the PR's head")
 
-        #expect(repo.openPRsNotOnThisMac.map(\.number) == [110],
-                "same branch name, different head owner, so it is still open elsewhere")
+        // No branch of that name: the PR is genuinely elsewhere, whatever the local branches are
+        // called or whom they track.
+        let elsewhere = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("main")],
+            authoredOpenPullRequests: [fork],
+            queriedHeads: ["main"]
+        ))
+        #expect(elsewhere.openPRsNotOnThisMac.map(\.number) == [110])
 
-        // Same branch name and the same owner: now it is on this Mac.
+        // Same branch name and the same owner: on this Mac by either test.
         let sameOwner = PRInfo(
             number: 111, url: "https://github.com/tester/demo/pull/111", state: "OPEN",
             isDraft: false, reviewDecision: "",
@@ -398,6 +431,65 @@ struct RepoAssemblerTests {
             queriedHeads: ["fork-feature"]
         ))
         #expect(ownedRepo.openPRsNotOnThisMac.isEmpty)
+    }
+
+    /// codex MAJOR 10. A local branch with no upstream contributes no owner, so it contributed no
+    /// `LocalHead` — and an authored PR with that exact branch name was listed under a heading
+    /// saying the branch is not on this Mac. It is; it just tracks nothing.
+    @Test("localBranchWithoutUpstreamStillExcludesSameNamedAuthoredPR")
+    func localBranchWithoutUpstreamStillExcludesSameNamedAuthoredPR() throws {
+        let authored = Self.pr(105)
+        #expect(authored.headRefName == "signed-off")
+
+        let repo = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("signed-off", upstream: nil)],
+            authoredOpenPullRequests: [authored, Self.pr(103)],
+            queriedHeads: ["signed-off"]
+        ))
+
+        let branch = try #require(Self.branch(repo, "signed-off"))
+        #expect(branch.upstream == nil, "the local branch tracks nothing, so it names no owner")
+        #expect(!repo.openPRsNotOnThisMac.contains { $0.number == 105 },
+                "and yet the branch is sitting on this Mac")
+        #expect(repo.openPRsNotOnThisMac.map(\.number) == [103])
+
+        // A branch tracking some remote other than `origin` names no owner either.
+        let upstreamElsewhere = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("signed-off", upstream: "fork")],
+            authoredOpenPullRequests: [authored],
+            queriedHeads: ["signed-off"]
+        ))
+        #expect(upstreamElsewhere.openPRsNotOnThisMac.isEmpty)
+    }
+
+    /// codex MAJOR 12, the grouping half. When `git worktree list` fails there is no worktree
+    /// list, and `worktreePath == nil` then means "not known" rather than "no worktree holds it".
+    /// Reading the first as the second put a branch that cannot be deleted — its worktree is
+    /// checked out — under the heading whose whole purpose is "this one is finished with".
+    @Test("worktreeEnumerationFailureSuppressesMergedGroup")
+    func worktreeEnumerationFailureSuppressesMergedGroup() throws {
+        let merged = Self.pr(106)
+        #expect(merged.state == "MERGED")
+
+        let enumerated = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("shipped", oid: merged.headRefOid)],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["shipped"]
+        ))
+        #expect(Self.branch(enumerated, "shipped")?.group == .merged, "the baseline")
+
+        let unknown = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("shipped", oid: merged.headRefOid)],
+            worktrees: [],
+            worktreesEnumerated: false,
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["shipped"]
+        ))
+        let branch = try #require(Self.branch(unknown, "shipped"))
+        #expect(branch.prStatus == .merged, "the PR is still merged…")
+        #expect(branch.group == .active, "…but nothing may claim no worktree holds the branch")
+        #expect(unknown.branches.allSatisfy { $0.group != .merged },
+                "no branch at all reaches the Merged group while the worktrees are unknown")
     }
 
     // MARK: - Order and repo-level facts
@@ -481,6 +573,21 @@ struct RepoAssemblerTests {
 
         let main = try #require(Self.branch(repo, "main"))
         #expect(main.push.source == .tipCommitDate, "no observation for main, but its tip is known")
-        #expect(main.push.remoteRefObservedAt == Date(timeIntervalSince1970: 1_788_310_842))
+        // Was `remoteRefObservedAt` until codex MAJOR 7: the tip's committer date is a fact about
+        // the commit, and "last seen" is a fact about this clone. They are two fields now, and
+        // only `FETCH_HEAD`'s modification date fills the second.
+        #expect(main.push.remoteTipCommitDate == Date(timeIntervalSince1970: 1_788_310_842))
+        #expect(main.push.remoteRefObservedAt == nil, "no FETCH_HEAD was handed in")
+
+        let fetchedAt = Date(timeIntervalSince1970: 1_788_400_000)
+        let observed = RepoAssembler.assemble(Self.inputs(
+            branchRefs: rows,
+            remoteRefs: tips,
+            fetchHeadObservedAt: fetchedAt,
+            pushObservations: ["ahead-two": observation]
+        ))
+        #expect(observed.branches.filter { $0.push.source != PushInfo.Source.none }
+            .allSatisfy { $0.push.remoteRefObservedAt == fetchedAt },
+                "FETCH_HEAD is one fact per repo, so every row with a push story carries the same one")
     }
 }

@@ -152,7 +152,11 @@ struct FrozenTypeTests {
     /// never prompt, page, colorize, or check for updates.
     @Test("The frozen git and gh environments are exactly what PLAN.md §5 lists")
     func frozenEnvironments() {
-        #expect(GitClient.frozenEnvironment == ["LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"])
+        // Two entries until codex MAJOR 13 (the git half): `GIT_NO_LAZY_FETCH=1` keeps a partial
+        // clone from reaching the network behind a read contracted never to fetch, and keeps the
+        // helper that read would spawn from outliving cancellation.
+        #expect(GitClient.frozenEnvironment
+            == ["LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"])
         #expect(GHClient.frozenEnvironment == [
             "GH_PROMPT_DISABLED": "1",
             "GH_NO_UPDATE_NOTIFIER": "1",
@@ -185,7 +189,7 @@ struct TestDoubleTests {
         let runner = RecordedCommandRunner()
         runner.stub(.init(
             executableName: "git",
-            arguments: ["-C", "/repo", "worktree", "list", "--porcelain"],
+            arguments: ["-C", "/repo", "worktree", "list", "--porcelain", "-z"],
             workingDirectory: nil,
             result: .stdout("worktree /repo\n")
         ))
@@ -193,7 +197,7 @@ struct TestDoubleTests {
         // Homebrew git and /usr/bin/git differ per machine; the basename is what a stub matches.
         let output = try await runner.run(Command(
             executable: "/opt/homebrew/bin/git",
-            arguments: ["-C", "/repo", "worktree", "list", "--porcelain"]
+            arguments: ["-C", "/repo", "worktree", "list", "--porcelain", "-z"]
         ))
         #expect(output.standardOutputText == "worktree /repo\n")
         #expect(output.exitCode == 0)
@@ -306,9 +310,15 @@ struct FixtureInventoryTests {
         #expect(remotes.split(separator: "\n").count == 19)
         #expect(remotes.contains("refs/remotes/origin/HEAD"), "git really prints the symbolic ref; the parser skips it")
 
-        let worktrees = Fixture.text("recorded-hannah-personal-agent-worktree-list.txt")
-        #expect(worktrees.hasPrefix("worktree /"))
-        #expect(worktrees.contains("branch refs/heads/main"))
+        // NUL-delimited since codex MAJOR 12 re-froze the invocation with `-z`: every field ends
+        // with `\0` and a record with one more, so the file carries no newline at all.
+        let worktrees = Fixture.data("recorded-hannah-personal-agent-worktree-list.txt")
+        #expect(worktrees.suffix(2) == Data([0, 0]), "the last record is closed by an empty field")
+        #expect(!worktrees.contains(UInt8(ascii: "\n")), "-z prints no newlines")
+        let worktreeFields = worktrees.split(separator: 0, omittingEmptySubsequences: true)
+            .map { String(decoding: $0, as: UTF8.self) }
+        #expect(worktreeFields.first?.hasPrefix("worktree /") == true)
+        #expect(worktreeFields.contains("branch refs/heads/main"))
 
         let revParse = Fixture.text("recorded-branchbar-rev-parse.txt")
         #expect(revParse.split(separator: "\n").count == 2)
@@ -356,12 +366,16 @@ struct FixtureInventoryTests {
 
     @Test("Synthetic fixtures cover the cases this machine's repos cannot produce")
     func syntheticFixtures() throws {
-        let worktrees = Fixture.text("synthetic-worktree-list-multi.txt")
-        #expect(worktrees.contains("\ndetached\n"))
-        #expect(worktrees.contains("\nbare\n"))
-        #expect(worktrees.contains("locked waiting on"))
-        #expect(worktrees.contains("prunable gitdir file points"))
-        #expect(worktrees.contains("repos with spaces"))
+        // The synthetic worktree fixtures moved to the `-z` form with codex MAJOR 12, so the
+        // record shape is asserted on fields between NULs rather than on lines.
+        let worktreeFields = Fixture.data("synthetic-worktree-list-multi.txt")
+            .split(separator: 0, omittingEmptySubsequences: true)
+            .map { String(decoding: $0, as: UTF8.self) }
+        #expect(worktreeFields.contains("detached"))
+        #expect(worktreeFields.contains("bare"))
+        #expect(worktreeFields.contains { $0.hasPrefix("locked waiting on") })
+        #expect(worktreeFields.contains { $0.hasPrefix("prunable gitdir file points") })
+        #expect(worktreeFields.contains { $0.contains("repos with spaces") })
 
         let heads = Fixture.text("synthetic-for-each-ref-heads-mixed.txt")
         let rows = heads.split(separator: "\n")

@@ -6,8 +6,9 @@ import Testing
 // Acceptance tests for the pure PR mapping, written before the implementation. Two rules do the
 // work here. The pill: a merged PR is merged whatever its draft flag says, and an empty
 // `reviewDecision` is no decision rather than a decision named "". The join: a PR matches a
-// branch by `headRefName` first, and the head owner only breaks ties between PRs that share a
-// head — it never excludes, or every fork PR would vanish.
+// branch by `headRefName` first, and by an owner the branch can claim — the codex pre-ship
+// review (MAJOR 9) made owner a constraint rather than only a tie-break, because a stranger's
+// fork PR called `main` was supplying the pill and the link for an unrelated local branch.
 
 /// Decoded once per test from the fixture, so these tests read the same rows `gh` writes.
 private func mixedPullRequests() throws -> [PRInfo] {
@@ -110,21 +111,62 @@ struct PRStatusMapperPillTests {
 @Suite("PRStatusMapper joins a branch to its PR by head name first")
 struct PRStatusMapperMatchTests {
 
-    /// The fork case: PR 110's head owner is `contributor` while the local branch tracks
-    /// `tester`. Matching by head name first is what keeps it visible.
+    /// The fork case: PR 110's head is `contributor:fork-feature`, and the local branch that
+    /// belongs to it is one tracking that fork. It still gets its pill.
+    ///
+    /// The owner this test passes changed with codex MAJOR 9. It used to be `tester` — the repo's
+    /// own owner — on the rule that a differing head owner narrows a tie and never excludes, which
+    /// is precisely how an outside contributor's PR ended up attached to someone else's branch.
+    /// The invariant it is named for survives: a PR raised from a fork matches the local branch
+    /// that tracks that fork.
     @Test("forkOriginatedPRStillMatchesItsLocalBranch")
     func forkOriginatedPRStillMatchesItsLocalBranch() throws {
         let prs = try mixedPullRequests()
 
         let matched = try #require(PRStatusMapper.match(
             branchName: "fork-feature",
-            upstreamOwnerLogin: "tester",
+            upstreamOwnerLogin: "contributor",
+            repoOwnerLogin: "tester",
             in: prs
         ))
 
         #expect(matched.number == 110)
-        #expect(matched.headRepositoryOwnerLogin == "contributor",
-                "a differing head owner narrows a tie, it never excludes")
+        #expect(matched.headRepositoryOwnerLogin == "contributor")
+    }
+
+    /// codex MAJOR 9, the case the old rule got wrong. A local `fork-feature` that tracks
+    /// `tester`'s own origin is not the head of `contributor:fork-feature`; they are two branches
+    /// that share a name. With one candidate and no owner check, that PR supplied the pill, the
+    /// link, and — if it had been merged — the Merged group.
+    @Test("singleSameNamedForkPRDoesNotAttachToAnUnrelatedLocalBranch")
+    func singleSameNamedForkPRDoesNotAttachToAnUnrelatedLocalBranch() throws {
+        let prs = try mixedPullRequests()
+        let fork = try pr(110, in: prs)
+        #expect(fork.headRepositoryOwnerLogin == "contributor")
+        #expect(prs.filter { $0.headRefName == "fork-feature" }.count == 1, "exactly one candidate")
+
+        #expect(PRStatusMapper.match(
+            branchName: "fork-feature",
+            upstreamOwnerLogin: "tester",
+            repoOwnerLogin: "tester",
+            in: prs) == nil,
+            "the local branch's head on GitHub is tester:fork-feature, which has no PR")
+
+        // Owner unknown on the branch falls back to the repo's owner, which is the only owner the
+        // branch could plausibly have.
+        #expect(PRStatusMapper.match(
+            branchName: "fork-feature",
+            upstreamOwnerLogin: nil,
+            repoOwnerLogin: "tester",
+            in: prs) == nil)
+
+        // With neither owner known — a remote this app never parsed — there is no basis to
+        // reject, and the head name alone still matches.
+        #expect(PRStatusMapper.match(
+            branchName: "fork-feature",
+            upstreamOwnerLogin: nil,
+            repoOwnerLogin: nil,
+            in: prs)?.number == 110)
     }
 
     /// Two PRs share `shared-head`: 108 is CLOSED and older, 109 is OPEN and newer. With the same
@@ -208,6 +250,30 @@ struct PRStatusMapperOpenElsewhereTests {
         #expect(numbers.contains(105) == false, "signed-off is checked out here")
         #expect(numbers.contains(110) == false, "the same owner and the same branch is a local head")
         #expect(numbers == [102, 103, 104, 109], "everything else the author has open lives only on GitHub")
+    }
+
+    /// codex MAJOR 10. A local branch with no upstream, or one tracking a remote other than
+    /// `origin`, contributes no owner and therefore no `LocalHead` — so an authored PR with that
+    /// exact branch name landed under a heading that says the branch is not on this Mac. The
+    /// name-only exclusion is deliberately conservative: it can hide a genuine fork PR, and the
+    /// group's note ("with no branch of that name on this Mac") is what it now promises.
+    @Test("localBranchWithoutUpstreamStillExcludesSameNamedAuthoredPR")
+    func localBranchWithoutUpstreamStillExcludesSameNamedAuthoredPR() throws {
+        let authored = try openAuthoredPRs()
+        #expect(authored.contains { $0.headRefName == "draft-branch" })
+
+        // No upstream anywhere, so `localHeads` is empty — the state the old key could not see.
+        let notOnThisMac = PRStatusMapper.openPRsNotOnThisMac(
+            authoredOpenPRs: authored,
+            localHeads: [],
+            localBranchNames: ["draft-branch", "fork-feature"]
+        )
+        let numbers = Set(notOnThisMac.map(\.number))
+
+        #expect(!numbers.contains(101), "draft-branch is a branch on this Mac, tracked or not")
+        #expect(!numbers.contains(110), "and so is fork-feature, whoever owns the PR's head")
+        #expect(numbers == [102, 103, 104, 105, 109],
+                "everything the author has open under a name no local branch carries")
     }
 
     @Test("noLocalBranchesLeavesEveryAuthoredOpenPRInTheGroup")

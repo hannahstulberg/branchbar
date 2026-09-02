@@ -89,7 +89,9 @@ struct LiveRepoSanityTests {
                  "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(upstream:short)%1f%(upstream:remotename)%1f%(upstream:track,nobracket)%1f%(HEAD)",
                  "--", "refs/heads"]
             ),
-            ("worktree list --porcelain", ["-C", repo, "worktree", "list", "--porcelain"]),
+            // `-z` since codex MAJOR 12: a worktree path containing a newline is printed raw by
+            // the newline-delimited porcelain on 2.39.5, which splits one record into several.
+            ("worktree list --porcelain -z", ["-C", repo, "worktree", "list", "--porcelain", "-z"]),
             (
                 "for-each-ref refs/remotes/",
                 ["-C", repo, "for-each-ref",

@@ -4,24 +4,11 @@
 
   ],
   "expectedStrings" : [
-    "Branches and worktrees",
-    "Checked out",
-    "No PR",
-    "No tracked remote branch · push history not checked",
-    "BranchBar only reads push history for a branch that tracks one on origin, so it has not checked this one.",
-    "No matching branch on last-known origin",
-    "2 days ago",
-    "Branch notes-cleanup. No PR. No tracked remote branch · push history not checked.",
-    "Open in Cursor",
-    "Show in Finder",
-    "Copy path",
-    "Refresh PRs now",
-    "Open BranchBar at login",
-    "Quit BranchBar"
+    "origin not fetched by this clone yet"
   ],
-  "id" : "single-branch-no-pr-never-pushed",
+  "id" : "origin-not-fetched",
   "now" : 810302400,
-  "planReference" : "§5a item 1: one branch, no PR, never pushed (the modal NYT case)",
+  "planReference" : "§3: the ahead tooltip's anchor is a local observation, not a commit date",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
@@ -36,15 +23,26 @@
             "committerDate" : 810129600,
             "group" : "active",
             "isCheckedOutInPrimary" : true,
-            "name" : "notes-cleanup",
+            "name" : "pushed-never-fetched",
             "prStatus" : "none",
             "push" : {
-              "hasUpstream" : false,
+              "aheadOfLastKnownRemote" : 3,
+              "hasUpstream" : true,
+              "observedPushAt" : 810216000,
+              "observedPushOID" : "2222222222222222222222222222222222222222",
               "originMovedSince" : false,
-              "source" : "none",
+              "remoteTipCommitDate" : 809956800,
+              "source" : "reflogObserved",
               "upstreamGone" : false
             },
-            "tipSHA" : "1111111111111111111111111111111111111111"
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 3,
+              "behind" : 0,
+              "isGone" : false,
+              "ref" : "origin/pushed-never-fetched",
+              "remote" : "origin"
+            }
           }
         ],
         "errors" : [
@@ -96,5 +94,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "One branch, no PR, never pushed"
+  "title" : "Ahead of an origin this clone has never fetched from"
 }

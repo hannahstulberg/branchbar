@@ -217,6 +217,7 @@ enum UIStates {
     static let all: [UIState] = [
         firstRunScanning,
         zeroRepos,
+        zeroReposDocumentsDenied,
         notScannedFolders,
         ghNotInstalled,
         ghNotAuthenticated,
@@ -243,7 +244,9 @@ enum UIStates {
         openPRsNotOnThisMac,
         upstreamMissing,
         aheadOfLastKnownOrigin,
+        originNotFetched,
         inSync,
+        behindOnly,
         detachedWorktree,
         worktreeCheckout,
         refreshRunning,
@@ -281,6 +284,26 @@ enum UIStates {
         snapshot: UIFixtures.snapshot([]),
         refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
         scanResult: UIFixtures.scanResult(repoCount: 0)
+    )
+
+    // 2b — codex MAJOR 3
+    static let zeroReposDocumentsDenied = UIState(
+        id: "zero-repos-documents-denied",
+        title: "Zero repos found because the folder holding them was denied",
+        planReference: "§5a item 1: zero repos, with the Not-scanned notice and Allow access…",
+        entries: [
+            ("emptyStateTitle", Strings.emptyStateTitle),
+            ("notScanned", Strings.notScanned(folders: ["Documents"])),
+            ("skippedCategoriesSummary", Strings.skippedCategoriesSummary),
+            ("grantFolderAccessActionLabel", Strings.grantFolderAccessActionLabel),
+        ],
+        // The `not-scanned-folders` state carries the same notice on its first repo section. This
+        // one has no section to carry it, which is the whole point: every repo is inside the
+        // denied folder, so the user who most needs "Allow access…" is the one who saw a bare
+        // "No repos found" and no way out.
+        snapshot: UIFixtures.snapshot([]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+        scanResult: UIFixtures.scanResult(repoCount: 0, unreadable: ["/Users/tester/Documents"])
     )
 
     // 3
@@ -456,8 +479,8 @@ enum UIStates {
             ("activeGroupHeading", Strings.activeGroupHeading),
             ("checkedOutMarker", Strings.checkedOutMarker),
             ("prNone", Strings.prNone),
-            ("neverPushed", Strings.neverPushed),
-            ("neverPushedTooltip", Strings.neverPushedTooltip),
+            ("noTrackedRemoteBranch", Strings.noTrackedRemoteBranch),
+            ("noTrackedRemoteBranchTooltip", Strings.noTrackedRemoteBranchTooltip),
             ("noUpstream", Strings.noUpstream),
             ("relative", Strings.relative(UIClock.ago(2 * UIClock.day), now: UIClock.now)),
             (
@@ -465,7 +488,7 @@ enum UIStates {
                 Strings.branchRowAccessibilityLabel(
                     branchName: "notes-cleanup",
                     prPill: Strings.prNone,
-                    pushLabel: Strings.neverPushed
+                    pushLabel: Strings.noTrackedRemoteBranch
                 )
             ),
             ("openInCursorActionLabel", Strings.openInCursorActionLabel),
@@ -638,11 +661,14 @@ enum UIStates {
                     "imported-from-laptop",
                     upstream: Upstream(ref: "origin/imported-from-laptop", remote: "origin"),
                     prStatus: .none,
+                    // codex MAJOR 7: the fallback dates the **remote** tip's commit, and
+                    // "last seen" is FETCH_HEAD's modification date, so the fixture carries both.
                     push: PushInfo(
                         source: .tipCommitDate,
                         hasUpstream: true,
                         aheadOfLastKnownRemote: 0,
-                        remoteRefObservedAt: UIClock.ago(2 * UIClock.day)
+                        remoteRefObservedAt: UIClock.ago(UIClock.hour),
+                        remoteTipCommitDate: UIClock.ago(2 * UIClock.day)
                     )
                 )
             ])
@@ -809,7 +835,7 @@ enum UIStates {
         entries: [
             ("mergedGroupHeading", Strings.mergedGroupHeading),
             ("prMerged", Strings.prMerged),
-            ("mergedDetail", Strings.mergedDetail(baseRefName: "main")),
+            ("mergedGroupCopy", Strings.mergedGroupCopy(base: "main")),
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(branches: [
@@ -954,6 +980,35 @@ enum UIStates {
         refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
     )
 
+    // 28b — codex MAJOR 7
+    static let originNotFetched = UIState(
+        id: "origin-not-fetched",
+        title: "Ahead of an origin this clone has never fetched from",
+        planReference: "§3: the ahead tooltip's anchor is a local observation, not a commit date",
+        entries: [
+            ("originNotFetchedYet", Strings.originNotFetchedYet)
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "pushed-never-fetched",
+                    upstream: Upstream(ref: "origin/pushed-never-fetched", remote: "origin", ahead: 3),
+                    prStatus: .none,
+                    push: PushInfo(
+                        observedPushAt: UIClock.ago(UIClock.day),
+                        observedPushOID: UIFixtures.otherSHA,
+                        source: .reflogObserved,
+                        hasUpstream: true,
+                        aheadOfLastKnownRemote: 3,
+                        remoteRefObservedAt: nil,
+                        remoteTipCommitDate: UIClock.ago(4 * UIClock.day)
+                    )
+                )
+            ])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
     // 29
     static let inSync = UIState(
         id: "in-sync",
@@ -975,6 +1030,35 @@ enum UIStates {
                         hasUpstream: true,
                         aheadOfLastKnownRemote: 0,
                         remoteRefObservedAt: UIClock.ago(2 * UIClock.day)
+                    )
+                )
+            ])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 29b — codex MAJOR 5
+    static let behindOnly = UIState(
+        id: "behind-only",
+        title: "Nothing local ahead, but last-known origin has moved on",
+        planReference: "§3: \"In sync\" only when nothing is ahead and nothing is behind",
+        entries: [
+            ("noLocalCommitsAhead", Strings.noLocalCommitsAhead)
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "main",
+                    upstream: Upstream(ref: "origin/main", remote: "origin", ahead: 0, behind: 20),
+                    prStatus: .none,
+                    push: PushInfo(
+                        observedPushAt: UIClock.ago(9 * UIClock.day),
+                        observedPushOID: UIFixtures.tipSHA,
+                        source: .reflogObserved,
+                        hasUpstream: true,
+                        aheadOfLastKnownRemote: 0,
+                        remoteRefObservedAt: UIClock.ago(UIClock.hour),
+                        remoteTipCommitDate: UIClock.ago(2 * UIClock.hour)
                     )
                 )
             ])
@@ -1250,8 +1334,15 @@ struct StringsTests {
         let bannedWords = ["detached", "HEAD", "upstream", "ref", "SHA", "reflog", "stderr"]
         let bannedPhrases = ["exit code"]
 
-        let lockedExceptions = [Strings.upstreamMissing]
-        #expect(lockedExceptions == ["Upstream missing from last-known origin"])
+        // The second entry arrived with codex MAJOR 8. "No later local commits found" was a claim
+        // `headRefOid` cannot support — GitHub documents it as the PR's **current** head, not a
+        // merge-time snapshot — and the wording that the data does support has to name the PR
+        // head. Both exceptions are pinned whole so the list cannot quietly grow.
+        let lockedExceptions = [Strings.upstreamMissing, Strings.mergedGroupCopy(base: "main")]
+        #expect(lockedExceptions == [
+            "Upstream missing from last-known origin",
+            "PR merged into main. Local tip matches GitHub's current PR head.",
+        ])
 
         var corpus: [String] = []
         for state in UIStates.all { corpus.append(contentsOf: state.strings) }

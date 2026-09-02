@@ -4,24 +4,11 @@
 
   ],
   "expectedStrings" : [
-    "Branches and worktrees",
-    "Checked out",
-    "No PR",
-    "No tracked remote branch · push history not checked",
-    "BranchBar only reads push history for a branch that tracks one on origin, so it has not checked this one.",
-    "No matching branch on last-known origin",
-    "2 days ago",
-    "Branch notes-cleanup. No PR. No tracked remote branch · push history not checked.",
-    "Open in Cursor",
-    "Show in Finder",
-    "Copy path",
-    "Refresh PRs now",
-    "Open BranchBar at login",
-    "Quit BranchBar"
+    "No local commits ahead of last-known origin"
   ],
-  "id" : "single-branch-no-pr-never-pushed",
+  "id" : "behind-only",
   "now" : 810302400,
-  "planReference" : "§5a item 1: one branch, no PR, never pushed (the modal NYT case)",
+  "planReference" : "§3: \"In sync\" only when nothing is ahead and nothing is behind",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
@@ -36,15 +23,27 @@
             "committerDate" : 810129600,
             "group" : "active",
             "isCheckedOutInPrimary" : true,
-            "name" : "notes-cleanup",
+            "name" : "main",
             "prStatus" : "none",
             "push" : {
-              "hasUpstream" : false,
+              "aheadOfLastKnownRemote" : 0,
+              "hasUpstream" : true,
+              "observedPushAt" : 809524800,
+              "observedPushOID" : "1111111111111111111111111111111111111111",
               "originMovedSince" : false,
-              "source" : "none",
+              "remoteRefObservedAt" : 810298800,
+              "remoteTipCommitDate" : 810295200,
+              "source" : "reflogObserved",
               "upstreamGone" : false
             },
-            "tipSHA" : "1111111111111111111111111111111111111111"
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 0,
+              "behind" : 20,
+              "isGone" : false,
+              "ref" : "origin/main",
+              "remote" : "origin"
+            }
           }
         ],
         "errors" : [
@@ -96,5 +95,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "One branch, no PR, never pushed"
+  "title" : "Nothing local ahead, but last-known origin has moved on"
 }

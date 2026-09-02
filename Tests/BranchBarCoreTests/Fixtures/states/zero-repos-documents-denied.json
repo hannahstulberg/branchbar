@@ -1,0 +1,82 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "No repos found",
+    "Not scanned: Documents",
+    "Also skipped on purpose: hidden folders, Library, anything more than six folders deep, and folders inside a repo BranchBar already found.",
+    "Allow access…"
+  ],
+  "id" : "zero-repos-documents-denied",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: zero repos, with the Not-scanned notice and Allow access…",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "scanResult" : {
+    "candidatesExamined" : 1204,
+    "depthCutDirectories" : 0,
+    "policy" : {
+      "descendIntoRepos" : false,
+      "extraRoots" : [
+
+      ],
+      "homeRoot" : "/Users/tester",
+      "maxDepth" : 6,
+      "skipDirectoryNames" : [
+        "Library",
+        "Applications",
+        "Pictures",
+        "Movies",
+        "Music",
+        "Public",
+        "node_modules",
+        "vendor",
+        "Pods",
+        "DerivedData",
+        "build",
+        "dist",
+        "target",
+        "venv",
+        "site-packages",
+        "__pycache__",
+        "go/pkg"
+      ],
+      "skipHiddenDirectories" : true
+    },
+    "repos" : [
+
+    ],
+    "scannedAt" : 810302340,
+    "skippedHiddenDirectories" : 0,
+    "skippedSubmodules" : [
+
+    ],
+    "skippedWorktreeCheckouts" : [
+
+    ],
+    "truncatedByDeadline" : false,
+    "unreadableDirectories" : [
+      "/Users/tester/Documents"
+    ]
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Zero repos found because the folder holding them was denied"
+}
