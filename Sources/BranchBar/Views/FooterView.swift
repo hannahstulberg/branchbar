@@ -68,10 +68,10 @@ struct FooterView: View {
                     Button(role: .cancel) {
                         cancel()
                     } label: {
-                        Label(FooterStrings.cancelRefreshActionLabel, systemImage: Glyph.cancelRefresh)
+                        Label(Strings.cancelRefreshActionLabel, systemImage: Glyph.cancelRefresh)
                             .fixedSize()
                     }
-                    .accessibilityLabel(FooterStrings.cancelRefreshAccessibilityLabel)
+                    .accessibilityLabel(Strings.cancelRefreshAccessibilityLabel)
                 }
                 Spacer(minLength: 0)
             }
@@ -183,20 +183,4 @@ struct FooterView: View {
         }
         .padding(.horizontal, Metrics.horizontalPadding)
     }
-}
-
-/// Copy the footer needs that `Strings` does not hold yet.
-///
-/// TODO(F11): move to Strings. Core owns every user-facing sentence in this app, and the
-/// `everyFixtureStringIsRenderedOrOnAFrozenExemptionList` test is what keeps that list from
-/// growing quietly — which is also why a shell packet cannot add a member to it. These two live
-/// here until Core takes them.
-enum FooterStrings {
-    /// Literal: `Cancel`
-    static let cancelRefreshActionLabel = "Cancel"
-
-    /// What VoiceOver reads. The visible label is one word because the button sits beside Refresh
-    /// and Refresh PRs now at 340 pt; spoken on its own, one word does not say what is cancelled.
-    /// Literal: `Cancel the running refresh`
-    static let cancelRefreshAccessibilityLabel = "Cancel the running refresh"
 }

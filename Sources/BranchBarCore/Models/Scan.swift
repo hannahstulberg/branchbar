@@ -78,8 +78,9 @@ public struct ScanResult: Hashable, Codable, Sendable {
     /// The walk was cancelled before it drained its queue, so `repos` is what it had found by
     /// then rather than everything there is (packet 3.3). `RefreshCoordinator` bounds the scan
     /// with `RefreshPolicy.scanDeadline` and treats a truncated result as unusable, so the next
-    /// refresh walks the tree again instead of trusting a list that was cut short. Defaulted, so
-    /// a `ScanResult` written before the field existed still decodes.
+    /// refresh walks the tree again instead of trusting a list that was cut short. Read with
+    /// `decodeIfPresent` below: a scan recorded before the field existed ran to completion by
+    /// construction, so false is the reading that keeps its repo list usable.
     public var truncatedByDeadline: Bool = false
 
     public init(
@@ -104,5 +105,23 @@ public struct ScanResult: Hashable, Codable, Sendable {
         self.skippedWorktreeCheckouts = skippedWorktreeCheckouts
         self.skippedSubmodules = skippedSubmodules
         self.truncatedByDeadline = truncatedByDeadline
+    }
+
+    /// Explicit for the reason spelled out on `PRCacheEntry.init(from:)` (packet F12): a
+    /// synthesized decoder ignores a stored property's default, so `truncatedByDeadline` was a
+    /// required key and a 1.1-era `cache.json` failed on it. Frozen keys stay required.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        policy = try container.decode(ScanPolicy.self, forKey: .policy)
+        scannedAt = try container.decode(Date.self, forKey: .scannedAt)
+        repos = try container.decode([DiscoveredRepo].self, forKey: .repos)
+        candidatesExamined = try container.decode(Int.self, forKey: .candidatesExamined)
+        unreadableDirectories = try container.decode([String].self, forKey: .unreadableDirectories)
+        depthCutDirectories = try container.decode(Int.self, forKey: .depthCutDirectories)
+        skippedHiddenDirectories = try container.decode(Int.self, forKey: .skippedHiddenDirectories)
+        skippedWorktreeCheckouts = try container.decode([String].self, forKey: .skippedWorktreeCheckouts)
+        skippedSubmodules = try container.decode([String].self, forKey: .skippedSubmodules)
+        truncatedByDeadline =
+            try container.decodeIfPresent(Bool.self, forKey: .truncatedByDeadline) ?? false
     }
 }

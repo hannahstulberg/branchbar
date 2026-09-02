@@ -50,7 +50,8 @@ public struct PRCacheEntry: Hashable, Codable, Sendable {
     /// Persisted because a warm cache serves the whole answer without re-querying, and without
     /// this a branch the fetch *did* ask about and found nothing for would come back
     /// `notChecked` on the next launch instead of `none` (`unqueriedBranchIsNotCheckedNeverNone`
-    /// read in the other direction). Defaulted so a cache written before this field decodes.
+    /// read in the other direction). Read with `decodeIfPresent` below, so an entry written
+    /// before the field existed loads as "recorded nothing about what it asked".
     public var queriedHeads: [String] = []
 
     public init(
@@ -63,5 +64,22 @@ public struct PRCacheEntry: Hashable, Codable, Sendable {
         self.prs = prs
         self.authorPRs = authorPRs
         self.queriedHeads = queriedHeads
+    }
+
+    /// Explicit because a *synthesized* `init(from:)` calls `decode(_:forKey:)` for every
+    /// non-optional property and never consults that property's default (packet F12). A stored
+    /// property added after the 1.1 freeze was therefore a required key: `queriedHeads` missing
+    /// threw `keyNotFound`, the enclosing `CacheFile` failed with it, and `FileCacheStore.load`
+    /// swallowed that as "no cache" — a cold rescan and an empty popover on the first launch
+    /// after the upgrade that added the field. Keys frozen in 1.1 stay required, so a file of the
+    /// wrong shape is still not a cache (`corruptJSONLoadsNil`); only the added keys are read
+    /// with `decodeIfPresent`. `encode` stays synthesized: what this version writes carries
+    /// every key.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        fetchedAt = try container.decode(Date.self, forKey: .fetchedAt)
+        prs = try container.decode([PRInfo].self, forKey: .prs)
+        authorPRs = try container.decode([PRInfo].self, forKey: .authorPRs)
+        queriedHeads = try container.decodeIfPresent([String].self, forKey: .queriedHeads) ?? []
     }
 }

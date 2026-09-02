@@ -653,28 +653,19 @@ final class AppModel: ObservableObject {
     /// each one resolved to — the observable end of `RepoLoader`'s per-remote owner lookup, which
     /// the app only gets because both loaders are now built with `runner:` and `gitPath:`.
     ///
-    /// The shell reports what the snapshot proves rather than re-running the lookup: `Repo` does
-    /// not carry the loader's `remoteOwners` map and `GitClient.command` is internal to Core, so
-    /// the app cannot reissue `config --get remote.<name>.url` in the frozen shape. `origin` is
-    /// therefore named by the repo's own slug, any other remote by the owner of the PR head its
-    /// branches matched, and `?` means a tracked remote whose owner is not visible from here.
-    /// F11 owes Core a `Repo.remoteOwners` (or `Branch.upstreamOwnerLogin`) so the second column
-    /// is the lookup's own answer instead of an inference from the match it produced.
+    /// The second column is the lookup's own answer, read off `Repo.remoteOwners` (F11): `origin`
+    /// from the repo's slug and every other name from `config --get remote.<name>.url`. It used to
+    /// be inferred here from the owner of whichever PR head each branch matched, which agreed with
+    /// the lookup only when a PR existed and quietly disagreed with it when a fork's remote URL
+    /// named one account and the matched PR another. `?` is a remote some branch tracks that the
+    /// lookup could not resolve — no such remote configured, or a URL that is not a GitHub slug —
+    /// which is the case worth seeing in the log, so it is listed rather than skipped.
     private func logRemoteOwners(_ snapshot: Snapshot) {
         for repo in snapshot.repos {
-            var owners: [String: Set<String>] = [:]
-            for branch in repo.branches {
-                guard let remote = branch.push.remoteName else { continue }
-                var resolved = owners[remote] ?? []
-                if remote == "origin", let owner = repo.githubSlug?.owner { resolved.insert(owner) }
-                if let owner = branch.pr?.headRepositoryOwnerLogin { resolved.insert(owner) }
-                owners[remote] = resolved
-            }
-            guard !owners.isEmpty else { continue }
-            let pairs = owners.keys.sorted().map { remote -> String in
-                let names = (owners[remote] ?? []).sorted()
-                return "\(remote)=\(names.isEmpty ? "?" : names.joined(separator: "/"))"
-            }
+            let tracked = Set(repo.branches.compactMap(\.push.remoteName))
+            let names = tracked.union(repo.remoteOwners.keys)
+            guard !names.isEmpty else { continue }
+            let pairs = names.sorted().map { "\($0)=\(repo.remoteOwners[$0] ?? "?")" }
             Log.info("remote owners: \(repo.name) \(pairs.joined(separator: " "))")
         }
     }

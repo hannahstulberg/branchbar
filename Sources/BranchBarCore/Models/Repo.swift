@@ -160,11 +160,10 @@ public struct Repo: Hashable, Codable, Sendable {
     /// from the slug, and one `config --get remote.<name>.url` per other name (codex round 2,
     /// MAJOR 4). `RepoLoader` already resolved these to key the PR match; carrying them on the
     /// repo is what lets the shell report which fork a row was counted against instead of
-    /// reconstructing the answer from the PRs that happened to match. Defaulted empty for every
-    /// caller that has nothing to say; a *cache* written before the field existed does not decode
-    /// — a synthesized `init(from:)` requires the key whatever default the property carries — so
-    /// `FileCacheStore.load` returns nil once and the next refresh rebuilds the snapshot. One cold
-    /// launch, and never a repo whose remotes are silently attributed to the wrong owner.
+    /// reconstructing the answer from the PRs that happened to match. Empty for every caller
+    /// that has nothing to say, and read with `decodeIfPresent` below (packet F12) so a cache
+    /// written before the field existed loads with an empty map — the honest reading, since that
+    /// refresh never ran the lookup — rather than costing the whole snapshot a cold rescan.
     public var remoteOwners: [String: String] = [:]
     public var worktrees: [Worktree]
     public var branches: [Branch]
@@ -214,6 +213,30 @@ public struct Repo: Hashable, Codable, Sendable {
         self.errors = errors
         self.isStale = isStale
         self.lastActivity = lastActivity
+    }
+
+    /// Explicit for the reason spelled out on `PRCacheEntry.init(from:)` (packet F12): a
+    /// synthesized decoder ignores a stored property's default, so `remoteOwners` was a required
+    /// key and every cached snapshot written before it failed to load. Frozen keys stay required.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(RepoID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        path = try container.decode(String.self, forKey: .path)
+        remoteURL = try container.decodeIfPresent(String.self, forKey: .remoteURL)
+        githubSlug = try container.decodeIfPresent(GitHubSlug.self, forKey: .githubSlug)
+        remoteOwners =
+            try container.decodeIfPresent([String: String].self, forKey: .remoteOwners) ?? [:]
+        worktrees = try container.decode([Worktree].self, forKey: .worktrees)
+        branches = try container.decode([Branch].self, forKey: .branches)
+        openPRsNotOnThisMac = try container.decode([PRInfo].self, forKey: .openPRsNotOnThisMac)
+        prAvailability = try container.decode(PRAvailability.self, forKey: .prAvailability)
+        prFetchedAt = try container.decodeIfPresent(Date.self, forKey: .prFetchedAt)
+        prLoadState = try container.decode(PRLoadState.self, forKey: .prLoadState)
+        lastRefreshed = try container.decodeIfPresent(Date.self, forKey: .lastRefreshed)
+        errors = try container.decode([RepoError].self, forKey: .errors)
+        isStale = try container.decode(Bool.self, forKey: .isStale)
+        lastActivity = try container.decodeIfPresent(Date.self, forKey: .lastActivity)
     }
 }
 

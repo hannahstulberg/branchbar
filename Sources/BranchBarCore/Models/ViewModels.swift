@@ -23,8 +23,9 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
     public var id: RepoID
     public var title: String
     /// The repo's own folder, so a section-level menu (open in an editor, Show in Finder, Copy
-    /// path) names it instead of guessing it off whichever row happens to be first. Optional and
-    /// defaulted so a `RepoSectionVM` recorded before the field existed still decodes.
+    /// path) names it instead of guessing it off whichever row happens to be first. Optional, and
+    /// read with `decodeIfPresent` below, so a `RepoSectionVM` recorded before the field existed
+    /// still decodes.
     public var path: String?
     public var isCollapsed: Bool
     public var active: [BranchRowVM]
@@ -36,9 +37,10 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
     /// TCC-denied folders plus the skipped-categories summary.
     public var notScannedNotice: NoticeVM?
     /// The repo's validated GitHub host, from `Repo.githubSlug?.host`, so `Actions.openPR` can
-    /// refuse a link that points anywhere else (codex MINOR 3). Optional and defaulted so a
-    /// `RepoSectionVM` recorded before the field existed still decodes, and nil for a repo with no
-    /// GitHub remote — which is also a repo with no PR link to open.
+    /// refuse a link that points anywhere else (codex MINOR 3). Optional, and read with
+    /// `decodeIfPresent` below, so a `RepoSectionVM` recorded before the field existed still
+    /// decodes; nil for a repo with no GitHub remote — which is also a repo with no PR link to
+    /// open.
     public var host: String?
 
     public init(
@@ -66,6 +68,26 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
         self.notScannedNotice = notScannedNotice
         self.host = host
     }
+
+    /// Explicit for the reason spelled out on `PRCacheEntry.init(from:)` (packet F12). A
+    /// synthesized decoder already reads an `Optional` property with `decodeIfPresent`, so
+    /// `path` and `host` never broke a recorded fixture on their own; they are read the same way
+    /// as every other added field so the next field added here inherits the rule rather than
+    /// depending on somebody noticing its type. Frozen keys stay required.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(RepoID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        path = try container.decodeIfPresent(String.self, forKey: .path)
+        isCollapsed = try container.decode(Bool.self, forKey: .isCollapsed)
+        active = try container.decode([BranchRowVM].self, forKey: .active)
+        openElsewhere = try container.decode([PRRowVM].self, forKey: .openElsewhere)
+        merged = try container.decode([BranchRowVM].self, forKey: .merged)
+        closedUnmerged = try container.decode([BranchRowVM].self, forKey: .closedUnmerged)
+        prNotice = try container.decodeIfPresent(NoticeVM.self, forKey: .prNotice)
+        notScannedNotice = try container.decodeIfPresent(NoticeVM.self, forKey: .notScannedNotice)
+        host = try container.decodeIfPresent(String.self, forKey: .host)
+    }
 }
 
 /// One branch row. PLAN.md §5a item 3: worktree marker leading, branch name primary,
@@ -76,8 +98,9 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
     public var worktreeMarker: String?
     public var prPill: PRPillVM?
     /// The matched PR's web address, so the row's menu can offer "Open PR" without the shell
-    /// having to hold a `PRInfo`. Nil when no PR matched this branch. Optional and defaulted so a
-    /// `BranchRowVM` recorded before the field existed still decodes.
+    /// having to hold a `PRInfo`. Nil when no PR matched this branch. Optional, and read with
+    /// `decodeIfPresent` below, so a `BranchRowVM` recorded before the field existed still
+    /// decodes.
     public var prURL: String?
     /// "Pushed from this Mac 2 days ago" or "Last push unknown · newest commit dated 2 days ago".
     public var pushLabel: String
@@ -107,6 +130,21 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
         self.aheadLabel = aheadLabel
         self.primaryAction = primaryAction
         self.accessibilityLabel = accessibilityLabel
+    }
+
+    /// Explicit for the reason spelled out on `PRCacheEntry.init(from:)` (packet F12); see
+    /// `RepoSectionVM.init(from:)` for why an added `Optional` is read the same way as the rest.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decode(String.self, forKey: .title)
+        worktreeMarker = try container.decodeIfPresent(String.self, forKey: .worktreeMarker)
+        prPill = try container.decodeIfPresent(PRPillVM.self, forKey: .prPill)
+        prURL = try container.decodeIfPresent(String.self, forKey: .prURL)
+        pushLabel = try container.decode(String.self, forKey: .pushLabel)
+        pushTooltip = try container.decode(String.self, forKey: .pushTooltip)
+        aheadLabel = try container.decodeIfPresent(String.self, forKey: .aheadLabel)
+        primaryAction = try container.decode(UserFacingFailure.Action.self, forKey: .primaryAction)
+        accessibilityLabel = try container.decode(String.self, forKey: .accessibilityLabel)
     }
 }
 
@@ -174,8 +212,8 @@ public struct EmptyStateVM: Hashable, Codable, Sendable {
     /// no repo at all. `RepoSectionVM.notScannedNotice` was the only slot that notice had, and with
     /// zero repos there is no section to hang it on — which is exactly the case where every repo
     /// sits in a denied folder, so the user saw the generic "No repos found" and no way to fix it
-    /// (codex MAJOR 3). Optional and defaulted so an `EmptyStateVM` recorded before the field
-    /// existed still decodes.
+    /// (codex MAJOR 3). Optional, and read with `decodeIfPresent` below, so an `EmptyStateVM`
+    /// recorded before the field existed still decodes.
     public var notice: NoticeVM?
 
     public init(
@@ -188,5 +226,15 @@ public struct EmptyStateVM: Hashable, Codable, Sendable {
         self.message = message
         self.action = action
         self.notice = notice
+    }
+
+    /// Explicit for the reason spelled out on `PRCacheEntry.init(from:)` (packet F12); see
+    /// `RepoSectionVM.init(from:)` for why an added `Optional` is read the same way as the rest.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decode(String.self, forKey: .title)
+        message = try container.decode(String.self, forKey: .message)
+        action = try container.decode(UserFacingFailure.Action.self, forKey: .action)
+        notice = try container.decodeIfPresent(NoticeVM.self, forKey: .notice)
     }
 }

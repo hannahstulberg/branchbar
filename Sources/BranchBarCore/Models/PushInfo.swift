@@ -41,7 +41,8 @@ public struct PushInfo: Hashable, Codable, Sendable {
     ///
     /// Carried since codex round 2 MAJOR 5: a branch tracking `fork/feature` was compared against
     /// `fork` and then told the user about origin.
-    /// Defaulted so a `CacheFile` written before this field decodes.
+    /// Read with `decodeIfPresent` below, so a `CacheFile` written before this field loads with
+    /// nil — no remote was recorded, and none is claimed.
     public var remoteName: String? = nil
     /// A remote-tracking ref for this branch was in `for-each-ref -- refs/remotes/`.
     ///
@@ -49,7 +50,9 @@ public struct PushInfo: Hashable, Codable, Sendable {
     /// itself: `git push origin feature` without `-u` leaves no tracking configuration and a real
     /// `origin/feature`, and the row read its reflog and then said there was no matching branch on
     /// origin (codex round 2, MAJOR 5).
-    /// Defaulted so a `CacheFile` written before this field decodes.
+    /// Read with `decodeIfPresent` below: unlike the two optionals beside it this is a `Bool`,
+    /// which a synthesized decoder demands a key for whatever default it carries — the field that
+    /// made every 1.1-era cache fail to load (packet F12).
     public var remoteRefExists: Bool = false
 
     /// The `hasConfiguredUpstream` half of the codex round 2 MAJOR 5 split, under the name the
@@ -90,6 +93,27 @@ public struct PushInfo: Hashable, Codable, Sendable {
         self.remoteTipCommitDate = remoteTipCommitDate
         self.remoteName = remoteName
         self.remoteRefExists = remoteRefExists
+    }
+
+    /// Explicit for the reason spelled out on `PRCacheEntry.init(from:)` (packet F12). Of the
+    /// three fields added here only `remoteRefExists` actually broke a load — a synthesized
+    /// decoder already reads an `Optional` property with `decodeIfPresent` — but all three are
+    /// read the same way so the rule is legible rather than a coincidence of their types. Frozen
+    /// keys stay required.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        observedPushAt = try container.decodeIfPresent(Date.self, forKey: .observedPushAt)
+        observedPushOID = try container.decodeIfPresent(String.self, forKey: .observedPushOID)
+        originMovedSince = try container.decode(Bool.self, forKey: .originMovedSince)
+        source = try container.decode(Source.self, forKey: .source)
+        hasUpstream = try container.decode(Bool.self, forKey: .hasUpstream)
+        upstreamGone = try container.decode(Bool.self, forKey: .upstreamGone)
+        aheadOfLastKnownRemote =
+            try container.decodeIfPresent(Int.self, forKey: .aheadOfLastKnownRemote)
+        remoteRefObservedAt = try container.decodeIfPresent(Date.self, forKey: .remoteRefObservedAt)
+        remoteTipCommitDate = try container.decodeIfPresent(Date.self, forKey: .remoteTipCommitDate)
+        remoteName = try container.decodeIfPresent(String.self, forKey: .remoteName)
+        remoteRefExists = try container.decodeIfPresent(Bool.self, forKey: .remoteRefExists) ?? false
     }
 }
 
