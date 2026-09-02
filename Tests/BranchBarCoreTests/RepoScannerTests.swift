@@ -279,6 +279,50 @@ struct RepoScannerScanTests {
         #expect(paths(result) == ["/Users/tester/code/app"], "one denied folder does not abort the scan")
     }
 
+    /// codex round 5, MINOR 7. The `.git` **file** of a linked worktree or a separate-git-directory
+    /// checkout was read with `try?`, so a refusal, a FIFO where the marker belongs, or a TCC
+    /// denial became an empty string — which classifies as "not a marker we can vouch for" and the
+    /// folder was walked past in silence. A repo that cannot be inspected is reported, by the
+    /// folder the user would go looking for, exactly as an unreadable directory is.
+    @Test("unreadableGitMarkerIsReportedNotHidden")
+    func unreadableGitMarkerIsReportedNotHidden() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addRepository(at: "/Users/tester/code/app")
+        fs.addGitFile(at: "/Users/tester/code/linked", gitdir: "/Users/tester/code/main/.git")
+        fs.markUnreadable("/Users/tester/code/linked/.git")
+
+        /// A recorder safe to hand a `@Sendable` callback.
+        final class Announced: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: [String] = []
+            func append(_ path: String) { lock.lock(); storage.append(path); lock.unlock() }
+            var all: [String] { lock.lock(); defer { lock.unlock() }; return storage }
+        }
+
+        let announced = Announced()
+        let scanner = RepoScanner(
+            fileSystem: fs,
+            onProgress: { event in
+                if case .unreadable(let path) = event { announced.append(path) }
+            })
+        let result = try await scanner.scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+
+        #expect(result.unreadableDirectories.contains("/Users/tester/code/linked"),
+                "a repo whose marker could not be read vanished: \(result.unreadableDirectories)")
+        #expect(announced.all.contains("/Users/tester/code/linked"),
+                "and the walk said so while there was still a process to say it")
+        #expect(paths(result) == ["/Users/tester/code/app"],
+                "it is reported, not invented as a repo, and the rest of the walk carries on")
+
+        // The complement: a marker that reads fine and simply is not one stays silent, so the
+        // report means "could not inspect" rather than "is not a repo".
+        let plain = InMemoryFileSystem(home: "/Users/tester")
+        plain.addRepository(at: "/Users/tester/code/app")
+        plain.addFile("/Users/tester/code/notes/.git", contents: "this is not a gitdir line\n")
+        let quiet = try await makeScanner(plain).scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+        #expect(quiet.unreadableDirectories.isEmpty, "\(quiet.unreadableDirectories)")
+    }
+
     // MARK: Dedupe and order
 
     /// Two candidates can name the same `--git-common-dir`: a plain checkout beside a directory

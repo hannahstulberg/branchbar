@@ -29,6 +29,11 @@
             "name" : "main",
             "prStatus" : "unavailable",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,

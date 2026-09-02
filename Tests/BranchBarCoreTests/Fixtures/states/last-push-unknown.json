@@ -28,6 +28,11 @@
             "prStatus" : "none",
             "push" : {
               "aheadOfLastKnownRemote" : 0,
+              "fetchHead" : {
+                "observed" : {
+                  "_0" : 810298800
+                }
+              },
               "hasUpstream" : true,
               "originMovedSince" : false,
               "remoteRefExists" : false,

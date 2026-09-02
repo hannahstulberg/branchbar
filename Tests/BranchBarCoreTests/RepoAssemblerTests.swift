@@ -65,7 +65,8 @@ struct RepoAssemblerTests {
         remoteRefs: [ParsedRemoteRef] = [],
         worktrees: [Worktree] = [],
         worktreesEnumerated: Bool = true,
-        fetchHeadObservedAt: Date? = nil,
+        // codex round 5, MAJOR 4: what the `FETCH_HEAD` read established, not a bare date.
+        fetchHead: FetchHeadState = .notFetchedYet,
         pushObservations: [String: ReflogObservation] = [:],
         pullRequests: [PRInfo] = [],
         authoredOpenPullRequests: [PRInfo] = [],
@@ -83,7 +84,7 @@ struct RepoAssemblerTests {
             remoteRefs: remoteRefs,
             worktrees: worktrees,
             worktreesEnumerated: worktreesEnumerated,
-            fetchHeadObservedAt: fetchHeadObservedAt,
+            fetchHead: fetchHead,
             pushObservations: pushObservations,
             pullRequests: pullRequests,
             authoredOpenPullRequests: authoredOpenPullRequests,
@@ -467,6 +468,100 @@ struct RepoAssemblerTests {
         #expect(upstreamElsewhere.openPRsNotOnThisMac.isEmpty)
     }
 
+    // MARK: - Packet F18 — codex round 5, MAJOR 2: a branch that tracks nothing owns no head
+
+    private static func forkPR(
+        _ number: Int,
+        headRefName: String,
+        headRefOid: String,
+        owner: String,
+        state: String = "OPEN"
+    ) -> PRInfo {
+        PRInfo(
+            number: number,
+            url: "https://github.com/tester/demo/pull/\(number)",
+            state: state,
+            isDraft: false,
+            reviewDecision: "",
+            updatedAt: Date(timeIntervalSince1970: 1_788_000_000),
+            baseRefName: "main",
+            headRefName: headRefName,
+            headRefOid: headRefOid,
+            headRepositoryOwnerLogin: owner)
+    }
+
+    /// codex round 5, MAJOR 2, the normal fork workflow: origin is `tester/demo`, the local branch
+    /// `feature` tracks nothing, and the PR's head is `alice:feature`. The old rule invented
+    /// origin's own owner for an untracked branch, rejected the PR as somebody else's head, and —
+    /// because an exhaustive `--head feature` query counts as full coverage — rendered "No PR"
+    /// beside an open one. The commit is what identifies the branch: one candidate sits at its tip.
+    @Test("forkPRMatchesAnUpstreamlessBranchByHeadOID")
+    func forkPRMatchesAnUpstreamlessBranchByHeadOID() throws {
+        let tip = String(repeating: "a", count: 40)
+        let fork = Self.forkPR(201, headRefName: "feature", headRefOid: tip, owner: "alice")
+
+        let repo = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("feature", oid: tip, upstream: nil)],
+            pullRequests: [fork],
+            authoredOpenPullRequests: [fork],
+            queriedHeads: ["feature"]))
+
+        let branch = try #require(Self.branch(repo, "feature"))
+        #expect(branch.pr?.number == 201, "the PR at this branch's tip is this branch's PR")
+        #expect(branch.prStatus == .open)
+        #expect(branch.prStatus != PRStatus.none, "the fork PR used to vanish behind \"No PR\"")
+        #expect(repo.openPRsNotOnThisMac.isEmpty,
+                "and it is shown once, on the row, not also under a heading saying it is elsewhere")
+    }
+
+    /// The other half of the rule: the commit has to single a candidate out. Two heads of the same
+    /// name at the same commit, or one at a different commit, establish nothing — and `notChecked`
+    /// is what the row says, never `none`, which would claim GitHub answered about this branch.
+    @Test("ambiguousForkCandidatesRenderNotChecked")
+    func ambiguousForkCandidatesRenderNotChecked() throws {
+        let tip = String(repeating: "a", count: 40)
+        let elsewhere = String(repeating: "b", count: 40)
+
+        let two = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("feature", oid: tip, upstream: nil)],
+            pullRequests: [
+                Self.forkPR(201, headRefName: "feature", headRefOid: tip, owner: "alice"),
+                Self.forkPR(202, headRefName: "feature", headRefOid: tip, owner: "bob"),
+            ],
+            queriedHeads: ["feature"]))
+        let ambiguous = try #require(Self.branch(two, "feature"))
+        #expect(ambiguous.pr == nil, "no owner and two candidates is not a match")
+        #expect(ambiguous.prStatus == .notChecked)
+
+        let apart = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("feature", oid: tip, upstream: nil)],
+            pullRequests: [
+                Self.forkPR(203, headRefName: "feature", headRefOid: elsewhere, owner: "alice")
+            ],
+            queriedHeads: ["feature"]))
+        let unmatched = try #require(Self.branch(apart, "feature"))
+        #expect(unmatched.pr == nil)
+        #expect(unmatched.prStatus == .notChecked,
+                "a candidate whose commit is not this branch's proves nothing either way")
+        #expect(unmatched.prStatus != PRStatus.none)
+    }
+
+    /// And the modal case is untouched: no candidate carries this head name, the `--head` query
+    /// answered for every owner of it, so "No PR" is a fact rather than a guess.
+    @Test("upstreamlessBranchWithNoCandidateIsNoneWhenTheHeadWasQueried")
+    func upstreamlessBranchWithNoCandidateIsNoneWhenTheHeadWasQueried() throws {
+        let queried = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("notes-cleanup", upstream: nil)],
+            pullRequests: [],
+            queriedHeads: ["notes-cleanup"]))
+        #expect(try #require(Self.branch(queried, "notes-cleanup")).prStatus == PRStatus.none)
+
+        let unqueried = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("notes-cleanup", upstream: nil)],
+            pullRequests: []))
+        #expect(try #require(Self.branch(unqueried, "notes-cleanup")).prStatus == .notChecked)
+    }
+
     /// codex round 2, MAJOR 4. A branch tracking a remote other than `origin` has a head owner
     /// this app can only learn by resolving that remote\'s URL. Falling back to the origin
     /// repository\'s owner answered a question nobody asked, and rendering `none` afterwards told
@@ -721,7 +816,7 @@ struct RepoAssemblerTests {
         let observed = RepoAssembler.assemble(Self.inputs(
             branchRefs: rows,
             remoteRefs: tips,
-            fetchHeadObservedAt: fetchedAt,
+            fetchHead: .observed(fetchedAt),
             pushObservations: ["ahead-two": observation]
         ))
         #expect(observed.branches.filter { $0.push.source != PushInfo.Source.none }

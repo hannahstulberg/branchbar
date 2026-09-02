@@ -27,6 +27,11 @@
             "prStatus" : "none",
             "push" : {
               "aheadOfLastKnownRemote" : 3,
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : true,
               "observedPushAt" : 810216000,
               "observedPushOID" : "2222222222222222222222222222222222222222",

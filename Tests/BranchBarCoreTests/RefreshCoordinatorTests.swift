@@ -931,7 +931,12 @@ struct RefreshCoordinatorLazyPullRequestTests {
         let now = Date(timeIntervalSince1970: 1_788_400_000)
         let cached = CacheFile(
             scan: scanResult(RepoStub.all, scannedAt: Date(timeIntervalSince1970: 1_788_399_000)),
-            prCache: [RepoStub.branchbar.id: PRCacheEntry(fetchedAt: now.addingTimeInterval(-60))])
+            // codex round 5, MAJOR 1: an entry answers only for the repo it names, so a warm one
+            // has to name this repo and this slug or the loader refetches.
+            prCache: [RepoStub.branchbar.id: PRCacheEntry(
+                fetchedAt: now.addingTimeInterval(-60),
+                repoID: RepoStub.branchbar.id,
+                slug: GitHubSlug(host: "github.com", owner: "hannahstulberg", name: "branchbar"))])
         let harness = makeHarness(
             policy: RefreshPolicy(debounce: 0, overallDeadline: 30, prCacheTTL: 600, eagerPRRepoCount: 0, perHeadFallbackCap: 0),
             cacheFile: cached,

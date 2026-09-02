@@ -101,7 +101,9 @@ struct PushInfoDeriverTests {
             upstream: Self.upstream("ahead-two"),
             remoteTipOID: Self.tip("origin/ahead-two")?.objectName,
             remoteTipCommitDate: tipCommitDate,
-            fetchHeadObservedAt: fetched
+            // codex round 5, MAJOR 4 made the anchor a tri-state: a date is one of its three
+            // answers, and the only one that is an observation.
+            fetchHead: .observed(fetched)
         )
         #expect(withFetchHead.remoteRefObservedAt == fetched)
         #expect(withFetchHead.remoteTipCommitDate == tipCommitDate)
@@ -219,7 +221,7 @@ struct PushInfoDeriverTests {
             upstream: ahead,
             remoteTipOID: Self.tip("origin/ahead-two")?.objectName,
             remoteTipCommitDate: ancientCommit,
-            fetchHeadObservedAt: fetchedAt
+            fetchHead: .observed(fetchedAt)
         )
         #expect(push.remoteRefObservedAt == fetchedAt)
 
@@ -254,6 +256,9 @@ struct PushInfoDeriverTests {
         // dropping the clause and letting the sentence read as if the date were merely omitted.
         var neverFetched = push
         neverFetched.remoteRefObservedAt = nil
+        // codex round 5, MAJOR 4: the anchor is a state, and "no FETCH_HEAD" is the one arm of it
+        // that means the clone has never fetched. Clearing the date alone no longer says that.
+        neverFetched.fetchHead = .notFetchedYet
         let unfetched = try tooltip(neverFetched)
         #expect(unfetched.contains(Strings.notFetchedYet), "\(unfetched)")
         #expect(!unfetched.contains("last seen"))

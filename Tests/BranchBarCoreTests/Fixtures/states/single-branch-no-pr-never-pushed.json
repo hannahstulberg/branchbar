@@ -39,6 +39,11 @@
             "name" : "notes-cleanup",
             "prStatus" : "none",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,

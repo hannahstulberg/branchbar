@@ -28,6 +28,11 @@
             "name" : "main",
             "prStatus" : "none",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,

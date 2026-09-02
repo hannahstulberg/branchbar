@@ -276,6 +276,70 @@ struct FileCacheStoreTrustTests {
         #expect(loaded.prCache[repoID]?.fetchedAt == justNow)
         #expect(loaded.lastSnapshot?.refreshedAt == justNow)
     }
+
+    // MARK: - Packet F18 — codex round 5, MINOR 8
+
+    /// codex round 5, MINOR 8. The load checks the schema version, the size, and the dates, and
+    /// checked nothing about meaning: a valid JSON entry could say `source: reflogObserved` with
+    /// no `observedPushAt`, and the presenter filled the hole with the branch's own commit date
+    /// and rendered it as "Pushed from this Mac". The cache is documented as untrusted, so a claim
+    /// with nothing behind it is taken back out at the boundary.
+    @Test("cacheEntryClaimingAnObservationWithoutADateIsDowngraded")
+    func cacheEntryClaimingAnObservationWithoutADateIsDowngraded() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let store = store(in: temp)
+
+        let committed = Date(timeIntervalSince1970: 1_788_000_000)
+        let branch = Branch(
+            name: "main",
+            tipSHA: "1111111111111111111111111111111111111111",
+            committerDate: committed,
+            upstream: Upstream(ref: "origin/main", remote: "origin"),
+            isCheckedOutInPrimary: true,
+            prStatus: PRStatus.none,
+            push: PushInfo(
+                // The shape a tampered or corrupted file can carry: a push claimed and no date.
+                observedPushAt: nil,
+                observedPushOID: "2222222222222222222222222222222222222222",
+                originMovedSince: true,
+                source: .reflogObserved,
+                hasUpstream: true,
+                remoteName: "origin",
+                remoteRefExists: true),
+            group: .active)
+        let repo = Repo(
+            id: RepoID(commonDir: "/Users/tester/demo/.git"),
+            name: "demo",
+            path: "/Users/tester/demo",
+            remoteURL: "https://github.com/tester/demo.git",
+            githubSlug: GitHubSlug(host: "github.com", owner: "tester", name: "demo"),
+            branches: [branch],
+            prLoadState: .loaded,
+            lastRefreshed: committed)
+        try store.save(CacheFile(
+            lastSnapshot: Snapshot(repos: [repo], refreshedAt: committed)))
+
+        let loaded = try #require(try store.load())
+        let restored = try #require(loaded.lastSnapshot?.repos.first?.branches.first)
+        #expect(restored.push.source == .unavailable,
+                "a push claimed with no date was loaded as an observation")
+        #expect(restored.push.observedPushAt == nil)
+        #expect(restored.push.observedPushOID == nil)
+        #expect(!restored.push.originMovedSince, "a moved-since comparison needs an OID to compare")
+
+        // And nothing downstream fills the hole with a commit date.
+        let restoredRepo = try #require(loaded.lastSnapshot?.repos.first)
+        let row = try #require(SnapshotPresenter().present(
+            Snapshot(repos: [restoredRepo], refreshedAt: committed),
+            refreshState: .idle(lastRefreshedAt: committed),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: committed).sections.first?.active.first)
+        #expect(!row.pushLabel.contains("Pushed from this Mac"), "\(row.pushLabel)")
+        #expect(row.pushLabel == Strings.pushHistoryUnavailable)
+    }
 }
 
 // MARK: - Packet F6 — codex round 2, BLOCKER 2

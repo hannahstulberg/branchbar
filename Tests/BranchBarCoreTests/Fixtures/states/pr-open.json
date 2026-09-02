@@ -40,6 +40,11 @@
             "prStatus" : "open",
             "push" : {
               "aheadOfLastKnownRemote" : 0,
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : true,
               "observedPushAt" : 810129600,
               "observedPushOID" : "1111111111111111111111111111111111111111",

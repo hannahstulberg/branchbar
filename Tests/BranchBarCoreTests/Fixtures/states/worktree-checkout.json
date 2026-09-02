@@ -26,6 +26,11 @@
             "name" : "main",
             "prStatus" : "none",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,
@@ -42,6 +47,11 @@
             "name" : "agent-task-2",
             "prStatus" : "notChecked",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,

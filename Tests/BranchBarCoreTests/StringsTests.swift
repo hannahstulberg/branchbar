@@ -268,7 +268,80 @@ enum UIStates {
         scanIncomplete,
         pushHistoryUnreadable,
         remoteBranchesUnread,
+        // codex round 5 added two, both from MAJOR 3: the row for a branch whose record of pushes
+        // was read and held nothing, and the row for one whose record was not read at all. Both
+        // used to render the same "not checked" sentence, and one of them was a lie.
+        pushNotRecorded,
+        pushHistoryUnavailable,
     ]
+
+    // 48 — codex round 5, MAJOR 3. `git push origin feature` without `-u`: no tracking
+    // configuration, a real `origin/feature`, and a record of pushes BranchBar read and found
+    // nothing in. The row said "push history not checked" under a tooltip explaining that
+    // BranchBar only reads push history for tracking branches — about a file it had just read.
+    static let pushNotRecorded = UIState(
+        id: "push-not-recorded",
+        title: "The record of pushes was read and holds nothing for this branch",
+        planReference: "§3: a fact about what BranchBar read, never about what it declined to read",
+        entries: [
+            ("noPushRecorded", Strings.noPushRecorded(
+                remoteRef: "origin/feature",
+                remoteTipCommitDate: UIClock.ago(2 * UIClock.day),
+                now: UIClock.now)),
+            ("noPushRecordedTooltip", Strings.noPushRecordedTooltip),
+            ("untrackedRemoteBranchExists", Strings.untrackedRemoteBranchExists()),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "feature",
+                    prStatus: .none,
+                    push: PushInfo(
+                        source: .checkedNoObservation,
+                        hasUpstream: false,
+                        remoteTipCommitDate: UIClock.ago(2 * UIClock.day),
+                        remoteName: "origin",
+                        remoteRefExists: true)
+                )
+            ])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 49 — codex round 5, MAJOR 3 and MAJOR 4. The repo lives on a network volume, so F15 refuses
+    // every direct read of its files: no record of pushes, and no `FETCH_HEAD` date. Neither the
+    // push line nor the ahead tooltip may turn that refusal into a claim about the repo.
+    static let pushHistoryUnavailable = UIState(
+        id: "push-history-unavailable",
+        title: "The repo's own files were not read this time",
+        planReference: "§3: a read BranchBar declined to make establishes nothing",
+        entries: [
+            ("pushHistoryUnavailable", Strings.pushHistoryUnavailable),
+            ("pushHistoryUnavailableTooltip", Strings.pushHistoryUnavailableTooltip),
+            ("fetchTimeNotChecked", Strings.fetchTimeNotChecked),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(
+                branches: [
+                    UIFixtures.branch(
+                        "feature",
+                        upstream: Upstream(ref: "origin/feature", remote: "origin", ahead: 2),
+                        prStatus: .none,
+                        push: PushInfo(
+                            source: .unavailable,
+                            hasUpstream: true,
+                            aheadOfLastKnownRemote: 2,
+                            remoteName: "origin",
+                            remoteRefExists: true,
+                            fetchHead: .unavailable)
+                    )
+                ],
+                errors: [RepoError(
+                    stage: .reflog,
+                    message: "/Volumes/work is a smbfs volume; reflog and FETCH_HEAD reads were skipped")])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
 
     // 45 — codex round 3, MAJOR 2. The scan was cut off before it drained its queue and named no
     // folder it could not read, which is what a helper killed inside an ordinary directory or an
@@ -1086,7 +1159,8 @@ enum UIStates {
         planReference: "§3: ahead renders as \"2 ahead of last-known origin\"",
         entries: [
             ("ahead", Strings.ahead(2)),
-            ("aheadTooltip", Strings.aheadTooltip(remoteObservedAt: UIClock.ago(3 * UIClock.hour), now: UIClock.now)),
+            ("aheadTooltip", Strings.aheadTooltip(
+                fetchHead: .observed(UIClock.ago(3 * UIClock.hour)), now: UIClock.now)),
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(branches: [
@@ -1367,7 +1441,7 @@ enum UIStates {
             ("ahead", Strings.ahead(2, remote: "fork")),
             ("remoteMovedSince", Strings.remoteMovedSince(remote: "fork")),
             ("aheadTooltip", Strings.aheadTooltip(
-                remote: "fork", remoteObservedAt: UIClock.ago(3 * UIClock.hour), now: UIClock.now)),
+                remote: "fork", fetchHead: .observed(UIClock.ago(3 * UIClock.hour)), now: UIClock.now)),
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(branches: [
@@ -1599,15 +1673,21 @@ struct StringsTests {
     @Test("fetchHeadTooltipDoesNotClaimOriginWasSeen")
     func fetchHeadTooltipDoesNotClaimOriginWasSeen() {
         let tooltip = Strings.aheadTooltip(
-            remoteObservedAt: UIClock.ago(3 * UIClock.hour), now: UIClock.now)
+            fetchHead: .observed(UIClock.ago(3 * UIClock.hour)), now: UIClock.now)
 
         #expect(tooltip.contains("This repo's last fetch changed FETCH_HEAD 3 hours ago"))
         #expect(!tooltip.lowercased().contains("last seen"),
                 "the date is the file's, not origin's: \(tooltip)")
 
-        let unfetched = Strings.aheadTooltip(remoteObservedAt: nil, now: UIClock.now)
+        let unfetched = Strings.aheadTooltip(fetchHead: .notFetchedYet, now: UIClock.now)
         #expect(!unfetched.lowercased().contains("last seen"))
         #expect(unfetched.contains("has not fetched yet"), "\(unfetched)")
+
+        // codex round 5, MAJOR 4: the third answer. A read that was skipped, refused, or failed
+        // says so; only an absent file says the repo has never fetched.
+        let unchecked = Strings.aheadTooltip(fetchHead: .unavailable, now: UIClock.now)
+        #expect(unchecked.contains(Strings.fetchTimeNotChecked), "\(unchecked)")
+        #expect(!unchecked.contains("has not fetched yet"), "\(unchecked)")
     }
 
     /// A blank pill is a row that says nothing. All ten `PRStatus` cases, including the three that

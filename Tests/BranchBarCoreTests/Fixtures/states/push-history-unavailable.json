@@ -4,15 +4,13 @@
 
   ],
   "expectedStrings" : [
-    "macOS is waiting for approval. Open System Settings → General → Login Items and turn BranchBar on under “Open at Login”.",
-    "Move BranchBar to your Applications folder and open it from there, then this can be turned on. Right now it is running from a temporary copy macOS made.",
-    "This only works from the BranchBar app in your Applications folder.",
-    "Move BranchBar into your Applications folder first — either /Applications or the Applications folder inside your home folder.",
-    "macOS would not add BranchBar to your login items. The log has the details."
+    "Push history not checked",
+    "BranchBar did not read this repo's record of pushes this time, so it is not saying when this branch last went out.",
+    "Fetch time not checked."
   ],
-  "id" : "launch-at-login-needs-approval",
+  "id" : "push-history-unavailable",
   "now" : 810302400,
-  "planReference" : "§3, §5b: launch at login through SMAppService with a LaunchAgent fallback",
+  "planReference" : "§3: a read BranchBar declined to make establishes nothing",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
@@ -27,26 +25,38 @@
             "committerDate" : 810129600,
             "group" : "active",
             "isCheckedOutInPrimary" : true,
-            "name" : "main",
+            "name" : "feature",
             "prStatus" : "none",
             "push" : {
+              "aheadOfLastKnownRemote" : 2,
               "fetchHead" : {
-                "notFetchedYet" : {
+                "unavailable" : {
 
                 }
               },
-              "hasUpstream" : false,
+              "hasUpstream" : true,
               "originMovedSince" : false,
-              "remoteRefExists" : false,
+              "remoteName" : "origin",
+              "remoteRefExists" : true,
               "remoteRefsKnown" : true,
-              "source" : "none",
+              "source" : "unavailable",
               "upstreamGone" : false
             },
-            "tipSHA" : "1111111111111111111111111111111111111111"
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 2,
+              "behind" : 0,
+              "isGone" : false,
+              "ref" : "origin/feature",
+              "remote" : "origin"
+            }
           }
         ],
         "errors" : [
-
+          {
+            "message" : "/Volumes/work is a smbfs volume; reflog and FETCH_HEAD reads were skipped",
+            "stage" : "reflog"
+          }
         ],
         "githubSlug" : {
           "host" : "github.com",
@@ -98,5 +108,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "The login-item toggle was flipped and macOS has not allowed it yet"
+  "title" : "The repo's own files were not read this time"
 }

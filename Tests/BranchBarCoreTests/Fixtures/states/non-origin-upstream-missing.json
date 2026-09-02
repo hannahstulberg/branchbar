@@ -26,6 +26,11 @@
             "name" : "fork-feature",
             "prStatus" : "merged",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : true,
               "observedPushAt" : 809611200,
               "observedPushOID" : "1111111111111111111111111111111111111111",

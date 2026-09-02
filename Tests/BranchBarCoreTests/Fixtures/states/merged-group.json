@@ -42,6 +42,11 @@
             "prStatus" : "merged",
             "push" : {
               "aheadOfLastKnownRemote" : 0,
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : true,
               "observedPushAt" : 810216000,
               "observedPushOID" : "1111111111111111111111111111111111111111",

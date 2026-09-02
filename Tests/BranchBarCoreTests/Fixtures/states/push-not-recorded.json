@@ -4,15 +4,13 @@
 
   ],
   "expectedStrings" : [
-    "macOS is waiting for approval. Open System Settings → General → Login Items and turn BranchBar on under “Open at Login”.",
-    "Move BranchBar to your Applications folder and open it from there, then this can be turned on. Right now it is running from a temporary copy macOS made.",
-    "This only works from the BranchBar app in your Applications folder.",
-    "Move BranchBar into your Applications folder first — either /Applications or the Applications folder inside your home folder.",
-    "macOS would not add BranchBar to your login items. The log has the details."
+    "No push from this Mac recorded for origin/feature · newest commit on origin/feature dated 2 days ago",
+    "BranchBar read this repo's record of pushes for this branch and found none it can date. It cannot see pushes made from your other computers.",
+    "origin has a branch of the same name, which this branch does not track"
   ],
-  "id" : "launch-at-login-needs-approval",
+  "id" : "push-not-recorded",
   "now" : 810302400,
-  "planReference" : "§3, §5b: launch at login through SMAppService with a LaunchAgent fallback",
+  "planReference" : "§3: a fact about what BranchBar read, never about what it declined to read",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
@@ -27,7 +25,7 @@
             "committerDate" : 810129600,
             "group" : "active",
             "isCheckedOutInPrimary" : true,
-            "name" : "main",
+            "name" : "feature",
             "prStatus" : "none",
             "push" : {
               "fetchHead" : {
@@ -37,9 +35,11 @@
               },
               "hasUpstream" : false,
               "originMovedSince" : false,
-              "remoteRefExists" : false,
+              "remoteName" : "origin",
+              "remoteRefExists" : true,
               "remoteRefsKnown" : true,
-              "source" : "none",
+              "remoteTipCommitDate" : 810129600,
+              "source" : "checkedNoObservation",
               "upstreamGone" : false
             },
             "tipSHA" : "1111111111111111111111111111111111111111"
@@ -98,5 +98,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "The login-item toggle was flipped and macOS has not allowed it yet"
+  "title" : "The record of pushes was read and holds nothing for this branch"
 }

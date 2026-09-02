@@ -309,10 +309,14 @@ struct RepoLoaderTests {
         Self.stubGH(runner)
 
         let fetchedAt = Self.now.addingTimeInterval(-60)
+        // codex round 5, MAJOR 1: a cache entry answers for the repository it names, so a warm
+        // entry carries the slug and the common directory this refresh will re-resolve.
         let cached = PRCacheEntry(
             fetchedAt: fetchedAt,
             prs: try PRListDecoder.decode(Fixture.data("synthetic-gh-pr-list-mixed.json")),
-            authorPRs: [])
+            authorPRs: [],
+            repoID: Self.discovered.id,
+            slug: GH.slug)
 
         let repo = await Self.loader(runner).load(
             Self.discovered, wantsPullRequests: true, cachedPRs: cached, now: Self.now)
@@ -335,7 +339,10 @@ struct RepoLoaderTests {
         _ = await Self.loader(fresh, policy: policy).load(
             Self.discovered,
             wantsPullRequests: true,
-            cachedPRs: PRCacheEntry(fetchedAt: Self.now.addingTimeInterval(-599)),
+            cachedPRs: PRCacheEntry(
+                fetchedAt: Self.now.addingTimeInterval(-599),
+                repoID: Self.discovered.id,
+                slug: GH.slug),
             now: Self.now)
         #expect(Self.ghCalls(fresh).isEmpty)
 
@@ -345,10 +352,85 @@ struct RepoLoaderTests {
         let repo = await Self.loader(stale, policy: policy).load(
             Self.discovered,
             wantsPullRequests: true,
-            cachedPRs: PRCacheEntry(fetchedAt: Self.now.addingTimeInterval(-601)),
+            cachedPRs: PRCacheEntry(
+                fetchedAt: Self.now.addingTimeInterval(-601),
+                repoID: Self.discovered.id,
+                slug: GH.slug),
             now: Self.now)
         #expect(!Self.ghCalls(stale).isEmpty, "past the TTL the repo is asked again")
         #expect(repo.prFetchedAt == Self.now, "and the answer is dated now")
+    }
+
+    // MARK: - Packet F18 — codex round 5, MAJOR 1: an entry answers for one repository
+
+    /// codex round 5, MAJOR 1. `prCache` is keyed by `RepoID`, which is a path. Point the same
+    /// checkout at a second GitHub repository — `git remote set-url origin`, or delete and
+    /// recreate the repo at that path — and a fresh entry fetched for the first one answered for
+    /// the second: its pills, and an "Open PR" link into another repository. A warm entry is used
+    /// only when it names the slug this refresh just read.
+    @Test("prCacheForAnotherSlugIsIgnored")
+    func prCacheForAnotherSlugIsIgnored() async throws {
+        let runner = RecordedCommandRunner()
+        Self.stubGitStages(runner)
+        Self.stubGH(runner)
+
+        // Fetched 60 s ago — well inside the TTL — for `tester/other`, while origin now reads
+        // `tester/demo`.
+        let cached = PRCacheEntry(
+            fetchedAt: Self.now.addingTimeInterval(-60),
+            prs: try PRListDecoder.decode(Fixture.data("synthetic-gh-pr-list-mixed.json")),
+            authorPRs: [],
+            repoID: Self.discovered.id,
+            slug: GitHubSlug(host: "github.com", owner: "tester", name: "other"))
+
+        let result = await Self.loader(runner).loadReportingPRCache(
+            Self.discovered, wantsPullRequests: true, cachedPRs: cached, now: Self.now)
+
+        #expect(!Self.ghCalls(runner).isEmpty, "another repository's answer was served as this one's")
+        #expect(result.repo.branches.allSatisfy { $0.pr == nil },
+                "no branch may wear a PR fetched for a different repository")
+        #expect(result.prCache?.slug == GH.slug, "the entry kept is the one this refresh fetched")
+        #expect(result.prCache?.repoID == Self.discovered.id)
+    }
+
+    /// The other half of the key. The identity revalidation resolved the current common directory
+    /// and then used the cached entry anyway, so a `.git` that moved — a checkout replaced under
+    /// the same path — kept answering with the old repository's PRs.
+    @Test("prCacheForAnotherCommonDirIsIgnored")
+    func prCacheForAnotherCommonDirIsIgnored() async throws {
+        let runner = RecordedCommandRunner()
+        Self.stubGitStages(runner)
+        Self.stubGH(runner)
+
+        let cached = PRCacheEntry(
+            fetchedAt: Self.now.addingTimeInterval(-60),
+            prs: try PRListDecoder.decode(Fixture.data("synthetic-gh-pr-list-mixed.json")),
+            authorPRs: [],
+            repoID: RepoID(commonDir: "/Users/tester/somewhere-else/.git"),
+            slug: GH.slug)
+
+        let result = await Self.loader(runner).loadReportingPRCache(
+            Self.discovered, wantsPullRequests: true, cachedPRs: cached, now: Self.now)
+
+        #expect(!Self.ghCalls(runner).isEmpty,
+                "an entry fetched for another checkout answered for this one")
+        #expect(result.prCache?.repoID == Self.discovered.id,
+                "and the entry written back names the directory `rev-parse` just re-resolved")
+    }
+
+    /// An entry written before either field existed records neither, and "no slug recorded" is not
+    /// "the slug you have": it is refetched rather than believed.
+    @Test("prCacheWithNoRecordedIdentityIsIgnored")
+    func prCacheWithNoRecordedIdentityIsIgnored() async throws {
+        let runner = RecordedCommandRunner()
+        Self.stubGitStages(runner)
+        Self.stubGH(runner)
+
+        let cached = PRCacheEntry(fetchedAt: Self.now.addingTimeInterval(-60))
+        _ = await Self.loader(runner).load(
+            Self.discovered, wantsPullRequests: true, cachedPRs: cached, now: Self.now)
+
+        #expect(!Self.ghCalls(runner).isEmpty)
     }
 
     // MARK: - The eager path
@@ -716,7 +798,9 @@ struct RepoLoaderTests {
                     + "\u{1F}origin/shipped\u{1F}origin\u{1F}\u{1F}*\n")))
             Self.stubGitStages(runner)
             let cached = PRCacheEntry(
-                fetchedAt: Self.now, prs: [mergedPR], authorPRs: [], queriedHeads: ["shipped"])
+                fetchedAt: Self.now, prs: [mergedPR], authorPRs: [], queriedHeads: ["shipped"],
+                // codex round 5, MAJOR 1: the repository this answer was fetched for.
+                repoID: Self.discovered.id, slug: GH.slug)
             return await Self.loader(runner).load(
                 Self.discovered, wantsPullRequests: true, cachedPRs: cached, now: Self.now)
         }
@@ -944,9 +1028,96 @@ struct RepoLoaderRoundThreeTests {
             appVersion: "0.9.0",
             now: Self.now).sections.first?.active.first)
 
-        #expect(row.pushLabel == Strings.pushHistoryNotChecked)
+        // codex round 5, MAJOR 3 sharpened this line. The remote listing failed, and separately
+        // this branch's record of pushes was read and held nothing — which is a fact about this
+        // Mac, not about the listing, and is what the row now says. Both prohibitions stand: it
+        // still may not claim there is no tracked remote branch and may not claim it is in sync.
+        #expect(row.pushLabel == Strings.noPushRecorded(
+            remoteRef: "origin/main", remoteTipCommitDate: nil, now: Self.now))
         #expect(!row.pushLabel.contains("No tracked remote branch"))
         #expect(row.aheadLabel?.contains("In sync") != true, "\(row.aheadLabel ?? "nil")")
+    }
+
+    // MARK: - Packet F18 — codex round 5, MAJOR 3: what the read did travels with the row
+
+    /// codex round 5, MAJOR 3. `git push origin feature` without `-u` leaves no tracking
+    /// configuration and a real `origin/feature`, so the loader reads that ref's record of pushes.
+    /// When it holds nothing the row used to read "No tracked remote branch · push history not
+    /// checked", under a tooltip saying BranchBar only reads push history for tracking branches —
+    /// about a file this loop had just opened.
+    @Test("checkedOriginBranchWithNoObservationDoesNotSayNotChecked")
+    func checkedOriginBranchWithNoObservationDoesNotSayNotChecked() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory(Argv.repo)
+        // No reflog file for `origin/feature`: read, and nothing in it.
+        let runner = RecordedCommandRunner()
+        runner.stubGit(
+            Argv.remoteRefs,
+            stdout: "refs/remotes/origin/feature\u{1f}2222222222222222222222222222222222222222\u{1f}1788200000\n")
+        Self.stubGit(
+            runner,
+            worktrees: "",
+            heads: "refs/heads/feature\u{1f}1111111111111111111111111111111111111111\u{1f}1788300000\u{1f}\u{1f}\u{1f}\u{1f}*\n")
+
+        let repo = await Self.loader(runner, fileSystem: fs).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let branch = try #require(repo.branches.first { $0.name == "feature" })
+        #expect(branch.upstream == nil, "the branch tracks nothing")
+        #expect(branch.push.source == .checkedNoObservation,
+                "the record was read and held nothing, which is not `none`")
+
+        let row = try #require(SnapshotPresenter().present(
+            Snapshot(repos: [repo], refreshedAt: Self.now),
+            refreshState: .idle(lastRefreshedAt: Self.now),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: Self.now).sections.first?.active.first)
+
+        #expect(row.pushLabel.contains("No push from this Mac recorded for origin/feature"),
+                "\(row.pushLabel)")
+        #expect(!row.pushLabel.lowercased().contains("not checked"), "\(row.pushLabel)")
+        #expect(!row.pushTooltip.contains(Strings.noTrackedRemoteBranchTooltip),
+                "the tooltip claimed BranchBar had not checked a file it read: \(row.pushTooltip)")
+        // The remote tip's commit date may ride along, and only as a commit date.
+        #expect(!row.pushLabel.contains("Pushed from this Mac"), "\(row.pushLabel)")
+    }
+
+    /// The same finding on a gone upstream: the ref is missing, so there is no tip date to fall
+    /// back to, and the row collapsed to the same "not checked" sentence about a record that had
+    /// been read.
+    @Test("goneUpstreamWordingDoesNotClaimNotChecked")
+    func goneUpstreamWordingDoesNotClaimNotChecked() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory(Argv.repo)
+        let runner = RecordedCommandRunner()
+        Self.stubGit(
+            runner,
+            worktrees: "",
+            heads: "refs/heads/feature\u{1f}1111111111111111111111111111111111111111\u{1f}1788300000"
+                + "\u{1f}origin/feature\u{1f}origin\u{1f}gone\u{1f}*\n")
+
+        let repo = await Self.loader(runner, fileSystem: fs).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let branch = try #require(repo.branches.first { $0.name == "feature" })
+        #expect(branch.push.upstreamGone)
+        #expect(branch.push.source == .checkedNoObservation)
+
+        let row = try #require(SnapshotPresenter().present(
+            Snapshot(repos: [repo], refreshedAt: Self.now),
+            refreshState: .idle(lastRefreshedAt: Self.now),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: Self.now).sections.first?.active.first)
+
+        #expect(row.pushLabel == Strings.noPushRecorded(
+            remoteRef: "origin/feature", remoteTipCommitDate: nil, now: Self.now))
+        #expect(!row.pushLabel.lowercased().contains("not checked"), "\(row.pushLabel)")
+        #expect(row.aheadLabel?.contains(Strings.upstreamMissing) == true,
+                "the tertiary line still says the upstream is missing: \(row.aheadLabel ?? "nil")")
     }
 }
 
@@ -1041,6 +1212,43 @@ struct RepoOnUntrustedVolumeTests {
 
     /// A mount point that will not describe itself has already stopped answering; that is the
     /// same skip, arrived at through `statfs` failing rather than through a filesystem type.
+    // MARK: - Packet F18 — codex round 5, MAJOR 4
+
+    /// codex round 5, MAJOR 4. F15 refuses the `FETCH_HEAD` read on a network volume on purpose,
+    /// and the refusal arrived at the presenter as the same `nil` an absent file produces — so an
+    /// ahead branch on a company file share told the user "This repo has not fetched yet" about a
+    /// repo that fetches every day. Only an open that answered `ENOENT` may say that.
+    @Test("refusedFetchHeadReadIsNotReportedAsNeverFetched")
+    func refusedFetchHeadReadIsNotReportedAsNeverFetched() async throws {
+        let runner = Self.runner()
+        let fs = Self.fileSystem(volume: .network(type: "smbfs"))
+        let now = Date(timeIntervalSince1970: 1_788_400_000)
+
+        let repo = await Self.loader(runner, fs).load(
+            DiscoveredRepo(path: Argv.repo, id: RepoID(commonDir: Argv.commonDirectory)),
+            wantsPullRequests: false,
+            cachedPRs: nil,
+            now: now)
+
+        let ahead = try #require(repo.branches.first { $0.name == "ahead-two" })
+        #expect(ahead.push.fetchHead == .unavailable,
+                "a read this app refused to make was recorded as an absent file")
+        #expect(ahead.push.source == .unavailable,
+                "and the same refusal covers the record of pushes")
+
+        let row = try #require(SnapshotPresenter().present(
+            Snapshot(repos: [repo], refreshedAt: now),
+            refreshState: .idle(lastRefreshedAt: now),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: now).sections.first?.active.first { $0.title == "ahead-two" })
+
+        #expect(row.pushTooltip.contains(Strings.fetchTimeNotChecked), "\(row.pushTooltip)")
+        #expect(!row.pushTooltip.contains(Strings.notFetchedYet),
+                "the tooltip claimed the repo has never fetched: \(row.pushTooltip)")
+    }
+
     @Test("repoOnAVolumeThatCannotBeStattedSkipsDirectFileReads")
     func repoOnAVolumeThatCannotBeStattedSkipsDirectFileReads() async throws {
         let runner = Self.runner()

@@ -28,6 +28,11 @@
             "prStatus" : "open",
             "push" : {
               "aheadOfLastKnownRemote" : 2,
+              "fetchHead" : {
+                "observed" : {
+                  "_0" : 810291600
+                }
+              },
               "hasUpstream" : true,
               "observedPushAt" : 810216000,
               "observedPushOID" : "2222222222222222222222222222222222222222",

@@ -79,6 +79,11 @@
             "name" : "main",
             "prStatus" : "notChecked",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,

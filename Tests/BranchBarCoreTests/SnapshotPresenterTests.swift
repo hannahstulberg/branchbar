@@ -204,9 +204,12 @@ struct SnapshotPresenterTests {
         // codex round 3 added three, one per finding that named a state with no row:
         // `scan-incomplete` (MAJOR 2), `push-history-unreadable` (MAJOR 7),
         // `remote-branches-unread` (MAJOR 6).
+        // codex round 5 added two, both MAJOR 3: `push-not-recorded` (read, and empty) and
+        // `push-history-unavailable` (not read at all), which used to be one sentence saying the
+        // second thing about both.
         #expect(
-            stateFixtureIDs.count == 48,
-            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1, codex round 2 added 5, F11 added 2, codex round 3 added 3; found \(stateFixtureIDs.count)")
+            stateFixtureIDs.count == 50,
+            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1, codex round 2 added 5, F11 added 2, codex round 3 added 3, codex round 5 added 2; found \(stateFixtureIDs.count)")
 
         // Nothing is exempted that no fixture actually asks for.
         var contracted: Set<String> = []
@@ -377,7 +380,8 @@ struct SnapshotPresenterTests {
         #expect(!ahead.lowercased().contains("behind"))
         // The tooltip carries the anchor, so "2 ahead" is never read as an absolute commit count.
         #expect(row.pushTooltip.contains(Strings.aheadTooltip(
-            remoteObservedAt: UIClock.ago(3 * UIClock.hour),
+            // codex round 5, MAJOR 4: the anchor is the tri-state, and a date is the observed arm.
+            fetchHead: .observed(UIClock.ago(3 * UIClock.hour)),
             now: UIClock.now
         )))
     }
@@ -1133,5 +1137,110 @@ struct SnapshotPresenterRoundThreeTests {
         #expect(row.pushTooltip == Strings.pushHistoryUnreadableTooltip)
         #expect(!row.pushLabel.contains("ago"), "a date was reported over the corruption")
         #expect(!row.pushLabel.contains("Last push unknown"))
+    }
+}
+
+
+// MARK: - Packet F18 — codex round 5, MAJOR 1 and MAJOR 5
+
+/// The two things only the presenter can decide: which link belongs to the repository a row sits
+/// under, and whether the repo's own checkout has a row at all.
+@Suite("A row offers its own repository's link, and the main checkout always has a row")
+struct PresenterRepositoryIdentityTests {
+
+    private static func present(_ repo: Repo) -> SnapshotVM {
+        SnapshotPresenter().present(
+            UIFixtures.snapshot([repo]),
+            refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: uiAppVersion,
+            now: UIClock.now)
+    }
+
+    private static func pr(_ number: Int, url: String, headRefName: String) -> PRInfo {
+        PRInfo(
+            number: number,
+            url: url,
+            state: "OPEN",
+            isDraft: false,
+            reviewDecision: "",
+            updatedAt: UIClock.ago(UIClock.hour),
+            baseRefName: "main",
+            headRefName: headRefName,
+            headRefOid: UIFixtures.tipSHA,
+            headRepositoryOwnerLogin: "tester")
+    }
+
+    /// codex round 5, MAJOR 1, the half a user can click. A PR URL is serialized into
+    /// `cache.json`, so an entry fetched before this checkout's origin was repointed carries a
+    /// link into another repository — on an allowed GitHub host, which is all the shell's own
+    /// check can ask about. The row that does not belong to this repository offers no link.
+    @Test("cachedPRURLForAnotherRepoIsNotOffered")
+    func cachedPRURLForAnotherRepoIsNotOffered() throws {
+        let foreign = Self.pr(7, url: "https://github.com/tester/other/pull/7", headRefName: "feature")
+        let own = Self.pr(8, url: "https://github.com/tester/demo/pull/8", headRefName: "main")
+
+        let repo = UIFixtures.repo(branches: [
+            UIFixtures.branch("feature", pr: foreign, prStatus: .open),
+            UIFixtures.branch("main", pr: own, prStatus: .open),
+        ])
+        let section = try #require(Self.present(repo).sections.first)
+
+        let stale = try #require(section.active.first { $0.title == "feature" })
+        #expect(stale.prURL == nil, "clicking this row opened another repository's PR")
+        let mine = try #require(section.active.first { $0.title == "main" })
+        #expect(mine.prURL == "https://github.com/tester/demo/pull/8",
+                "this repo's own address is still offered")
+
+        // The same rule for the group whose rows are nothing but a link.
+        let elsewhere = UIFixtures.repo(
+            branches: [UIFixtures.branch("main", prStatus: PRStatus.none)],
+            openPRsNotOnThisMac: [
+                Self.pr(9, url: "https://github.com/tester/other/pull/9", headRefName: "orphan")
+            ])
+        #expect(try #require(Self.present(elsewhere).sections.first).openElsewhere.isEmpty,
+                "a row whose only content is a foreign link is not a row")
+    }
+
+    /// codex round 5, MAJOR 5, in the shape `branchbar-cli` prints for a real repo whose main
+    /// checkout sits on a commit with no branch. The GUI filter excluded the primary worktree, so
+    /// nothing represented that checkout: no branch row claims it, and the detached-row filter
+    /// skipped it. The repo the user is working in was absent from its own section.
+    @Test("detachedPrimaryCheckoutIsARowInThePopover")
+    func detachedPrimaryCheckoutIsARowInThePopover() throws {
+        let repo = UIFixtures.repo(
+            worktrees: [
+                Worktree(
+                    path: "\(UIFixtures.home)/demo",
+                    headSHA: "abc1234def5678",
+                    branch: nil,
+                    isPrimary: true)
+            ],
+            branches: [
+                UIFixtures.branch("main", isCheckedOutInPrimary: false, prStatus: PRStatus.none)
+            ])
+        let section = try #require(Self.present(repo).sections.first)
+
+        let detached = try #require(
+            section.active.first { $0.worktreeMarker == Strings.detachedWorktree(shortSHA: "abc1234") },
+            "the main checkout has no row at all")
+        #expect(detached.title == "demo", "the row is the repo's own folder")
+        #expect(detached.primaryAction?.payload == "\(UIFixtures.home)/demo",
+                "and it opens the repository root")
+        #expect(detached.prPill == nil, "there is no branch here, so there is no PR to show")
+        #expect(detached.pushLabel.isEmpty, "and no push fact is invented for it")
+
+        // The branch rows are still there, and no branch claims the detached checkout.
+        #expect(section.active.contains { $0.title == "main" })
+
+        // A repo folder this refresh could not open as a directory offers no click, the same rule
+        // every other row follows (codex round 3, BLOCKER 1).
+        var unopenable = repo
+        unopenable.pathIsDirectory = false
+        let refused = try #require(Self.present(unopenable).sections.first?.active.first {
+            $0.worktreeMarker == Strings.detachedWorktree(shortSHA: "abc1234")
+        })
+        #expect(refused.primaryAction == nil)
     }
 }

@@ -29,6 +29,11 @@
             "prStatus" : "none",
             "push" : {
               "aheadOfLastKnownRemote" : 0,
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : true,
               "originMovedSince" : false,
               "remoteName" : "origin",

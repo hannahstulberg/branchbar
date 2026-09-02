@@ -26,6 +26,11 @@
             "name" : "hotfix",
             "prStatus" : "notChecked",
             "push" : {
+              "fetchHead" : {
+                "notFetchedYet" : {
+
+                }
+              },
               "hasUpstream" : false,
               "observedPushAt" : 810129600,
               "observedPushOID" : "1111111111111111111111111111111111111111",
