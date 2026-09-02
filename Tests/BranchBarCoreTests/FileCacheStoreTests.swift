@@ -1,0 +1,197 @@
+import Foundation
+import Testing
+
+@testable import BranchBarCore
+
+/// The cache is a latency optimisation, never a source of truth (PLAN.md §3), so every way it
+/// can be wrong has to read as "no cache" rather than as an error the user sees. And the write
+/// has to be atomic: a crash mid-save must leave the previous cache loadable
+/// (`interruptedSaveLeavesPreviousCacheIntact`).
+@Suite("FileCacheStore loads forgivingly and saves atomically")
+struct FileCacheStoreTests {
+
+    /// Whole seconds only: `.iso8601` has no fractional-second component, so a `Date` with a
+    /// fractional part would not survive the round trip and the equality check would be a lie
+    /// about the encoder rather than about the store.
+    private static func date(_ seconds: TimeInterval) -> Date {
+        Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func sampleCache() -> CacheFile {
+        CacheFile(
+            schemaVersion: CacheFile.currentSchemaVersion,
+            scan: nil,
+            manuallyAddedRepos: ["/Users/tester/work", "/Users/tester/Dropbox/repos"],
+            hiddenRepoIDs: [RepoID(commonDir: "/Users/tester/work/old/.git")],
+            collapsedRepoIDs: [RepoID(commonDir: "/Users/tester/work/big/.git")],
+            prCache: [
+                RepoID(commonDir: "/Users/tester/work/branchbar/.git"): PRCacheEntry(
+                    fetchedAt: date(1_756_000_000),
+                    prs: [
+                        PRInfo(
+                            number: 12,
+                            url: "https://github.com/tester/branchbar/pull/12",
+                            state: "OPEN",
+                            isDraft: false,
+                            reviewDecision: "",
+                            updatedAt: date(1_755_900_000),
+                            baseRefName: "main",
+                            headRefName: "-my-branch",
+                            headRefOid: "0123456789abcdef0123456789abcdef01234567",
+                            headRepositoryOwnerLogin: "tester"
+                        )
+                    ],
+                    authorPRs: []
+                )
+            ],
+            lastSnapshot: nil
+        )
+    }
+
+    private func store(in temp: Packet25TempDir) -> FileCacheStore {
+        FileCacheStore(fileURL: temp.file("cache.json"))
+    }
+
+    @Test("roundTripsCacheFile")
+    func roundTripsCacheFile() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let store = store(in: temp)
+        let cache = Self.sampleCache()
+
+        try store.save(cache)
+        let loaded = try store.load()
+
+        #expect(loaded == cache)
+        // `prCache` is keyed by `RepoID`, which is not a `String`, so it lands as a flat
+        // alternating key/value array — key object, then value object. That is what PLAN.md §5
+        // specifies (Models/Cache.swift), and it round-trips.
+        let text = try String(contentsOf: temp.file("cache.json"), encoding: .utf8)
+        #expect(text.contains("\"prCache\":[{\"commonDir\""))
+    }
+
+    @Test("savedJSONUsesISO8601DatesAndSortedKeys")
+    func savedJSONUsesISO8601DatesAndSortedKeys() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        try store(in: temp).save(Self.sampleCache())
+
+        let text = try String(contentsOf: temp.file("cache.json"), encoding: .utf8)
+
+        // `.iso8601`, not a bare `Double` seconds-since-reference-date.
+        #expect(text.contains("2025-08-24T01:46:40Z"))
+        // `.sortedKeys`: a stable byte-for-byte file, so an unchanged cache is an unchanged file.
+        let collapsed = try #require(text.range(of: "\"collapsedRepoIDs\"")).lowerBound
+        let hidden = try #require(text.range(of: "\"hiddenRepoIDs\"")).lowerBound
+        let manual = try #require(text.range(of: "\"manuallyAddedRepos\"")).lowerBound
+        let schema = try #require(text.range(of: "\"schemaVersion\"")).lowerBound
+        #expect(collapsed < hidden)
+        #expect(hidden < manual)
+        #expect(manual < schema)
+    }
+
+    @Test("missingFileLoadsNil")
+    func missingFileLoadsNil() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+
+        #expect(try store(in: temp).load() == nil)
+
+        // A cache directory that does not exist yet is the first-launch case, also nil.
+        let neverCreated = FileCacheStore(fileURL: temp.url.appendingPathComponent("no/such/dir/cache.json"))
+        #expect(try neverCreated.load() == nil)
+    }
+
+    @Test("corruptJSONLoadsNil")
+    func corruptJSONLoadsNil() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+
+        try Data("{ this is not json".utf8).write(to: temp.file("cache.json"))
+        #expect(try store(in: temp).load() == nil)
+
+        // Valid JSON of the wrong shape is equally "no cache", not a thrown decode error.
+        try Data("[1, 2, 3]".utf8).write(to: temp.file("cache.json"))
+        #expect(try store(in: temp).load() == nil)
+
+        // So is an empty file, which is what a truncated write would leave.
+        try Data().write(to: temp.file("cache.json"))
+        #expect(try store(in: temp).load() == nil)
+    }
+
+    /// PLAN.md §5: an unknown `schemaVersion` loads nil rather than migrating.
+    @Test("unknownSchemaVersionLoadsNil")
+    func unknownSchemaVersionLoadsNil() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+
+        var future = Self.sampleCache()
+        future.schemaVersion = CacheFile.currentSchemaVersion + 41
+        try store(in: temp).save(future)
+
+        // The file is well-formed and decodable — only the version is unknown.
+        #expect(try store(in: temp).load() == nil)
+
+        var older = Self.sampleCache()
+        older.schemaVersion = 0
+        try store(in: temp).save(older)
+        #expect(try store(in: temp).load() == nil)
+    }
+
+    /// The write lands with `replaceItemAt` from a temp file in the same directory, so a save
+    /// that fails partway leaves the previous `cache.json` byte-for-byte intact. The failure is
+    /// simulated by making the directory unwritable, which is where a real interruption
+    /// (full disk, crash before the rename) would show up.
+    @Test("interruptedSaveLeavesPreviousCacheIntact")
+    func interruptedSaveLeavesPreviousCacheIntact() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let manager = FileManager.default
+        let store = store(in: temp)
+
+        let good = Self.sampleCache()
+        try store.save(good)
+        let bytesBefore = try Data(contentsOf: temp.file("cache.json"))
+
+        var replacement = Self.sampleCache()
+        replacement.manuallyAddedRepos = ["/Users/tester/should-never-land"]
+
+        // r-x: the existing cache.json is still readable, but no temp file can be created and
+        // no rename can happen.
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: temp.url.path)
+        defer { try? manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: temp.url.path) }
+
+        #expect(throws: (any Error).self) { try store.save(replacement) }
+
+        #expect(try Data(contentsOf: temp.file("cache.json")) == bytesBefore)
+        #expect(try store.load() == good)
+
+        // And no half-written scratch file is left behind once the directory is writable again.
+        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: temp.url.path)
+        let leftovers = try manager.contentsOfDirectory(atPath: temp.url.path)
+        #expect(leftovers == ["cache.json"], "unexpected leftovers: \(leftovers)")
+    }
+
+    @Test("savingCreatesTheApplicationSupportDirectoryOnFirstLaunch")
+    func savingCreatesTheDirectory() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+
+        let nested = temp.url
+            .appendingPathComponent("Library/Application Support/BranchBar", isDirectory: true)
+            .appendingPathComponent("cache.json", isDirectory: false)
+        let store = FileCacheStore(fileURL: nested)
+
+        try store.save(Self.sampleCache())
+
+        #expect(FileManager.default.fileExists(atPath: nested.path))
+        #expect(try store.load() == Self.sampleCache())
+    }
+
+    @Test("defaultFileURLIsUnderApplicationSupport")
+    func defaultFileURLIsUnderApplicationSupport() {
+        let url = FileCacheStore.defaultFileURL(homeDirectory: "/Users/tester")
+
+        #expect(url.path == "/Users/tester/Library/Application Support/BranchBar/cache.json")
+    }
+}
