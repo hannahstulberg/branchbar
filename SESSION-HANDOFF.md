@@ -1,21 +1,21 @@
 # SESSION HANDOFF — BranchBar
 
-**Last updated:** 2026-09-02 06:00 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+**Last updated:** 2026-09-02 07:30 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
 
 ## Current state
 
-- **Phase / packet:** 3.3 accepted (320c086). `v0.9.0` tagged at 4c2cacc; CI release job builds and attaches the zip. In flight: 4.3 (ShellStrings → Strings, prURL, repo path). Queued: 5.2 docs, Gate 5 (NYT tester on v0.9.0 by 09-12), 5.1b v1.0.0.
-- **Suite:** 256 passing
-- **In-flight agents:** 4.3 (packets/4.3.md).
+- **Phase / packet:** Pre-ship gate. 4.3 (56d3f49) and 5.2 docs (db8281f) accepted. codex ship review = DO NOT SHIP; v0.9.0 marked superseded pre-release. Fix wave in flight: F1 (shell security), F2 (Core honesty), F3 (runtime). gsd-code-reviewer still running (REVIEW.md in scratchpad/review/).
+- **Suite:** 257 passing before the fix wave
+- **In-flight agents:** F1, F2, F3 (specs packets/F1-3.md), gsd-code-reviewer.
 - **Blocked on:** nothing. Hannah's own packet 0.0 items are open: ask Andrew Lisy whether JobRunner opened on NYT-managed Macs; name the NYT tester and their macOS version.
 
 ## Next steps (in order)
 
-1. Accept 3.3 (scan under deadline, resource-values enumeration, TCC folders last); commit; push; confirm CI.
-2. Dispatch 4.3 (small Core+shell follow-up: move shell strings into Strings.swift + exemption list; BranchRowVM.prURL; RepoSectionVM.path; docs/UI-CONTRACT regenerate).
-3. 5.1a: bump VERSION to 0.9.0, `make zip`, tag v0.9.0, Release with zip + sha256 + install note; send to NYT tester (Gate 5 by 09-12).
-4. Dispatch 5.2 docs (packets/5.2.md). Then Gate 4 screenshot review with Hannah (dist/screens/).
-5. Hannah: Gate 0b NYT tester result, Gate 4.0 read of docs/UI-CONTRACT.md, Andrew Lisy question, Cursor push check.
+1. Accept F1/F2/F3 (verify at SHA, zero weakened tests, full suite green, `make doc-strings`/`make doc-refs`); commit; push; CI green.
+2. Fold gsd-code-reviewer findings: fix / defer / reject each in DECISION-LOG; dispatch F4 if anything material remains.
+3. Re-run codex challenge on the fixed code; require no BLOCKER. Then bump VERSION 0.9.1, tag, CI release; send to the NYT tester (Gate 5 by 09-12).
+4. Sync ARCHITECTURE.md (`make doc-refs`) and README wording for the changed strings.
+5. Hannah: Gate 0b spike result, Gate 4 screenshots feedback, Andrew Lisy question.
 
 ## Re-read order for a fresh session
 
