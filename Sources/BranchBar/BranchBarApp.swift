@@ -2,27 +2,103 @@ import AppKit
 import BranchBarCore
 import SwiftUI
 
-// MARK: - Version and machine identity
+// MARK: - App delegate
 
-/// Version as the tester sees it. `Bundle.main` is authoritative once the app is bundled; the
-/// hardcoded core version covers `swift run`, where there is no Info.plist.
-///
-/// Reading a *version string* out of `Bundle.main` is fine. Reading a *path* out of it is not:
-/// the 0.2 spike proved a quarantined bundle runs app-translocated out of
-/// `/private/var/folders/…/AppTranslocation/…`, so nothing may be derived from `bundlePath`.
-enum SpikeIdentity {
-    static var version: String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-        switch (short, build) {
-        case let (short?, build?): return "\(short) (\(build))"
-        case let (short?, nil): return short
-        default: return "\(BranchBarCore.version) (unbundled)"
+/// Menu-bar-only agent app. `LSUIElement` in Info.plist keeps it out of the Dock when launched
+/// from a bundle; `setActivationPolicy(.accessory)` covers the un-bundled case (`swift run`) and is
+/// harmless when the plist already said so.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Fixture mode's window. Held so it is not deallocated the moment it is ordered front.
+    private var fixtureWindow: NSWindow?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        Log.info(
+            "launched v\(AppModel.version) · macOS "
+                + "\(ProcessInfo.processInfo.operatingSystemVersionString) · \(Self.chip)")
+
+        let model = AppModel.shared
+
+        // Gate 4 wants one screenshot per state in light *and* dark, and a script cannot flip the
+        // system setting for it. In fixture mode only, `BRANCHBAR_APPEARANCE=light|dark` pins this
+        // app's own appearance; unset, it follows the Mac like every other app.
+        if model.previewStateID != nil,
+           let name = ProcessInfo.processInfo.environment["BRANCHBAR_APPEARANCE"] {
+            switch name {
+            case "light": NSApp.appearance = NSAppearance(named: .aqua)
+            case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+            default: Log.info("appearance: ignoring BRANCHBAR_APPEARANCE=\(name)")
+            }
+        }
+
+        if let state = model.previewStateID {
+            // `BRANCHBAR_STATE_FIXTURE` renders one recorded §5a state with no git, no `gh`, and no
+            // cache. The window exists so the state can be laid out and screenshotted without
+            // clicking a status item — the 0.2 spike proved `screencapture` cannot see one.
+            showFixtureWindow(for: model, state: state)
+            return
+        }
+
+        model.refresh(reason: .launch)
+    }
+
+    /// Lays the popover's own view out in an ordinary window and logs `rendered state <id>` once
+    /// SwiftUI has actually built the body — so the log line is evidence the state rendered, not
+    /// evidence the JSON parsed.
+    private func showFixtureWindow(for model: AppModel, state: String) {
+        let hosting = NSHostingView(rootView: RootView(model: model))
+        hosting.frame = NSRect(x: 0, y: 0, width: Metrics.popoverWidth, height: 600)
+        hosting.layoutSubtreeIfNeeded()
+
+        let size = hosting.fittingSize
+        let height = max(120, min(size.height, Metrics.maxPopoverHeight))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: Metrics.popoverWidth, height: height),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false)
+        window.title = "BranchBar — \(state)"
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.center()
+        window.orderFrontRegardless()
+        fixtureWindow = window
+
+        // One turn of the run loop so the hosting view has drawn before anything screenshots it.
+        DispatchQueue.main.async {
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            let shot = ProcessInfo.processInfo.environment["BRANCHBAR_STATE_SHOT"]
+            if let shot, !shot.isEmpty { Self.writePNG(of: hosting, to: shot) }
+            Log.info("rendered state \(state) · window \(window.windowNumber) · height \(Int(height))")
         }
     }
 
-    static var osVersion: String {
-        ProcessInfo.processInfo.operatingSystemVersionString
+    /// The grant-free half of the screenshot pipeline. `screencapture -l` and ScreenCaptureKit both
+    /// need Screen Recording; `cacheDisplay` asks the view to draw itself into a bitmap the app
+    /// already owns, so a headless run on a Mac that has granted nothing still produces the real
+    /// pixels. scripts/screenshot-states.sh prefers `screencapture` and falls back to this.
+    private static func writePNG(of view: NSView, to path: String) {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            Log.info("shot: could not make a bitmap for \(path)")
+            return
+        }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            Log.info("shot: could not encode a PNG for \(path)")
+            return
+        }
+        let url = URL(fileURLWithPath: path)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            try data.write(to: url, options: .atomic)
+            Log.info("shot: wrote \(path) (\(data.count) bytes, \(rep.pixelsWide)x\(rep.pixelsHigh))")
+        } catch {
+            Log.info("shot: could not write \(path): \(error)")
+        }
     }
 
     /// `uname -m`, without shelling out.
@@ -30,198 +106,34 @@ enum SpikeIdentity {
         var info = utsname()
         guard uname(&info) == 0 else { return "unknown" }
         return withUnsafeBytes(of: &info.machine) { raw in
-            let bytes = raw.prefix(while: { $0 != 0 })
-            return String(decoding: bytes, as: UTF8.self)
+            String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
         }
-    }
-}
-
-// MARK: - Model
-
-@MainActor
-final class SpikeModel: ObservableObject {
-    @Published var ghReport = "Not checked yet."
-    @Published var folderReport = "No folder added yet."
-    @Published var isChecking = false
-    @Published var didCopy = false
-
-    func checkGitHubCLI() async {
-        guard !isChecking else { return }
-        isChecking = true
-        ghReport = "Checking…"
-        Log.info("action: check github cli")
-
-        let report = await SpikeChecks.ghAuthStatus()
-
-        ghReport = report
-        isChecking = false
-        Log.info("gh report:\n\(report)")
-    }
-
-    func addFolder() {
-        Log.info("action: add folder (opening panel)")
-
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Add folder"
-        panel.message = "Pick a folder and BranchBar will list the repos it can see inside it."
-
-        // An accessory app is never frontmost, so the panel would open behind everything.
-        NSApp.activate(ignoringOtherApps: true)
-
-        guard panel.runModal() == .OK, let url = panel.url else {
-            folderReport = "Folder pick cancelled."
-            Log.info("action: add folder cancelled")
-            return
-        }
-
-        let repos = SpikeChecks.listGitDirs(under: url)
-        let shown = repos.prefix(20)
-
-        var report = "Folder: \(url.path)\nRepos found: \(repos.count)"
-        if repos.isEmpty {
-            report += "\n(none — either there are no repos in this folder, or macOS did not let BranchBar read it)"
-        } else {
-            report += "\n" + shown.map { "  \($0)" }.joined(separator: "\n")
-            if repos.count > shown.count {
-                report += "\n  …and \(repos.count - shown.count) more"
-            }
-        }
-
-        folderReport = report
-        Log.info("folder report:\n\(report)")
-    }
-
-    /// Everything a tester needs to paste back, in one clipboard write.
-    func copyReport() {
-        let text = """
-            BranchBar spike report
-            version: \(SpikeIdentity.version)
-            macOS: \(SpikeIdentity.osVersion)
-            chip: \(SpikeIdentity.chip)
-
-            === Check GitHub CLI ===
-            \(ghReport)
-
-            === Add folder… ===
-            \(folderReport)
-            """
-
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-
-        Log.info("action: copy report (\(text.count) characters)")
-        didCopy = true
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            didCopy = false
-        }
-    }
-}
-
-// MARK: - Views
-
-/// Fixed-height scroller so a long `gh auth status` cannot push Quit off the bottom of the popover.
-private struct ReportBox: View {
-    let title: String
-    let text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            ScrollView {
-                Text(text)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
-            }
-            .frame(height: 110)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-    }
-}
-
-private struct SpikeView: View {
-    @StateObject private var model = SpikeModel()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("BranchBar spike v\(SpikeIdentity.version)")
-                .font(.headline)
-
-            HStack(spacing: 8) {
-                Button("Check GitHub CLI") {
-                    Task { await model.checkGitHubCLI() }
-                }
-                .disabled(model.isChecking)
-
-                Button("Add folder…") { model.addFolder() }
-            }
-
-            ReportBox(title: "Check GitHub CLI", text: model.ghReport)
-            ReportBox(title: "Add folder…", text: model.folderReport)
-
-            HStack {
-                Button(model.didCopy ? "Copied" : "Copy report") { model.copyReport() }
-                Spacer()
-                Button("Quit") {
-                    Log.info("action: quit")
-                    NSApp.terminate(nil)
-                }
-            }
-        }
-        .padding(12)
-        .frame(width: 380)
-        .onAppear { Log.info("menu opened") }
     }
 }
 
 // MARK: - App
 
-/// Menu-bar-only agent app. `LSUIElement` in Info.plist keeps it out of the Dock when
-/// launched from a bundle; `setActivationPolicy(.accessory)` covers the un-bundled case
-/// (`swift run`) and is harmless when the plist already said so.
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
-        Log.info(
-            "launched v\(SpikeIdentity.version) · macOS \(SpikeIdentity.osVersion) · \(SpikeIdentity.chip)"
-        )
-
-        // Verification hook. A status item cannot be clicked from a script and `screencapture`
-        // cannot see it (0.2 spike), so this is how the GUI-launched gh check gets proved:
-        //
-        //   launchctl setenv BRANCHBAR_SPIKE_AUTORUN 1
-        //   open /Applications/BranchBar.app
-        //   launchctl unsetenv BRANCHBAR_SPIKE_AUTORUN
-        //
-        // `launchctl setenv` is required — `open` does not forward the shell's environment, which
-        // is the whole reason ToolLocator exists. Harmless when unset, and left in for Gate 0b so
-        // a tester who cannot describe what they saw can still produce a log line.
-        if ProcessInfo.processInfo.environment["BRANCHBAR_SPIKE_AUTORUN"] == "1" {
-            Log.info("autorun: BRANCHBAR_SPIKE_AUTORUN=1")
-            Task {
-                let report = await SpikeChecks.ghAuthStatus()
-                Log.info("autorun gh report:\n\(report)")
-            }
-        }
-    }
-}
-
 @main
 struct BranchBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @ObservedObject private var model = AppModel.shared
 
     var body: some Scene {
-        MenuBarExtra("BranchBar", systemImage: "arrow.triangle.branch") {
-            SpikeView()
+        MenuBarExtra {
+            RootView(model: model)
+                // `.window` re-runs `onAppear` on every open (0.2 spike item 7), which is exactly
+                // where the on-open refresh belongs. The coordinator's 30 s debounce is what keeps
+                // a user who opens and closes the popover four times from walking their repos four
+                // times, so this asks unconditionally and lets Core decide.
+                .onAppear {
+                    Log.info("popover opened")
+                    model.refresh(reason: .popoverOpen)
+                }
+        } label: {
+            // Template symbol: monochrome, and it never conveys state — the menu bar item looks the
+            // same whether a PR is approved or the refresh failed.
+            Image(systemName: Glyph.menuBar)
+                .accessibilityLabel(Strings.menuBarAccessibilityLabel)
         }
         .menuBarExtraStyle(.window)
     }
