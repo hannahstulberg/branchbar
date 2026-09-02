@@ -1,8 +1,8 @@
 #!/bin/bash
 # Assemble dist/BranchBar.app from a release SwiftPM build.
 #
-# Minimal by design (PLAN.md §5b): packet 0.2 needs only build -> layout -> Info.plist ->
-# PkgInfo -> ad-hoc sign -> verify. Packet 5.1 hardens it (icns, ditto zip, sha256).
+# Order (PLAN.md §5b): build -> layout -> Info.plist -> PkgInfo -> icns -> ad-hoc sign
+# -> verify. `make zip` adds the ditto archive and its sha256 on top of this.
 #
 #   ARCHS="arm64"            # default, the handout arch
 #   ARCHS="arm64 x86_64"     # universal; slices are lipo'd together
@@ -51,6 +51,12 @@ sed -e "s/__VERSION__/$VERSION/g" \
     Resources/Info.plist.template > "$APP/Contents/Info.plist"
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+
+# --- app icon ---------------------------------------------------------------
+# Must land before codesign: the signature seals Contents/Resources, so an icns
+# copied in afterwards invalidates it. Info.plist's CFBundleIconFile names AppIcon.
+scripts/make-icns.sh
+cp .build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # --- sign last, then verify -------------------------------------------------
 codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
