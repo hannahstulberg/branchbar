@@ -21,6 +21,12 @@ public struct RefreshPolicy: Hashable, Codable, Sendable {
     public var ghAuthTimeout: TimeInterval
     /// "`gh pr list` 25 s".
     public var ghListTimeout: TimeInterval
+    /// The repo *discovery* walk, which runs inside the refresh rather than ahead of it (packet
+    /// 3.3). Shorter than `overallDeadline` on purpose: a scan that has not finished in 20 s is
+    /// blocked on something — on packet 4.1's first launch, a pending TCC consent dialog — and
+    /// the repos it already found are worth more than the ones it might still reach. Defaulted,
+    /// so a `RefreshPolicy` encoded before the field existed still decodes.
+    public var scanDeadline: TimeInterval = 20
 
     public static let `default` = RefreshPolicy()
 
@@ -33,7 +39,8 @@ public struct RefreshPolicy: Hashable, Codable, Sendable {
         perHeadFallbackCap: Int = 20,
         gitTimeout: TimeInterval = 10,
         ghAuthTimeout: TimeInterval = 10,
-        ghListTimeout: TimeInterval = 25
+        ghListTimeout: TimeInterval = 25,
+        scanDeadline: TimeInterval = 20
     ) {
         self.debounce = debounce
         self.overallDeadline = overallDeadline
@@ -44,5 +51,6 @@ public struct RefreshPolicy: Hashable, Codable, Sendable {
         self.gitTimeout = gitTimeout
         self.ghAuthTimeout = ghAuthTimeout
         self.ghListTimeout = ghListTimeout
+        self.scanDeadline = scanDeadline
     }
 }

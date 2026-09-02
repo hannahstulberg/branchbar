@@ -34,9 +34,14 @@ public struct RepoScanner: Sendable {
         let scannedAt = Date()
         var accumulator = Walk()
 
-        walk(root: policy.homeRoot, maxDepth: policy.maxDepth, policy: policy, into: &accumulator)
-        for root in policy.extraRoots {
-            walk(root: root, maxDepth: nil, policy: policy, into: &accumulator)
+        walk(
+            root: policy.homeRoot,
+            maxDepth: policy.maxDepth,
+            policy: policy,
+            deferTCCGatedFolders: true,
+            into: &accumulator)
+        for root in policy.extraRoots where !accumulator.truncated {
+            walk(root: root, maxDepth: nil, policy: policy, deferTCCGatedFolders: false, into: &accumulator)
         }
 
         let repos = await resolve(accumulator.candidates)
@@ -50,9 +55,19 @@ public struct RepoScanner: Sendable {
             depthCutDirectories: accumulator.depthCutDirectories,
             skippedHiddenDirectories: accumulator.skippedHiddenDirectories,
             skippedWorktreeCheckouts: accumulator.skippedWorktreeCheckouts,
-            skippedSubmodules: accumulator.skippedSubmodules
+            skippedSubmodules: accumulator.skippedSubmodules,
+            truncatedByDeadline: accumulator.truncated
         )
     }
+
+    /// The three folders under the home root macOS gates behind a consent dialog. The walk opens
+    /// them **after** every other directory it will ever open, so a dialog the user has not
+    /// answered can only block the tail of the scan: every repo outside them is already found and
+    /// already in the result (`tccGatedFoldersAreEnumeratedLast`). The rule is about these three
+    /// folders as children of the home root, not about the words — a `Documents` deeper in the
+    /// tree, or one inside a folder the user added through "Add folder…", is walked in turn,
+    /// because the panel already granted it and there is no dialog left to wait for.
+    public static let tccGatedFolderNames = ["Desktop", "Documents", "Downloads"]
 
     /// Reads a `.git` file's `gitdir: <path>` line and classifies the checkout: a path inside
     /// `…/.git/worktrees/` is a linked worktree whose **common directory** is everything before
@@ -112,21 +127,60 @@ public struct RepoScanner: Sendable {
         var skippedHiddenDirectories = 0
         var skippedWorktreeCheckouts: [String] = []
         var skippedSubmodules: [String] = []
+        /// The walk stopped on cancellation with directories still queued.
+        var truncated = false
+
+        /// A folder the walk was cut off before it could finish is reported the same way a folder
+        /// macOS refused to open is: not scanned, recoverable by granting access or rescanning.
+        /// The folder named is the pending directory's own ancestor directly under the scan root,
+        /// because "Not scanned: Documents" is the fact the user can act on and
+        /// `Documents/notes/vendor` is not.
+        mutating func reportNotScanned(_ path: String) {
+            guard !unreadableDirectories.contains(path) else { return }
+            unreadableDirectories.append(path)
+        }
     }
 
     /// Breadth-first with an explicit `(path, depth)` queue. `maxDepth` is `nil` for an
     /// "Add folder…" root, which has no limit at all (PLAN.md §3).
+    ///
+    /// Two things the queue carries beyond the plain walk (packet 3.3). `deferTCCGatedFolders`
+    /// holds the root's `Desktop`, `Documents` and `Downloads` back until everything else has
+    /// been opened, so a pending consent dialog cannot block a repo that is elsewhere. And the
+    /// loop checks cancellation once per directory, before the listing that can block: a
+    /// cancelled walk stops where it is, marks the result truncated, and names the folders it
+    /// never reached, rather than throwing away the repos it already found.
     private func walk(
         root: String,
         maxDepth: Int?,
         policy: ScanPolicy,
+        deferTCCGatedFolders: Bool,
         into accumulator: inout Walk
     ) {
-        var queue: [(path: String, depth: Int)] = [(Self.normalized(root), 0)]
+        let rootPath = Self.normalized(root)
+        var queue: [(path: String, depth: Int)] = [(rootPath, 0)]
+        var deferred: [(path: String, depth: Int)] = []
         var next = 0
+        var flushedDeferred = false
 
-        while next < queue.count {
+        while true {
+            if next == queue.count {
+                guard !flushedDeferred, !deferred.isEmpty else { break }
+                flushedDeferred = true
+                queue.append(contentsOf: deferred)
+                deferred.removeAll()
+                continue
+            }
+
             let (path, depth) = queue[next]
+
+            if Task.isCancelled {
+                accumulator.truncated = true
+                for pending in queue[next...] + deferred {
+                    accumulator.reportNotScanned(Self.topLevelFolder(of: pending.path, under: rootPath))
+                }
+                return
+            }
             next += 1
 
             let entries: [DirectoryEntry]
@@ -184,9 +238,23 @@ public struct RepoScanner: Sendable {
                     accumulator.depthCutDirectories += 1
                     continue
                 }
-                queue.append((Self.normalized(entry.path), depth + 1))
+                let child = (path: Self.normalized(entry.path), depth: depth + 1)
+                if deferTCCGatedFolders, depth == 0, Self.tccGatedFolderNames.contains(entry.name) {
+                    deferred.append(child)
+                } else {
+                    queue.append(child)
+                }
             }
         }
+    }
+
+    /// The ancestor of `path` that sits directly under `root`, or `root` itself when `path` is
+    /// the root. What the "Not scanned" row names when a walk is cut short.
+    private static func topLevelFolder(of path: String, under root: String) -> String {
+        guard path.hasPrefix(root + "/") else { return path }
+        let remainder = path.dropFirst(root.count + 1)
+        let first = remainder.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        return root + "/" + first
     }
 
     /// A single-component entry matches a directory **name** at any depth; a multi-component

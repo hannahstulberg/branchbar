@@ -75,6 +75,12 @@ public struct ScanResult: Hashable, Codable, Sendable {
     public var skippedWorktreeCheckouts: [String]
     /// `.git` files pointing into `…/modules/…`; submodules are never listed as repos.
     public var skippedSubmodules: [String]
+    /// The walk was cancelled before it drained its queue, so `repos` is what it had found by
+    /// then rather than everything there is (packet 3.3). `RefreshCoordinator` bounds the scan
+    /// with `RefreshPolicy.scanDeadline` and treats a truncated result as unusable, so the next
+    /// refresh walks the tree again instead of trusting a list that was cut short. Defaulted, so
+    /// a `ScanResult` written before the field existed still decodes.
+    public var truncatedByDeadline: Bool = false
 
     public init(
         policy: ScanPolicy,
@@ -85,7 +91,8 @@ public struct ScanResult: Hashable, Codable, Sendable {
         depthCutDirectories: Int = 0,
         skippedHiddenDirectories: Int = 0,
         skippedWorktreeCheckouts: [String] = [],
-        skippedSubmodules: [String] = []
+        skippedSubmodules: [String] = [],
+        truncatedByDeadline: Bool = false
     ) {
         self.policy = policy
         self.scannedAt = scannedAt
@@ -96,5 +103,6 @@ public struct ScanResult: Hashable, Codable, Sendable {
         self.skippedHiddenDirectories = skippedHiddenDirectories
         self.skippedWorktreeCheckouts = skippedWorktreeCheckouts
         self.skippedSubmodules = skippedSubmodules
+        self.truncatedByDeadline = truncatedByDeadline
     }
 }

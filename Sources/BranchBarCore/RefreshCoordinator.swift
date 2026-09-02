@@ -160,12 +160,18 @@ public actor RefreshCoordinator {
         // 1. The repo list. It comes from the scan and nothing else: a repo is present because
         // the cached scan or a fresh scan lists it, which is what drops a vanished path without
         // ever issuing a command against it (`repoWhosePathVanishedIsDroppedWithNote`).
+        //
+        // A scan that was cut short is not a usable scan: packet 4.1's first launch hung inside
+        // the walk while macOS held TCC consent dialogs open, and a truncated list persisted as
+        // if it were complete would keep a repo missing until the 7-day age check expired.
         let cachedScan = cacheFile.scan
         let scanIsUsable = cachedScan.map {
-            !$0.repos.isEmpty && startedAt.timeIntervalSince($0.scannedAt) <= Self.scanMaxAge
+            !$0.repos.isEmpty
+                && !$0.truncatedByDeadline
+                && startedAt.timeIntervalSince($0.scannedAt) <= Self.scanMaxAge
         } ?? false
         if rescan || !scanIsUsable {
-            if let fresh = try? await scanner.scan(policy: resolvedScanPolicy(from: cacheFile)) {
+            if let fresh = await scanWithinDeadline(resolvedScanPolicy(from: cacheFile)) {
                 cacheFile.scan = fresh
             }
         }
@@ -308,6 +314,49 @@ public actor RefreshCoordinator {
 
         finish(persisted: snapshot)
         return snapshot
+    }
+
+    /// What one bounded scan hands back.
+    private enum ScanOutcome: Sendable {
+        case finished(ScanResult?)
+        case deadline
+    }
+
+    /// Runs the discovery walk **inside** a deadline, which is the whole point of packet 3.3: the
+    /// scan used to run ahead of the deadline-bearing task group, so a walk that blocked — on
+    /// packet 4.1's first launch, in `~/Documents` behind a pending TCC dialog — hung the refresh
+    /// with nothing able to end it.
+    ///
+    /// `policy.scanDeadline` is a bound, not a delay: a scan that finishes returns immediately.
+    /// When the bound wins, the scanner is cancelled and its **partial** result is taken, so the
+    /// refresh proceeds with the repos already discovered, `ScanResult.truncatedByDeadline`
+    /// makes the next refresh rescan, and the folders the walk never reached ride the snapshot
+    /// path as `unreadableDirectories`, which the presenter already turns into the "Not scanned"
+    /// notice and its action.
+    private func scanWithinDeadline(_ scanPolicy: ScanPolicy) async -> ScanResult? {
+        await withTaskGroup(of: ScanOutcome.self, returning: ScanResult?.self) { [scanner, sleep, policy] group in
+            group.addTask {
+                .finished(try? await scanner.scan(policy: scanPolicy))
+            }
+            group.addTask {
+                try? await sleep(policy.scanDeadline)
+                return .deadline
+            }
+
+            var result: ScanResult?
+            for await outcome in group {
+                switch outcome {
+                case .deadline:
+                    // Cancel the walk and keep waiting: it answers with what it found.
+                    group.cancelAll()
+                case .finished(let scan):
+                    result = scan
+                    group.cancelAll()
+                    return result
+                }
+            }
+            return result
+        }
     }
 
     /// Clears the in-flight slot and records what the debounce measures from. Called on the
