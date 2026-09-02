@@ -24,17 +24,57 @@ public struct ReflogShowEntry: Hashable, Codable, Sendable {
 /// Pure parser over `git reflog show` stdout.
 public enum ReflogParser {
 
-    /// OWNER: packet 2.1 — split each non-empty line on U+001F into three fields and return one
-    /// `ReflogShowEntry` per line in git's order (newest first), throwing on a line whose field
-    /// count is not three.
-    public static func parse(_ output: String) throws -> [ReflogShowEntry] {
-        fatalError("OWNER: packet 2.1 — split `git reflog show` rows on U+001F into [ReflogShowEntry], newest first.")
+    /// A row that does not match the frozen `%gd%x1f%gs%x1f%H` format. Recoverable, never a trap.
+    public enum ParseError: Error, Hashable, Sendable, CustomStringConvertible {
+        case wrongFieldCount(expected: Int, found: Int, line: String)
+
+        public var description: String {
+            switch self {
+            case let .wrongFieldCount(expected, found, line):
+                return "reflog show row has \(found) fields, expected \(expected): \(line)"
+            }
+        }
     }
 
-    /// OWNER: packet 2.1 — extract the unix timestamp from between the braces of `%gd` and apply
-    /// the same deletion-boundary rule as the file reader, returning the newest `update by push`
-    /// entry above the boundary as a `ReflogObservation`, or nil when there is none.
+    /// Split each non-empty line on U+001F into three fields and return one entry per line in
+    /// git's order, which is newest first.
+    public static func parse(_ output: String) throws -> [ReflogShowEntry] {
+        try output
+            .components(separatedBy: "\n")
+            .map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
+            .filter { !$0.isEmpty }
+            .map { line in
+                let fields = line
+                    .split(separator: "\u{1F}", omittingEmptySubsequences: false)
+                    .map(String.init)
+                guard fields.count == 3 else {
+                    throw ParseError.wrongFieldCount(expected: 3, found: fields.count, line: line)
+                }
+                return ReflogShowEntry(selector: fields[0], message: fields[1], objectName: fields[2])
+            }
+    }
+
+    /// Reduce the entries to the newest push observation, applying the same deletion-boundary
+    /// rule as the file reader: the walk stops at the first all-zero OID, and the first
+    /// `update by push` above it wins. The timestamp comes from inside the braces of `%gd`,
+    /// which under `--date=unix` reads `origin/main@{1788317856}`.
     public static func observation(from entries: [ReflogShowEntry]) -> ReflogObservation? {
-        fatalError("OWNER: packet 2.1 — reduce [ReflogShowEntry] to the newest push observation, reading the timestamp from inside the braces of %gd and stopping at the deletion boundary.")
+        for entry in entries {
+            guard !entry.objectName.isAllZeroOID else { return nil }
+            guard entry.message.hasPrefix("update by push") else { continue }
+            guard let pushedAt = unixTime(inSelector: entry.selector) else { continue }
+            return ReflogObservation(pushedAt: pushedAt, newOID: entry.objectName)
+        }
+        return nil
+    }
+
+    /// `origin/feature/2026-09@{1788100000}` → 1788100000. The ref's own name can carry digits,
+    /// slashes, and dashes, so the search anchors on the last `@{` and the trailing `}`.
+    static func unixTime(inSelector selector: String) -> Date? {
+        guard selector.hasSuffix("}"),
+              let open = selector.range(of: "@{", options: .backwards) else { return nil }
+        let digits = selector[open.upperBound..<selector.index(before: selector.endIndex)]
+        guard let seconds = TimeInterval(digits) else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 }

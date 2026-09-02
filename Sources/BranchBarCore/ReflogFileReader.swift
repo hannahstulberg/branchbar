@@ -18,19 +18,64 @@ public struct ReflogFileReader: Sendable {
             .appendingPathComponent("logs/refs/remotes/\(remote)/\(branch)")
     }
 
-    /// OWNER: packet 2.1 — read the reflog file for this remote-tracking branch and return
-    /// `parse`'s result, returning nil (never throwing) when the file is absent, and throwing
-    /// only when the file exists but cannot be read.
+    /// Read the reflog file for this remote-tracking branch and return `parse`'s result.
+    ///
+    /// An absent file is nil and never an error — a branch that was never pushed has no reflog —
+    /// while a file that exists and cannot be read throws, so `RepoLoader` can surface it as a
+    /// `RepoError(stage: .reflog)` instead of silently reporting "never pushed".
     public func observation(commonDirectory: String, remote: String, branch: String) throws -> ReflogObservation? {
-        fatalError("OWNER: packet 2.1 — read <common dir>/logs/refs/remotes/<remote>/<branch> and return the newest usable push observation, nil when the file is absent or holds no usable line.")
+        let path = Self.reflogPath(commonDirectory: commonDirectory, remote: remote, branch: branch)
+        guard fileSystem.fileExists(atPath: path) else { return nil }
+        let data = try fileSystem.readFile(atPath: path)
+        return Self.parse(String(decoding: data, as: UTF8.self))
     }
 
-    /// OWNER: packet 2.1 — walk the lines newest-first, stop at the first line whose **new** OID
-    /// is all zeros (the deletion boundary, so a push before a delete-and-recreate is never
-    /// attributed to the new incarnation), and return the first `update by push` line above that
-    /// boundary as `ReflogObservation(pushedAt: field 5, newOID: field 2)`; return nil for an
-    /// empty, fetch-only, or deletion-only file.
+    /// Walk the lines newest-first, stop at the first line whose **new** OID is all zeros (the
+    /// deletion boundary, so a push before a delete-and-recreate is never attributed to the new
+    /// incarnation), and return the first `update by push` line above that boundary. An empty,
+    /// fetch-only, or deletion-only file yields nil, which sends `PushInfoDeriver` to the
+    /// tip-commit-date fallback.
     public static func parse(_ contents: String) -> ReflogObservation? {
-        fatalError("OWNER: packet 2.1 — parse reflog file contents newest-first, stopping at the all-zero-new-OID deletion boundary, returning the newest `update by push` line above it.")
+        for line in contents.components(separatedBy: "\n").reversed() {
+            guard let entry = Entry(line: line) else { continue }
+            // Only the NEW OID is a boundary: an all-zero OLD OID is a branch creation
+            // (`creationLineWithAllZeroOldOIDIsNotADeletionBoundary`).
+            guard !entry.newOID.isAllZeroOID else { return nil }
+            guard entry.message.hasPrefix("update by push") else { continue }
+            return ReflogObservation(pushedAt: entry.timestamp, newOID: entry.newOID)
+        }
+        return nil
+    }
+
+    /// One reflog line, split the way the format guarantees rather than by field index: the
+    /// author's name carries spaces, so the unix time and the timezone are counted from the end
+    /// of the header (`reflogFileLastUsablePushLineParsesUnixTimestampFromField5`).
+    struct Entry {
+        var newOID: String
+        var timestamp: Date
+        var message: String
+
+        init?(line rawLine: String) {
+            let line = rawLine.hasSuffix("\r") ? String(rawLine.dropLast()) : rawLine
+            guard !line.isEmpty else { return nil }
+
+            let halves = line.components(separatedBy: "\t")
+            guard halves.count >= 2 else { return nil }
+            let header = halves[0].split(separator: " ").map(String.init)
+            // old OID, new OID, author name (≥ 1 word), email, unix time, timezone.
+            guard header.count >= 6, let seconds = TimeInterval(header[header.count - 2]) else { return nil }
+
+            newOID = header[1]
+            timestamp = Date(timeIntervalSince1970: seconds)
+            message = halves.dropFirst().joined(separator: "\t")
+        }
+    }
+}
+
+extension String {
+    /// `git push --delete` writes a line whose new OID is all zeros; the message still says
+    /// `update by push`, so only the OID can tell a deletion from a push.
+    var isAllZeroOID: Bool {
+        !isEmpty && allSatisfy { $0 == "0" }
     }
 }
