@@ -42,29 +42,293 @@ The app holds no credentials. `gh` authenticates itself from its own keyring; Br
 
 ## §2 Key flows
 
-Filled in as packets land: refresh sequence (3.2), push-time decision tree (2.1), scan classification (2.4), PR matching (2.3), packet DAG (PLAN.md §8).
+Five mechanisms someone has to understand before editing safely. A diagram changes in the same commit as the code it describes.
+
+### §2.1 One refresh
+
+Coalescing, the bounded scan, the concurrency cap, progressive emits, and the lazy `gh` fetch, all owned by `RefreshCoordinator`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as AppModel
+    participant RC as RefreshCoordinator
+    participant SC as RepoScanner
+    participant RL as RepoLoader
+    participant EXT as git and gh
+    participant CS as CacheStore
+
+    UI->>RC: refresh(force, expandedRepoIDs, tools)
+    alt A refresh is already in flight
+        RC-->>UI: Await that task and return its snapshot, no second walk
+    else Under the 30 s debounce and force is false
+        RC-->>UI: Return the last snapshot, no command runs
+    else Git is missing
+        RC-->>UI: Return the cached snapshot, the tool notice carries the reason
+    else Run one refresh
+        RC->>CS: load()
+        alt Scan absent, truncated, or older than 7 days
+            RC->>SC: Walk under the 20 s scan deadline, gated folders last
+            SC-->>RC: ScanResult, partial when the deadline wins
+        end
+        RC-->>UI: Emit the cached rows once at launch, every row marked stale
+        loop Repos in the order computed once, at most 4 at a time
+            RC->>RL: load(repo, wantsPullRequests)
+            RL->>EXT: git rev-parse, config, both for-each-ref, worktree list
+            RL->>EXT: One reflog file read per branch that has an upstream
+            opt Repo is expanded or in the launch top 5, and the PR cache is past 10 min
+                RL->>EXT: gh pr list recent 100, per-head fallback capped at 20, author @me
+            end
+            RL-->>RC: Repo plus the PRCacheEntry to keep
+            RC-->>UI: Emit every row again, order unchanged
+        end
+        opt The 45 s overall deadline arrives first
+            RC->>RL: Cancel the group, which terminates every child process
+            RC->>RC: Mark unfinished repos stale with a deadlineExceeded error
+        end
+        RC->>CS: save(CacheFile) through a temp file and replaceItemAt
+        RC-->>UI: Final snapshot
+    end
+```
+
+A cancel and a deadline are deliberately different: the deadline persists what it has, `cancel()` persists nothing and leaves the last emitted snapshot on screen.
+
+### §2.2 What a row may claim about a push
+
+Every branch of this tree ends in wording, because the trap this mechanism exists to avoid is presenting a commit date as an observed push.
+
+```mermaid
+graph TD
+    A{"Does the branch have an upstream?"} -->|"No"| A1["Source: none. Row reads Never pushed from this Mac, with no date and no count"]
+    A -->|"Yes"| B{"Does the reflog file for that remote branch exist?"}
+    B -->|"No"| F["Source: tipCommitDate"]
+    B -->|"Yes"| C["Walk the lines newest first"]
+    C --> D{"Is the new OID on this line all zeros?"}
+    D -->|"Yes: a push deletion, the boundary"| F
+    D -->|"No, and an all-zero old OID is a creation, not a boundary"| E{"Does the message start with update by push?"}
+    E -->|"No: fetch, pull, or reset"| C
+    E -->|"Yes"| G["Source: reflogObserved. Timestamp and new OID come off this line"]
+    G --> H{"Does the observed OID equal the remote-tracking tip?"}
+    H -->|"Yes"| I["Row reads Pushed from this Mac 2 days ago"]
+    H -->|"No"| J["originMovedSince. Row adds origin has moved since"]
+    F --> K{"Is there a remote-tracking tip with a date?"}
+    K -->|"Yes"| L["Row reads Last push unknown, newest commit dated 2 days ago"]
+    K -->|"No"| A1
+    A1 --> M["Upstream gone: the ahead count is nil, an observation still stands, and the row adds Upstream missing from last-known origin"]
+    J --> M
+    I --> M
+    L --> M
+```
+
+Three facts the wording keeps apart: this clone observed a push, this clone knows only a commit date, and nothing about the branch is known at all. Lines expire after 90 days, and a push from another machine is invisible to this file by design. `GitClient.reflogShow` carries PLAN.md §5's secondary `git reflog show` fallback and is pinned by a live-repo test; `RepoLoader` does not call it, so the shipping path is the file read and then the tip commit date.
+
+### §2.3 How a folder becomes a repo row
+
+```mermaid
+graph TD
+    A["Queue the scan root at depth 0"] --> B{"Is the walk cancelled?"}
+    B -->|"Yes"| B1["Mark the result truncated, name every folder still queued as not scanned, keep the repos already found"]
+    B -->|"No"| C{"Can the directory be listed?"}
+    C -->|"No: TCC denial or permissions"| C1["Record the path in unreadableDirectories, which the row Not scanned reads"]
+    C -->|"Yes"| D{"Does it hold a .git entry?"}
+    D -->|".git is a directory"| D1["Candidate. Common directory hint is path plus /.git, and the walk does not descend"]
+    D -->|".git is a file"| E{"What does the gitdir line point at?"}
+    D -->|"No .git entry"| G["Enqueue every child directory"]
+    E -->|"Inside .git/worktrees/"| E1["Worktree checkout: counted in skippedWorktreeCheckouts, never its own row"]
+    E -->|"Inside .git/modules/"| E2["Submodule: counted in skippedSubmodules"]
+    E -->|"Anywhere else"| D1
+    E -->|"No gitdir line"| G
+    G --> H{"Skip this child?"}
+    H -->|"Symlink"| H1["Skipped: following one turns the home scan unbounded"]
+    H -->|"Hidden name"| H2["Counted in skippedHiddenDirectories"]
+    H -->|"On the literal skip list, such as Library or node_modules"| H3["Skipped by name, or by path suffix for go/pkg"]
+    H -->|"Past depth 6, home root only"| H4["Counted in depthCutDirectories. Add folder roots have no depth limit"]
+    H -->|"Desktop, Documents, or Downloads directly under the home root"| H5["Deferred to the very end, so a pending access dialog blocks nothing else"]
+    H -->|"None of these"| B
+    D1 --> I["Dedupe by git rev-parse --git-common-dir, keeping the working tree whose .git is a real directory, sorted by path"]
+```
+
+### §2.4 How a branch gets its PR pill
+
+```mermaid
+graph TD
+    A{"Is the repo expanded, or in the launch top 5?"} -->|"No"| A1["prLoadState notLoaded. Pill reads PR status loads when expanded"]
+    A -->|"Yes"| B{"Is the PR cache newer than 10 min?"}
+    B -->|"Yes"| B1["Serve the cached PRs and the cached queriedHeads, issue no gh call"]
+    B -->|"No"| C["gh auth status per host, memoized for the refresh"]
+    C -->|"Non-zero exit"| C1["Unavailable: ghNotAuthenticated for every repo on that host"]
+    C -->|"Exit 0"| D["gh pr list --state all --limit 100"]
+    D -->|"Rate limit stderr"| D1["Unavailable: rateLimited, not commandFailed"]
+    D -->|"Any other failure"| D2["Unavailable: commandFailed. The per-head and author calls are skipped"]
+    D -->|"Rows"| E["Record every returned headRefName in queriedHeads"]
+    E --> F{"Does a local branch still have no PR?"}
+    F -->|"Yes"| G["gh pr list --head, most recently active first, capped at 20 per repo"]
+    F -->|"No"| H
+    G --> H["Match by headRefName first, so a fork PR is never filtered out"]
+    H --> I{"Do several PRs share that head?"}
+    I -->|"Yes"| I1["Prefer the upstream owner login, then an OPEN state, then the latest updatedAt"]
+    I -->|"No"| J["Map the state: MERGED, CLOSED, draft, APPROVED, CHANGES_REQUESTED, else open"]
+    I1 --> J
+    B1 --> K{"Was this head queried?"}
+    J --> K
+    K -->|"Yes, and no PR came back"| K1["Status none. Pill reads No PR"]
+    K -->|"No: past the cap, collapsed, or cut by the deadline"| K2["Status notChecked. Pill reads PR status not checked yet"]
+    D --> L["gh pr list --state open --author @me. Any PR whose owner login and head branch match no local branch becomes Open PRs not on this Mac"]
+```
+
+`queriedHeads` is the field that keeps `none` and `notChecked` apart across a relaunch: a `Repo` alone cannot say which heads were asked about.
+
+### §2.5 Packet DAG
+
+PLAN.md §8's dispatch order, plus the two packets execution added.
+
+```mermaid
+graph LR
+    P01["0.1 Bootstrap"] --> P02["0.2 Spike"]
+    P02 --> G0{{"Gate 0: builds on Command Line Tools"}}
+    G0 --> P03["0.3 Spike zip"]
+    P03 --> G0B{{"Gate 0b: NYT managed Mac"}}
+    G0B --> P11["1.1 Contracts frozen"]
+    P11 --> P40["4.0 UI contract and Strings"]
+    P40 --> G40{{"Gate 4.0: Hannah reads the string table"}}
+    P11 --> P21["2.1 GitClient and git parsers"]
+    P11 --> P23["2.3 GHClient"]
+    P11 --> P24["2.4 RepoScanner"]
+    P11 --> P25["2.5 Runner, locator, cache store"]
+    P40 --> P22["2.2 Presenter and pure mappers"]
+    P21 --> P22
+    P21 --> P31["3.1 Assembler and loader"]
+    P22 --> P31
+    P23 --> P31
+    P24 --> P32["3.2 RefreshCoordinator and branchbar-cli"]
+    P25 --> P32
+    P31 --> P32
+    P32 --> G3{{"Gate 3: CLI matches a hand-checked table"}}
+    G3 --> P41["4.1 SwiftUI shell"]
+    P41 --> P51A["5.1a First release zip"]
+    P51A --> G5{{"Gate 5: NYT tester installs v0.9.0"}}
+    P41 --> P42["4.2 Actions and launch at login"]
+    P42 --> P33["3.3 Bounded, prompt-safe scan"]
+    P33 --> P43["4.3 Shell strings into Core"]
+    P42 --> G4{{"Gate 4: one screenshot per state"}}
+    P43 --> P51B["5.1b Packaging hardening, v1.0.0"]
+    G5 --> P51B
+    P51B --> P52["5.2 Docs as deliverables"]
+    P52 --> G5B{{"Gate 5b: a second user installs from the README alone"}}
+```
 
 ## §3 Anatomy
 
-| Concern | Where | Notes |
-|---|---|---|
-| (filled as packets land; every row verified by `make doc-refs`) | | |
+One row per concern, each pointing at the line that declares it. `make doc-refs` reads this table and fails on any row whose line no longer holds its symbol, so an edit pass that shifts line numbers cannot land silently.
+
+| Concern | Symbol | Declared at | Notes |
+|---|---|---|---|
+| **Core: the refresh** | | | |
+| One refresh end to end: coalescing, cap 4, 45 s deadline, progressive emit, atomic persist | `RefreshCoordinator` | `Sources/BranchBarCore/RefreshCoordinator.swift:8` | An actor, so a second popover open coalesces instead of starting a parallel walk |
+| Discovery run inside a bound so a pending folder-access dialog cannot hang a refresh | `scanWithinDeadline` | `Sources/BranchBarCore/RefreshCoordinator.swift:336` | Takes the scanner's partial result when the 20 s bound wins, and rescans next time |
+| Repo order computed once per refresh and never recomputed mid-flight | `stableOrder` | `Sources/BranchBarCore/RefreshCoordinator.swift:423` | Previous snapshot's activity first, then new repos alphabetically |
+| One repo end to end: seven stages, each failure isolated into a `RepoError` | `RepoLoader` | `Sources/BranchBarCore/RepoLoader.swift:8` | Never throws, so one broken repo leaves the others populated |
+| Pure join of git and GitHub facts into a `Repo`, and the three groups | `RepoAssembler` | `Sources/BranchBarCore/RepoAssembler.swift:9` | Grouping is decided here and only rendered by the presenter |
+| **Core: git** | | | |
+| Every frozen git invocation, with the frozen environment and per-command timeouts | `GitClient` | `Sources/BranchBarCore/GitClient.swift:6` | `LC_ALL=C` and `GIT_OPTIONAL_LOCKS=0` live in `frozenEnvironment` |
+| Branch and remote-ref rows split on U+001F | `ForEachRefParser` | `Sources/BranchBarCore/ForEachRefParser.swift:65` | "No upstream" is decided from `upstream:short`, never from the track field |
+| Worktree records, including the ones with no branch | `WorktreeListParser` | `Sources/BranchBarCore/WorktreeListParser.swift:9` | Primary, linked, detached, locked, prunable, bare |
+| The reflog file read, the deletion boundary, and the usable-line predicate | `ReflogFileReader` | `Sources/BranchBarCore/ReflogFileReader.swift:8` | Walks newest first and stops at the first all-zero new OID |
+| One reflog line, with fields counted from the end of the header | `Entry` | `Sources/BranchBarCore/ReflogFileReader.swift:53` | Author names carry spaces, so field 5 cannot be counted from the front |
+| The `git reflog show` fallback parser, kept for the secondary path | `ReflogParser` | `Sources/BranchBarCore/ReflogParser.swift:25` | `RepoLoader` does not call it today; a live-repo test pins the invocation |
+| Push facts, and the rule that a commit date is never presented as a push | `PushInfoDeriver` | `Sources/BranchBarCore/PushInfoDeriver.swift:8` | No upstream yields a nil ahead count, never zero |
+| The git version gate behind the "works best with 2.39" notice | `GitVersion` | `Sources/BranchBarCore/GitVersion.swift:11` | Parsed from `git --version`, Apple's build suffix included |
+| **Core: GitHub** | | | |
+| Every `gh` invocation, per-host auth memoized, per-head cap, list caches | `GHClient` | `Sources/BranchBarCore/GHClient.swift:8` | An actor: the auth answer and the list caches are shared across repos on a host |
+| The `--json` field list shared by all three `gh pr list` invocations | `jsonFields` | `Sources/BranchBarCore/GHClient.swift:42` | Changing it means re-recording the fixtures |
+| PR JSON decode, including `headRepositoryOwner` as an object | `PRListDecoder` | `Sources/BranchBarCore/PRListDecoder.swift:8` | Sorted by `updatedAt` descending whatever order `gh` returned |
+| PR to pill, branch to PR, and the "not on this Mac" key | `PRStatusMapper` | `Sources/BranchBarCore/PRStatusMapper.swift:9` | Head first, owner only as a tie-break, keyed by owner and branch |
+| **Core: discovery** | | | |
+| The home walk to depth 6 and the unlimited walk of added roots | `RepoScanner` | `Sources/BranchBarCore/RepoScanner.swift:7` | Breadth-first, no symlinks, never descends into a repo it found |
+| The three folders macOS gates, enumerated after everything else | `tccGatedFolderNames` | `Sources/BranchBarCore/RepoScanner.swift:70` | Desktop, Documents, and Downloads as children of the home root only |
+| `.git` file classification into worktree checkout, submodule, or candidate | `classifyGitFile` | `Sources/BranchBarCore/RepoScanner.swift:76` | A checkout's common directory is everything before `/worktrees/` |
+| Tool discovery for a GUI process whose PATH has no Homebrew | `ToolLocator` | `Sources/BranchBarCore/ToolLocator.swift:54` | Env override, then four install locations, then PATH, then Apple git |
+| **Core: presentation** | | | |
+| `Snapshot` to view models, the only place a user-facing sentence is built | `SnapshotPresenter` | `Sources/BranchBarCore/SnapshotPresenter.swift:47` | Six frozen arguments; `EditorAvailability` is an initializer property |
+| Every user-facing literal, one static member per string | `Strings` | `Sources/BranchBarCore/Strings.swift:27` | `make doc-strings` regenerates the UI-CONTRACT table from its doc comments |
+| **Core: seams** | | | |
+| The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:70` | Argument arrays only, never a shell string |
+| The real process implementation: concurrent draining, timeout, cancellation | `ProcessCommandRunner` | `Sources/BranchBarCore/ProcessCommandRunner.swift:5` | Both pipes drain on dedicated threads, then SIGTERM and SIGKILL |
+| The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:25` | Synchronous by contract; the scan's bound lives one level up |
+| The real filesystem, listing once with resource values | `RealFileSystem` | `Sources/BranchBarCore/RealFileSystem.swift:8` | No per-entry `attributesOfItem`: that call blocks behind folder-access dialogs |
+| The cache seam | `CacheStore` | `Sources/BranchBarCore/Seams/CacheStore.swift:6` | Two methods, both replaced in tests |
+| The cache file on disk, written through a temp file | `FileCacheStore` | `Sources/BranchBarCore/FileCacheStore.swift:7` | `replaceItemAt`, so an interrupted save leaves the previous file intact |
+| **Core: data model** | | | |
+| One repo, its branches, worktrees, PR availability, and errors | `Repo` | `Sources/BranchBarCore/Models/Repo.swift:102` | Identified by `RepoID`, the git common directory |
+| The remote address parsed into host, owner, and name for any GitHub host | `GitHubSlug` | `Sources/BranchBarCore/Models/Repo.swift:23` | Enterprise hosts resolve and preflight per host |
+| One branch and the group it renders in | `Branch` | `Sources/BranchBarCore/Models/Branch.swift:4` | `group` is the assembler-to-presenter boundary |
+| The ten PR pill states, `notChecked` among them | `PRStatus` | `Sources/BranchBarCore/Models/PRStatus.swift:7` | `none` only after that head was actually queried |
+| What a row may say about a push | `PushInfo` | `Sources/BranchBarCore/Models/PushInfo.swift:9` | `source` decides the wording, not the presenter |
+| One worktree record | `Worktree` | `Sources/BranchBarCore/Models/Worktree.swift:8` | A worktree with no branch is shown and claimed by no branch |
+| The scan policy: roots, depth, skip list | `ScanPolicy` | `Sources/BranchBarCore/Models/Scan.swift:8` | Added roots are recursive with no depth limit |
+| What one walk reports, cut folders included | `ScanResult` | `Sources/BranchBarCore/Models/Scan.swift:61` | `truncatedByDeadline` forces the next refresh to rescan |
+| Every timing constant in one place | `RefreshPolicy` | `Sources/BranchBarCore/Models/RefreshPolicy.swift:6` | Debounce 30 s, scan 20 s, overall 45 s, PR TTL 600 s, cap 4, per-head cap 20 |
+| The cache file and its schema version | `CacheFile` | `Sources/BranchBarCore/Models/Cache.swift:9` | An unknown `schemaVersion` loads as nil rather than half a state |
+| What one PR fetch is worth keeping, heads asked about included | `PRCacheEntry` | `Sources/BranchBarCore/Models/Cache.swift:42` | Without `queriedHeads` a warm cache would downgrade every `none` to `notChecked` |
+| What the whole app renders from | `Snapshot` | `Sources/BranchBarCore/Models/Snapshot.swift:6` | Repos in stable order plus the tool status |
+| The failure a user reads, with one action | `UserFacingFailure` | `Sources/BranchBarCore/Models/Failure.swift:6` | `diagnostic` is logged and never rendered |
+| The row view models the SwiftUI layer is allowed to see | `SnapshotVM` | `Sources/BranchBarCore/Models/ViewModels.swift:7` | Views hold no copy and compute no sentence |
+| **Shell** | | | |
+| The menu bar entry point | `BranchBarApp` | `Sources/BranchBar/BranchBarApp.swift:192` | `MenuBarExtra` in `.window` style, which re-runs `onAppear` per open |
+| Accessory activation, logging, and the state-fixture harness | `AppDelegate` | `Sources/BranchBar/BranchBarApp.swift:11` | `LSUIElement`, so there is no Dock icon and no menu bar menu |
+| Published view models, the refresh trigger, collapse, hide, roots | `AppModel` | `Sources/BranchBar/AppModel.swift:29` | The only shell type that talks to Core |
+| Row actions: editor chain, PR, Finder, clipboard | `Actions` | `Sources/BranchBar/Actions.swift:12` | Cursor, then VS Code, then Terminal; `https` PR links only |
+| Launch at login | `LaunchAtLogin` | `Sources/BranchBar/LaunchAtLogin.swift:19` | `SMAppService`, which must refuse when the bundle is translocated |
+| The popover body and keyboard traversal | `RootView` | `Sources/BranchBar/Views/RootView.swift:22` | Arrow keys traverse, Return runs the primary action, Escape dismisses |
+| One repo section with its four groups | `RepoSectionView` | `Sources/BranchBar/Views/RepoSectionView.swift:7` | Collapse state is persisted per repo |
+| One branch row | `BranchRowView` | `Sources/BranchBar/Views/BranchRowView.swift:7` | Worktree marker, name, pill, push line, ahead count |
+| The PR pill and its ten colors | `PRPillView` | `Sources/BranchBar/Views/PRPillView.swift:9` | Color plus text, never an emoji |
+| The footer: last updated, version, tool notice | `FooterView` | `Sources/BranchBar/Views/FooterView.swift:6` | Also the scan roots and the hidden-repo count |
+| Width, row height, and type scale | `Metrics` | `Sources/BranchBar/Views/Tokens.swift:9` | Width 340, max height 70 percent of the screen |
+| **CLI** | | | |
+| `branchbar-cli snapshot` argument parsing | `Options` | `Sources/branchbar-cli/main.swift:19` | The Gate 3 harness and the Gate 0b fallback |
+| The runner the CLI hands its cache-only bootstrap | `NoCommandsRunner` | `Sources/branchbar-cli/main.swift:178` | Keeps the harness from writing over the app's own cached snapshot |
 
 ## §4 Data model
 
-Frozen in PLAN.md §5. Mutated only through `RefreshCoordinator`; the cache file at `~/Library/Application Support/BranchBar/cache.json` is written atomically and discarded on an unknown `schemaVersion`.
+Frozen in PLAN.md §5, and every type is `Hashable, Codable, Sendable`. State is mutated only through `RefreshCoordinator`.
+
+The cache lives at `~/Library/Application Support/BranchBar/cache.json` and holds `CacheFile`: the last scan, manually added roots, hidden and collapsed repo ids, the per-repo `PRCacheEntry`, and the last `Snapshot`. Two rules govern it.
+
+- **Atomic replace.** `FileCacheStore` writes a temp file and calls `replaceItemAt`, so a save interrupted halfway leaves the previous cache intact.
+- **Unknown schema loads nil.** `CacheFile.currentSchemaVersion` is 1; a file carrying anything else is discarded rather than decoded field by field, so a downgrade shows an empty list and rescans instead of half a state.
+
+Two derived fields exist because a `Repo` alone cannot answer the question honestly. `PRCacheEntry.queriedHeads` records which branch heads a fetch actually asked about, which is what keeps `PRStatus.none` and `PRStatus.notChecked` apart across a relaunch. `ScanResult.truncatedByDeadline` records that a walk was cut short, which is what stops a partial repo list from being cached as if it were complete.
 
 ## §5 Testing
 
-`make test` (`swift test --disable-xctest --enable-swift-testing`). Swift Testing only; XCTest is absent under Command Line Tools. Fixtures under `Tests/BranchBarCoreTests/Fixtures/` are `recorded-*` (written by `make record-fixtures` from real git and gh) or `synthetic-*` (hand-extended). See `docs/TEST-PLAN.md`.
+```bash
+make test        # swift test --disable-xctest --enable-swift-testing
+```
+
+**257 tests, all green.** Swift Testing only: XCTest is absent under Command Line Tools, and `noXCTestImportAnywhere` keeps it out on a machine that has full Xcode. `noAppKitOrSwiftUIImportInCore` keeps the shell's frameworks out of the library.
+
+Fixtures live in `Tests/BranchBarCoreTests/Fixtures/` in three families. `recorded-*` (19 files) are byte-exact output from `/usr/bin/git` 2.39.5 and `gh` 2.89.0, written by `make record-fixtures`: no model ever transcribes git output. `synthetic-*` (22 files) are hand-written extensions for cases these repos cannot produce, each with a sibling `.md` note explaining what it models. `states/*.json` (34 files) are one per user-facing state in `docs/UI-CONTRACT.md`, each carrying the exact arguments of `SnapshotPresenter.present` plus the strings that state must show.
+
+Two tests touch a real repo, and both skip themselves with a recorded reason rather than failing: `everyFrozenGitInvocationReturnsOutputOnThisRepo` skips when `git` is absent, and `reflogShowFallbackReturnsRowsForARefThatHasPushes` skips when this checkout's own `origin/main` reflog holds no push line, which is exactly what CI has, since a CI clone fetches and never pushes. Everything else replaces all three seams and touches no network, no real repo, and no home folder.
+
+`docs/TEST-PLAN.md` maps every named invariant from PLAN.md §7 to the file that holds it.
 
 ## §6 Operations
 
-Launched as `/Applications/BranchBar.app` (menu bar only, `LSUIElement`). Logs: `~/Library/Logs/BranchBar/BranchBar.log` and `log stream --predicate 'subsystem == "com.hannahstulberg.branchbar"'`. Runbooks in `docs/runbooks/`.
+- **Launch path:** `/Applications/BranchBar.app`, menu bar only (`LSUIElement`), no Dock icon and no menu bar menu of its own.
+- **Logs:** `~/Library/Logs/BranchBar/BranchBar.log` (`make logs` tails it) and `log stream --predicate 'subsystem == "com.hannahstulberg.branchbar"'`. An empty log after a first open means the user is still at the Gatekeeper dialog: the process is held before `applicationDidFinishLaunching` runs.
+- **Headless snapshot:** `make snapshot ROOTS="~/one ~/two"` runs `branchbar-cli snapshot`, which prints every repo, branch, worktree, PR, and push as a table, or as JSON with `--json`. It is the Gate 3 harness, the way to reproduce a user's list without the UI, and the fallback if the menu bar app is ever blocked on a managed Mac. `BRANCHBAR_GIT` pins the git binary.
+- **State screenshots:** `scripts/screenshot-states.sh` renders every `states/*.json` fixture through the real app.
+- **Runbooks:** `docs/runbooks/gate-0b-nyt-spike-test.md` is the tester-facing install checklist the README's install steps mirror; `docs/runbooks/quarantine-rehearsal.md` holds the Gatekeeper and app-translocation findings with the exact commands.
 
 ## §7 Security contract
 
-No secrets stored or read. Only the fixed command list in PLAN.md §5 is ever spawned, always as argument arrays, never through a shell. Not sandboxed. See PLAN.md §6.
+- **No secrets stored, read, or logged.** `gh` authenticates itself from its own keyring and BranchBar reads only its stdout. A `GH_TOKEN` exported in a shell rc is invisible to a GUI app, so it is not a supported setup.
+- **Only the fixed command list in PLAN.md §5 is ever spawned**, always as argument arrays through `Process`, never through a shell. A branch name beginning with `-` is passed as an operand, which a test pins.
+- **No writes to any repo and no network calls of the app's own.** It never fetches, and every GitHub read goes through `gh` under the user's own token.
+- **Not sandboxed and ad-hoc signed.** macOS asks for folder access on the first scan, a denial is visible in the "Not scanned" row rather than silent, and a rebuilt copy asks again because the signature changes with every build.
+- **Not defended against:** a hostile repo on disk. Branch names are argument operands and displayed text, never executed.
 
 ## §8 Known footguns
 
@@ -77,14 +341,47 @@ In `git reflog show` and `git log` formats it emits the literal text `%1f`, so a
 **The GUI app PATH has no Homebrew.**
 A launched `.app` sees `/usr/bin:/bin:/usr/sbin:/sbin`, so `gh` at `/opt/homebrew/bin` is invisible. `ToolLocator` searches known install locations explicitly and records where it looked.
 
+**`open` forwards the calling shell's environment, so a terminal cannot test the GUI PATH.**
+Launching the app from an interactive shell hands it that shell's PATH, Homebrew included, and the missing-tool path never reproduces. Test it as launchd does: `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin open /Applications/BranchBar.app`.
+
 **`%(upstream:track,nobracket)` is empty for two different reasons.**
 An in-sync branch and a branch with no upstream both yield an empty field. Decide "no upstream" from `%(upstream:short)`, never from the track field.
 
 **Reflog files can exist and be empty, and a push deletion looks like a push.**
 `.git/logs/refs/remotes/origin/<branch>` may be zero bytes; `git push --delete` appends an `update by push` line whose new OID is all zeros; lines expire after 90 days. A usable push line is one with a non-zero new OID; anything else falls back to the tip commit date with wording that does not claim a push was observed.
 
+**Reflog author names contain spaces, so the timestamp cannot be counted from the front.**
+The header is `old OID, new OID, author name, email, unix time, timezone`, and the name is one or more words. Count the unix time and the timezone from the **end** of the header, which is what `ReflogFileReader.Entry` does.
+
 **`gh pr list --json headRepositoryOwner` returns an object.**
 Compare `.login`, not the value. `reviewDecision` is an empty string, not null, when no decision exists.
+
+**`gh auth status` writes its report to stdout on gh 2.89.**
+Older releases sent it to stderr, and the comment in `scripts/record-fixtures.sh` still says so. The script merges both streams into the fixture, so the recording is right either way, but code or a test that reads one stream by name will read the wrong one. Check the exit code, which is what `GHClient.authStatus` does.
+
+**`Command.environment` merges over the inherited environment; the seam's doc comment says it replaces it.**
+`ProcessCommandRunner` copies `ProcessInfo.processInfo.environment` and overlays the command's entries, which is what the frozen git and gh environments assume. The comment on `Command.environment` in `Sources/BranchBarCore/Seams/CommandRunner.swift` is the stale half of that pair, and the next packet that touches Core corrects it.
+
+**A quarantined bundle is app-translocated, even out of `/Applications`.**
+The process runs from `/private/var/folders/…/AppTranslocation/…`, so nothing may be derived from `Bundle.main.bundlePath` and `SMAppService` must refuse to register from a translocated copy. Removing `com.apple.quarantine` from the bundle root restores the real path. `SMAppService` itself works with the ad-hoc signature from `/Applications`, going `notFound` to `enabled` to `notRegistered` and never `requiresApproval`.
+
+**Every `make install` re-signs with a new cdhash, so macOS asks for folder access again.**
+TCC keys its grants to the code-signing identity, and an ad-hoc signature changes on every build. A rebuilt copy therefore re-prompts, and the "Not scanned" row reappears until the user answers. The README says so, and it is the argument for a stable signing identity if this ever ships more widely.
+
+**A folder listing already blocked inside `open()` cannot be cancelled.**
+`Task.isCancelled` is checked before each listing for exactly this reason: once the call is in the kernel behind a consent dialog, no deadline can end it. That is why the walk opens Desktop, Documents, and Downloads last and why `RealFileSystem` lists with resource values instead of calling `attributesOfItem` per entry.
+
+**The Gatekeeper dialog's default button is Move to Trash.**
+The first open of a downloaded copy shows "BranchBar" Not Opened with **Done** and **Move to Trash**, and Move to Trash is highlighted, so pressing Return deletes the app. Any instruction written for a tester has to say "click Done with the mouse".
+
+**`screencapture` cannot see a menu bar status item.**
+Layer-25 windows are absent from the capture, the clock and Control Center included, so a blank strip proves nothing. Prove the icon exists with `CGWindowListCopyWindowInfo` instead. `CGWindowListCreateImage` is obsoleted in the macOS 15 SDK, so the app captures its own popover with `cacheDisplay`.
+
+**Two SwiftPM builds in one checkout block each other.**
+Parallel agents sharing `.build` serialize on the build lock and can appear hung. Give each one `--scratch-path`.
+
+**A `fatalError` stub traps the whole Swift Testing process.**
+An `OWNER:` stub that traps takes down every test in the run, not just the one that called it, so a red packet reads as a crash rather than a failure list. Expect that shape while a packet is red.
 
 **Never add `resources:` to `Package.swift`, and never add a `main.swift`.**
 A resource declaration makes SwiftPM emit a side bundle next to the executable that breaks the `.app` layout and signing; a `main.swift` disables `-parse-as-library` and breaks `@main`. Fixtures load via `#filePath`; the entry file is `BranchBarApp.swift`.
