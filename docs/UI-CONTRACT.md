@@ -61,12 +61,22 @@ fixture filename stem.
 | `detached-worktree` | `git worktree list --porcelain` printed `detached` | "Worktree at commit abc1234 (no branch)" | "Open in Cursor" | "Show in Finder" |
 | `worktree-checkout` | A branch is checked out in a linked worktree folder | "Worktree in demo-agents-2" | "Open in Cursor" | "Show in Finder" |
 | `refresh-running` | `RefreshState.running(completed, total)` | "Updating 3 of 12 repos…" | — | — |
+| `hidden-repo` | The user hid a repo from the list; the footer offers it back | footer "Show hidden (1)" / beside the repo "Hidden" | "Hide this repo" | "Stop hiding this repo" |
+| `launch-at-login-needs-approval` | The login-item toggle was flipped and `SMAppService` has not been allowed yet, or cannot be used from where this copy is running | "macOS is waiting for approval. Open System Settings → General → Login Items and turn BranchBar on under “Open at Login”." | "Open BranchBar at login" (the toggle) | the four other outcomes: translocated, no bundle identifier, not in /Applications, both mechanisms refused |
 
 **Notes on states that share copy.** `gh pr list` timing out and `gh pr list` failing are one
 `PRUnavailableReason.commandFailed`, because packet 1.1 froze six reasons and no seventh; the
 timeout is named in `UserFacingFailure.diagnostic`, which is logged and never rendered. `noRemote`
 and `notGitHubRemote` both offer "Refresh" rather than a repo-editing action: the app runs no
 write commands, so refreshing after the user adds an origin is the only honest next step.
+
+**Notes on states whose condition is not in the fixture.** `StateFixture` froze the six arguments
+of `SnapshotPresenter.present`, and three states turn on something outside that envelope: whether
+Cursor is installed (`cursor-not-installed`), which repo the user hid and whether "Show hidden" is
+on (`hidden-repo`), and what `SMAppService` answered on this Mac
+(`launch-at-login-needs-approval`). Each carries an ordinary snapshot and supplies its own
+condition — the tests off the fixture's id, the app off `BRANCHBAR_PREVIEW_HIDDEN` for the two
+halves of the hide toggle.
 
 ---
 
@@ -151,11 +161,16 @@ from last-known origin" because PLAN.md §3 locks that wording verbatim, having 
 | Row actions | `openInVSCodeActionLabel` | `cursor-not-installed` — first fallback when Cursor is absent. | `Open in VS Code` |
 | Row actions | `openInTerminalActionLabel` | `cursor-not-installed` — last fallback when neither editor is installed. | `Open in Terminal` |
 | Row actions | `cursorNotInstalledNotice` | `cursor-not-installed` — footer notice naming the fallback chain. | `Cursor is not installed on this Mac, so rows open in VS Code instead — or in Terminal if neither is installed.` |
+| Row actions | `openInAvailableEditorLabel` | `cursor-not-installed` — the same fallback chain, resolved to the one label that names the app a row will actually open. `SnapshotPresenter` puts it on a branch row's primary action and the shell's repo-header menu offers the same thing for a whole folder, so both read it from here rather than each picking a winner of their own. | one of `Open in Cursor`, `Open in VS Code`, `Open in Terminal` |
 | Row actions | `openPRActionLabel` | `pr-open`, `open-prs-not-on-this-mac` — opens the PR in the browser. | `Open PR` |
 | Row actions | `revealInFinderActionLabel` | `single-branch-no-pr-never-pushed` — secondary row action. | `Show in Finder` |
 | Row actions | `copyPathActionLabel` | `single-branch-no-pr-never-pushed` — secondary row action. | `Copy path` |
 | Row actions | `expandSectionActionLabel` | `pr-not-loaded` — VoiceOver and pointer label on a collapsed repo's disclosure. | `Expand` |
 | Row actions | `collapseSectionActionLabel` | `pr-not-loaded` — the same control once the repo is open. | `Collapse` |
+| Hiding a repo | `hideRepoActionLabel` | `hidden-repo` — drops one repo out of the list. The app never deletes anything, so the wording is about this list and not about the repo on disk. | `Hide this repo` |
+| Hiding a repo | `unhideRepoActionLabel` | `hidden-repo` — the way back, offered on a repo that is only visible because "Show hidden" is on. | `Stop hiding this repo` |
+| Hiding a repo | `showHiddenToggleLabel` | `hidden-repo` — footer toggle. The count is what tells a user a hidden repo exists at all: without it the only evidence of hiding is a repo that is not there. | `Show hidden (1)` |
+| Hiding a repo | `hiddenRepoMarker` | `hidden-repo` — beside a repo that is showing only because the toggle is on. | `Hidden` |
 | Rows without a local branch | `prRowTitle` | `open-prs-not-on-this-mac` — title of a PR row in that group. | `#128 · hotfix-from-laptop` |
 | Accessibility | `branchRowAccessibilityLabel` | `single-branch-no-pr-never-pushed` — one spoken sentence per branch row; PLAN.md §5a requires a VoiceOver label per row type and forbids emoji as status. | `Branch notes-cleanup. No PR. Never pushed.` |
 | Accessibility | `prRowAccessibilityLabel` | `open-prs-not-on-this-mac` — spoken label for a PR row with no local branch. | `PR 128, hotfix-from-laptop. Open.` |
@@ -174,6 +189,13 @@ from last-known origin" because PLAN.md §3 locks that wording verbatim, having 
 | Footer | `deadlineExceededNotice` | `deadline-exceeded` — the whole refresh stopped at 45 seconds (PLAN.md §3). | `BranchBar stopped after 45 seconds. Repos that did not finish are marked out of date.` |
 | Footer | `launchAtLoginToggleLabel` | `single-branch-no-pr-never-pushed` — opt-in toggle (PLAN.md §3, packet 4.2). | `Open BranchBar at login` |
 | Footer | `quitActionLabel` | `single-branch-no-pr-never-pushed` — last item in the menu. | `Quit BranchBar` |
+| Launch at login outcomes | `launchAtLoginNeedsApproval` | `launch-at-login-needs-approval` — `SMAppService` returned `.requiresApproval`: BranchBar registered, and macOS is waiting for the user to allow it in the one place that can allow it. | `macOS is waiting for approval. Open System Settings → General → Login Items and turn BranchBar on under “Open at Login”.` |
+| Launch at login outcomes | `launchAtLoginTranslocated` | `launch-at-login-needs-approval` — the 0.2 spike's translocation finding, said to the user: a quarantined bundle runs from a throwaway copy under `/private/var/folders/…/AppTranslocation/`, and registering that path would register a folder that disappears. | `Move BranchBar to your Applications folder and open it from there, then this can be turned on. Right now it is running from a temporary copy macOS made.` |
+| Launch at login outcomes | `launchAtLoginUnbundled` | `launch-at-login-needs-approval` — no bundle identifier: `swift run`, or a bundle whose Info.plist did not come along. | `This only works from the BranchBar app in your Applications folder.` |
+| Launch at login outcomes | `launchAtLoginNotInApplications` | `launch-at-login-needs-approval` — the LaunchAgent fallback writes an absolute path, so the app has to be at that path. | `Copy BranchBar into your Applications folder first — the login item points at /Applications/BranchBar.app.` |
+| Launch at login outcomes | `launchAtLoginFailed` | `launch-at-login-needs-approval` — both mechanisms refused. The diagnostic goes to the log, never into this sentence. | `macOS would not add BranchBar to your login items. The log has the details.` |
+| The gh sign-in setup action | `ghSignInScriptBanner` | `gh-not-authenticated` — header of the `.command` file the sign-in action opens in Terminal, so the window a user lands in says what it is before they read the command. | `BranchBar: sign in to the GitHub CLI` |
+| Grant folder access | `filesAndFoldersSettingsURL` | `not-scanned-folders` — where "Allow access…" goes: macOS's own pane, named the way the user will see it. The prompt itself cannot be re-raised, so this is the pane. | `x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders` |
 | Relative time | `relative` | every state showing an age — the only relative-time formatter in the app. Pure arithmetic on the two dates: no `Date()`, no `Calendar`, no locale, so tests own the clock and the recorded state fixtures stay byte-stable. A date in the future reads "just now" rather than a negative age. | `just now`, `12 s ago`, `1 minute ago`, `3 hours ago`, `2 days ago`, `1 week ago`, `2 months ago`, `2 years ago` |
 <!-- END doc-strings -->
 

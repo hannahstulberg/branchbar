@@ -322,7 +322,7 @@ final class AppModel: ObservableObject {
         if let reason = LaunchAtLogin.unavailableReason {
             launchAtLoginNotice = reason
         } else if LaunchAtLogin.needsApproval {
-            launchAtLoginNotice = ShellStrings.launchAtLoginNeedsApproval
+            launchAtLoginNotice = Strings.launchAtLoginNeedsApproval
         } else {
             launchAtLoginNotice = nil
         }
@@ -340,7 +340,7 @@ final class AppModel: ObservableObject {
             // A failure the state read cannot see (the toggle is available, the flip still lost)
             // still owes the user a sentence.
             if launchAtLoginNotice == nil {
-                launchAtLoginNotice = failure?.errorDescription ?? ShellStrings.launchAtLoginFailed
+                launchAtLoginNotice = failure?.errorDescription ?? Strings.launchAtLoginFailed
             }
         }
     }

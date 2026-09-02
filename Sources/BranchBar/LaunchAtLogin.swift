@@ -42,8 +42,8 @@ enum LaunchAtLogin {
 
     /// Nil when the toggle is usable; otherwise the sentence to put beside a disabled toggle.
     static var unavailableReason: String? {
-        guard Bundle.main.bundleIdentifier != nil else { return ShellStrings.launchAtLoginUnbundled }
-        if isTranslocated { return ShellStrings.launchAtLoginTranslocated }
+        guard Bundle.main.bundleIdentifier != nil else { return Strings.launchAtLoginUnbundled }
+        if isTranslocated { return Strings.launchAtLoginTranslocated }
         return nil
     }
 
@@ -98,8 +98,8 @@ enum LaunchAtLogin {
         var errorDescription: String? {
             switch self {
             case .unavailable(let copy): return copy
-            case .notInstalledInApplications: return ShellStrings.launchAtLoginNotInApplications
-            case .bothMechanismsRefused: return ShellStrings.launchAtLoginFailed
+            case .notInstalledInApplications: return Strings.launchAtLoginNotInApplications
+            case .bothMechanismsRefused: return Strings.launchAtLoginFailed
             }
         }
 

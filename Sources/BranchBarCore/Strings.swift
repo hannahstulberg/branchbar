@@ -6,6 +6,12 @@ import Foundation
 /// no copy of its own, so a wording rule — "Pushed from this Mac", never "You pushed" — is a unit
 /// test over a value instead of a screenshot review.
 ///
+/// A handful of members are fixed chrome the frozen view models have no field for — group
+/// headings, the disclosure control, secondary row actions, the footer menu, Hide and Show hidden,
+/// and the launch-at-login outcomes — and the views read those from here directly. They are not an
+/// escape hatch: `SnapshotPresenterTests.viewOwnedChrome` pins the exact set, so a member that
+/// stops being rendered cannot be made green by widening the list.
+///
 /// Vocabulary is the NYT workshop's: repo, branch, worktree, PR, push, commit, origin, folder.
 /// Words the session never teaches (detached, HEAD, upstream, ref, SHA, reflog, stderr, exit code)
 /// are banned by `noEngineeringVocabularyInUserStrings`, with one locked exception noted at
@@ -437,6 +443,17 @@ public enum Strings {
         "Cursor is not installed on this Mac, so rows open in VS Code instead — or in Terminal if "
         + "neither is installed."
 
+    /// State: `cursor-not-installed` — the same fallback chain, resolved to the one label that
+    /// names the app a row will actually open. `SnapshotPresenter` puts it on a branch row's
+    /// primary action and the shell's repo-header menu offers the same thing for a whole folder,
+    /// so both read it from here rather than each picking a winner of their own.
+    /// Literal: one of `Open in Cursor`, `Open in VS Code`, `Open in Terminal`
+    public static func openInAvailableEditorLabel(_ editors: EditorAvailability) -> String {
+        if editors.cursor { return openInCursorActionLabel }
+        if editors.vsCode { return openInVSCodeActionLabel }
+        return openInTerminalActionLabel
+    }
+
     /// State: `pr-open`, `open-prs-not-on-this-mac` — opens the PR in the browser.
     /// Literal: `Open PR`
     public static let openPRActionLabel = "Open PR"
@@ -456,6 +473,29 @@ public enum Strings {
     /// State: `pr-not-loaded` — the same control once the repo is open.
     /// Literal: `Collapse`
     public static let collapseSectionActionLabel = "Collapse"
+
+    // MARK: - Hiding a repo
+
+    /// State: `hidden-repo` — drops one repo out of the list. The app never deletes anything, so
+    /// the wording is about this list and not about the repo on disk.
+    /// Literal: `Hide this repo`
+    public static let hideRepoActionLabel = "Hide this repo"
+
+    /// State: `hidden-repo` — the way back, offered on a repo that is only visible because
+    /// "Show hidden" is on.
+    /// Literal: `Stop hiding this repo`
+    public static let unhideRepoActionLabel = "Stop hiding this repo"
+
+    /// State: `hidden-repo` — footer toggle. The count is what tells a user a hidden repo exists
+    /// at all: without it the only evidence of hiding is a repo that is not there.
+    /// Literal: `Show hidden (1)`
+    public static func showHiddenToggleLabel(count: Int) -> String {
+        "Show hidden (\(count))"
+    }
+
+    /// State: `hidden-repo` — beside a repo that is showing only because the toggle is on.
+    /// Literal: `Hidden`
+    public static let hiddenRepoMarker = "Hidden"
 
     // MARK: - Rows without a local branch
 
@@ -568,6 +608,59 @@ public enum Strings {
     /// State: `single-branch-no-pr-never-pushed` — last item in the menu.
     /// Literal: `Quit BranchBar`
     public static let quitActionLabel = "Quit BranchBar"
+
+    // MARK: - Launch at login outcomes
+
+    /// State: `launch-at-login-needs-approval` — `SMAppService` returned `.requiresApproval`:
+    /// BranchBar registered, and macOS is waiting for the user to allow it in the one place that
+    /// can allow it.
+    /// Literal: `macOS is waiting for approval. Open System Settings → General → Login Items and turn BranchBar on under “Open at Login”.`
+    public static let launchAtLoginNeedsApproval =
+        "macOS is waiting for approval. Open System Settings → General → Login Items and turn "
+        + "BranchBar on under \u{201C}Open at Login\u{201D}."
+
+    /// State: `launch-at-login-needs-approval` — the 0.2 spike's translocation finding, said to
+    /// the user: a quarantined bundle runs from a throwaway copy under
+    /// `/private/var/folders/…/AppTranslocation/`, and registering that path would register a
+    /// folder that disappears.
+    /// Literal: `Move BranchBar to your Applications folder and open it from there, then this can be turned on. Right now it is running from a temporary copy macOS made.`
+    public static let launchAtLoginTranslocated =
+        "Move BranchBar to your Applications folder and open it from there, then this can be "
+        + "turned on. Right now it is running from a temporary copy macOS made."
+
+    /// State: `launch-at-login-needs-approval` — no bundle identifier: `swift run`, or a bundle
+    /// whose Info.plist did not come along.
+    /// Literal: `This only works from the BranchBar app in your Applications folder.`
+    public static let launchAtLoginUnbundled =
+        "This only works from the BranchBar app in your Applications folder."
+
+    /// State: `launch-at-login-needs-approval` — the LaunchAgent fallback writes an absolute path,
+    /// so the app has to be at that path.
+    /// Literal: `Copy BranchBar into your Applications folder first — the login item points at /Applications/BranchBar.app.`
+    public static let launchAtLoginNotInApplications =
+        "Copy BranchBar into your Applications folder first — the login item points at "
+        + "/Applications/BranchBar.app."
+
+    /// State: `launch-at-login-needs-approval` — both mechanisms refused. The diagnostic goes to
+    /// the log, never into this sentence.
+    /// Literal: `macOS would not add BranchBar to your login items. The log has the details.`
+    public static let launchAtLoginFailed =
+        "macOS would not add BranchBar to your login items. The log has the details."
+
+    // MARK: - The gh sign-in setup action
+
+    /// State: `gh-not-authenticated` — header of the `.command` file the sign-in action opens in
+    /// Terminal, so the window a user lands in says what it is before they read the command.
+    /// Literal: `BranchBar: sign in to the GitHub CLI`
+    public static let ghSignInScriptBanner = "BranchBar: sign in to the GitHub CLI"
+
+    // MARK: - Grant folder access
+
+    /// State: `not-scanned-folders` — where "Allow access…" goes: macOS's own pane, named the way
+    /// the user will see it. The prompt itself cannot be re-raised, so this is the pane.
+    /// Literal: `x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders`
+    public static let filesAndFoldersSettingsURL =
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
 
     // MARK: - Relative time
 

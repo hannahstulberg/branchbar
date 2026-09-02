@@ -84,7 +84,7 @@ struct RepoSectionView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if isHidden {
-                    Text(ShellStrings.hiddenRepoMarker)
+                    Text(Strings.hiddenRepoMarker)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -99,7 +99,7 @@ struct RepoSectionView: View {
         .contextMenu { headerMenu }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            isHidden ? "\(section.title), \(ShellStrings.hiddenRepoMarker)" : section.title)
+            isHidden ? "\(section.title), \(Strings.hiddenRepoMarker)" : section.title)
         .accessibilityValue(
             section.isCollapsed
                 ? Strings.expandSectionActionLabel
@@ -152,24 +152,19 @@ struct RepoSectionView: View {
     }
 
     private var hideActionLabel: String {
-        isHidden ? ShellStrings.unhideRepoActionLabel : ShellStrings.hideRepoActionLabel
+        isHidden ? Strings.unhideRepoActionLabel : Strings.hideRepoActionLabel
     }
 
     private func toggleHidden() {
         if isHidden { unhide(section.id) } else { hide(section.id) }
     }
 
-    /// The repo's own folder. `RepoSectionVM` carries no path — the presenter had no reason to add
-    /// one — so it comes off the first row whose primary action names an absolute path, which is
-    /// the checked-out worktree the row would open. Nil for a repo whose rows have not loaded yet,
+    /// The repo's own folder, straight off the view model (packet 4.3). It used to be read off the
+    /// first row's primary action, which is the folder *that row* opens — a linked worktree for a
+    /// branch checked out outside the repo — so a header menu could point somewhere the repo is
+    /// not. Still optional: a `RepoSectionVM` recorded before the field existed carries no path,
     /// and the menu then offers Hide alone rather than a Finder item that would open nothing.
-    private var repoPath: String? {
-        let rows = section.active + section.merged + section.closedUnmerged
-        return rows.compactMap { row -> String? in
-            guard let payload = row.primaryAction.payload, payload.hasPrefix("/") else { return nil }
-            return payload
-        }.first
-    }
+    private var repoPath: String? { section.path }
 
     @ViewBuilder private var headerBackground: some View {
         if focus == .section(section.id) {

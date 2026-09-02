@@ -42,13 +42,11 @@ enum Actions {
         }
     }
 
-    /// What `openInAvailableEditor` will actually do, in the words §5a froze for it. The presenter
-    /// puts this on a branch row's primary action; a menu that offers the same thing for a whole
-    /// repo has to name it the same way.
+    /// What `openInAvailableEditor` will actually do, in the words §5a froze for it. The chain is
+    /// resolved in Core, by the same member `SnapshotPresenter` puts on a branch row's primary
+    /// action, so a repo-header menu offering the same thing cannot name it differently.
     static var openInAvailableEditorLabel: String {
-        if editors.cursor { return Strings.openInCursorActionLabel }
-        if editors.vsCode { return Strings.openInVSCodeActionLabel }
-        return Strings.openInTerminalActionLabel
+        Strings.openInAvailableEditorLabel(editors)
     }
 
     static func openInCursor(path: String) { open(application: "Cursor", path: path) }
@@ -127,7 +125,7 @@ enum Actions {
         let url = directory.appendingPathComponent("gh-sign-in.command")
         let body = """
             #!/bin/zsh
-            echo "\(ShellStrings.ghSignInScriptBanner)"
+            echo "\(Strings.ghSignInScriptBanner)"
             echo
             echo "$ \(command)"
             \(command)
@@ -154,7 +152,7 @@ enum Actions {
     /// already answered. "Add folder…" is the other half of the rescue and the one that actually
     /// grants a new folder, which is why the footer offers both.
     static func openFilesAndFoldersSettings() {
-        guard let url = URL(string: ShellStrings.filesAndFoldersSettingsURL) else { return }
+        guard let url = URL(string: Strings.filesAndFoldersSettingsURL) else { return }
         Log.info("action: open System Settings → Privacy & Security → Files and Folders")
         NSWorkspace.shared.open(url)
     }

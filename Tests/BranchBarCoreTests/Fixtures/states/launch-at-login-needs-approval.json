@@ -4,73 +4,19 @@
 
   ],
   "expectedStrings" : [
-    "Not scanned: Documents, Desktop",
-    "Allow access…",
-    "Also skipped on purpose: hidden folders, Library, anything more than six folders deep, and folders inside a repo BranchBar already found.",
-    "Folders you added",
-    "Remove",
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+    "macOS is waiting for approval. Open System Settings → General → Login Items and turn BranchBar on under “Open at Login”.",
+    "Move BranchBar to your Applications folder and open it from there, then this can be turned on. Right now it is running from a temporary copy macOS made.",
+    "This only works from the BranchBar app in your Applications folder.",
+    "Copy BranchBar into your Applications folder first — the login item points at /Applications/BranchBar.app.",
+    "macOS would not add BranchBar to your login items. The log has the details."
   ],
-  "id" : "not-scanned-folders",
+  "id" : "launch-at-login-needs-approval",
   "now" : 810302400,
-  "planReference" : "§5a item 1: Not-scanned folders row and the skipped-categories summary",
+  "planReference" : "§3, §5b: launch at login through SMAppService with a LaunchAgent fallback",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
     }
-  },
-  "scanResult" : {
-    "candidatesExamined" : 1204,
-    "depthCutDirectories" : 37,
-    "policy" : {
-      "descendIntoRepos" : false,
-      "extraRoots" : [
-        "/Users/tester/Library/CloudStorage/Dropbox"
-      ],
-      "homeRoot" : "/Users/tester",
-      "maxDepth" : 6,
-      "skipDirectoryNames" : [
-        "Library",
-        "Applications",
-        "Pictures",
-        "Movies",
-        "Music",
-        "Public",
-        "node_modules",
-        "vendor",
-        "Pods",
-        "DerivedData",
-        "build",
-        "dist",
-        "target",
-        "venv",
-        "site-packages",
-        "__pycache__",
-        "go/pkg"
-      ],
-      "skipHiddenDirectories" : true
-    },
-    "repos" : [
-      {
-        "id" : {
-          "commonDir" : "/Users/tester/demo0/.git"
-        },
-        "path" : "/Users/tester/demo0"
-      }
-    ],
-    "scannedAt" : 810302340,
-    "skippedHiddenDirectories" : 412,
-    "skippedSubmodules" : [
-
-    ],
-    "skippedWorktreeCheckouts" : [
-
-    ],
-    "truncatedByDeadline" : false,
-    "unreadableDirectories" : [
-      "/Users/tester/Documents",
-      "/Users/tester/Desktop"
-    ]
   },
   "snapshot" : {
     "refreshedAt" : 810302388,
@@ -82,7 +28,7 @@
             "group" : "active",
             "isCheckedOutInPrimary" : true,
             "name" : "main",
-            "prStatus" : "notChecked",
+            "prStatus" : "none",
             "push" : {
               "hasUpstream" : false,
               "originMovedSince" : false,
@@ -141,5 +87,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "Folders BranchBar could not read, plus what it skipped on purpose"
+  "title" : "The login-item toggle was flipped and macOS has not allowed it yet"
 }

@@ -54,6 +54,7 @@ extension BranchRowVM {
             title,
             worktreeMarker ?? "",
             prPill?.text ?? "",
+            prURL ?? "",
             pushLabel,
             pushTooltip,
             aheadLabel ?? "",
@@ -111,6 +112,21 @@ struct SnapshotPresenterTests {
         Strings.refreshPRsNowActionLabel,
         Strings.launchAtLoginToggleLabel,
         Strings.quitActionLabel,
+        // Packet 4.3 moved the shell's own copy into `Strings` (DECISION-LOG: packet 4.2 parked it
+        // in `Sources/BranchBar/ShellStrings.swift` because this list was frozen). Every one is the
+        // same kind of thing as the rest: a fixed control label or a sentence about this Mac, with
+        // no view-model field and no `Snapshot` that can produce it.
+        Strings.hideRepoActionLabel,
+        Strings.unhideRepoActionLabel,
+        Strings.showHiddenToggleLabel(count: 1),
+        Strings.hiddenRepoMarker,
+        Strings.launchAtLoginNeedsApproval,
+        Strings.launchAtLoginTranslocated,
+        Strings.launchAtLoginUnbundled,
+        Strings.launchAtLoginNotInApplications,
+        Strings.launchAtLoginFailed,
+        Strings.ghSignInScriptBanner,
+        Strings.filesAndFoldersSettingsURL,
     ]
 
     /// Literals a fixture contracts that its own recorded `Snapshot` cannot produce. These are not
@@ -163,9 +179,11 @@ struct SnapshotPresenterTests {
     /// made green by widening them.
     @Test("everyFixtureStringIsRenderedOrOnAFrozenExemptionList")
     func everyFixtureStringIsRenderedOrOnAFrozenExemptionList() throws {
-        #expect(Self.viewOwnedChrome.count == 17)
+        #expect(Self.viewOwnedChrome.count == 28)
         #expect(Self.fixtureDataGaps.keys.sorted() == ["repo-failed", "single-branch-no-pr-never-pushed"])
-        #expect(stateFixtureIDs.count == 32, "packet 4.0 recorded 32 states; found \(stateFixtureIDs.count)")
+        #expect(
+            stateFixtureIDs.count == 34,
+            "packet 4.0 recorded 32 states and packet 4.3 added 2; found \(stateFixtureIDs.count)")
 
         // Nothing is exempted that no fixture actually asks for.
         var contracted: Set<String> = []
@@ -522,6 +540,86 @@ struct SnapshotPresenterTests {
         )
         #expect(noBranch.accessibilityLabel == Strings.detachedWorktree(shortSHA: "abc1234"))
         #expect(noBranch.prPill == nil, "a worktree with no branch has no PR to show")
+    }
+
+    /// Packet 4.3. The shell used to derive both of these itself — the PR address it did not have
+    /// at all, and the repo folder it read off whichever row happened to be first, which is a
+    /// different folder for a branch checked out in a worktree. Both are facts the presenter
+    /// already holds, so both are fields now.
+    @Test("rowsCarryTheirPRAddressAndSectionsCarryTheirFolder")
+    func rowsCarryTheirPRAddressAndSectionsCarryTheirFolder() throws {
+        let repo = UIFixtures.repo(
+            "demo",
+            worktrees: [
+                Worktree(
+                    path: "/Users/tester/demo",
+                    headSHA: UIFixtures.tipSHA,
+                    branch: "refs/heads/main",
+                    isPrimary: true),
+                Worktree(
+                    path: "/Users/tester/demo-agents-2",
+                    headSHA: UIFixtures.otherSHA,
+                    branch: "refs/heads/agent-task-2"),
+            ],
+            branches: [
+                UIFixtures.branch(
+                    "agent-task-2",
+                    tipSHA: UIFixtures.otherSHA,
+                    worktreePath: "/Users/tester/demo-agents-2",
+                    isCheckedOutInPrimary: false,
+                    pr: UIFixtures.pr(102, headRefName: "agent-task-2", headRefOid: UIFixtures.otherSHA),
+                    prStatus: .open),
+                UIFixtures.branch("no-pr-here", prStatus: .none),
+                UIFixtures.branch(
+                    "status-line-fix",
+                    pr: UIFixtures.pr(105, state: "MERGED", mergedAt: UIClock.ago(UIClock.day),
+                                      headRefName: "status-line-fix"),
+                    prStatus: .merged,
+                    group: .merged),
+            ]
+        )
+        let vm = SnapshotPresenter().present(
+            UIFixtures.snapshot([repo]),
+            refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: uiAppVersion,
+            now: UIClock.now
+        )
+        let section = try #require(vm.sections.first)
+
+        // The repo's own folder, not the first row's — that row opens a worktree elsewhere.
+        #expect(section.path == "/Users/tester/demo")
+        #expect(section.active.first?.primaryAction.payload == "/Users/tester/demo-agents-2")
+
+        let withPR = try #require(section.active.first { $0.title == "agent-task-2" })
+        #expect(withPR.prURL == "https://github.com/tester/demo/pull/102")
+        // A branch GitHub answered about with no PR has no address to offer.
+        #expect(section.active.first { $0.title == "no-pr-here" }?.prURL == nil)
+        // A merged row keeps its PR: that page is what says what happened to the branch.
+        #expect(section.merged.first?.prURL == "https://github.com/tester/demo/pull/105")
+
+        // A worktree with no branch has no PR either, and its row is titled by its folder.
+        let detached = try Self.rows(ofState: "detached-worktree")
+        #expect(detached.allSatisfy { $0.prURL == nil })
+
+        // Every recorded state names its repo's folder, so the header menu is never empty.
+        for id in stateFixtureIDs {
+            let fixture = try loadStateFixture(id)
+            let replayed = Self.presenter(forState: id).present(
+                fixture.snapshot,
+                refreshState: fixture.refreshState,
+                collapsedRepoIDs: Set(fixture.collapsedRepoIDs),
+                scanResult: fixture.scanResult,
+                appVersion: fixture.appVersion,
+                now: fixture.now
+            )
+            for replayedSection in replayed.sections {
+                #expect(
+                    replayedSection.path?.hasPrefix("/") == true,
+                    "\(id): section \(replayedSection.title) has no folder")
+            }
+        }
     }
 
     @Test("editorFallbackChoosesCursorThenVSCodeThenTerminal")

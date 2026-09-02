@@ -105,6 +105,7 @@ public struct SnapshotPresenter: Sendable {
         return RepoSectionVM(
             id: repo.id,
             title: repo.name,
+            path: repo.path,
             isCollapsed: isCollapsed,
             active: rows(branches.filter { $0.group == .active }, in: repo, isCollapsed: isCollapsed, now: now)
                 + worktreeRows,
@@ -147,6 +148,9 @@ public struct SnapshotPresenter: Sendable {
             prPill: branch.prStatus == .notLoaded && isCollapsed
                 ? nil
                 : PRPillVM(text: pillText, status: branch.prStatus),
+            // Every group carries it, not just `.active`: a merged or closed row's PR is the one
+            // page that says what happened to the branch.
+            prURL: branch.pr?.url,
             pushLabel: push.label,
             pushTooltip: push.tooltip,
             aheadLabel: aheadLabel(for: branch),
@@ -171,6 +175,7 @@ public struct SnapshotPresenter: Sendable {
                     title: folderName(worktree.path),
                     worktreeMarker: marker,
                     prPill: nil,
+                    prURL: nil,
                     // There is no branch here, so there is no push fact to state and none is
                     // invented: an empty line is honest where "Never pushed" would not be.
                     pushLabel: "",
@@ -417,15 +422,11 @@ public struct SnapshotPresenter: Sendable {
     /// 1.1) has no case for opening a folder, so the payload carries the path and `.openURL` is
     /// the closest frozen kind; the label is what the row shows either way.
     private func openAction(path: String) -> UserFacingFailure.Action {
-        let label: String
-        if editors.cursor {
-            label = Strings.openInCursorActionLabel
-        } else if editors.vsCode {
-            label = Strings.openInVSCodeActionLabel
-        } else {
-            label = Strings.openInTerminalActionLabel
-        }
-        return UserFacingFailure.Action(label: label, kind: .openURL, payload: path)
+        UserFacingFailure.Action(
+            label: Strings.openInAvailableEditorLabel(editors),
+            kind: .openURL,
+            payload: path
+        )
     }
 
     // MARK: - Small helpers

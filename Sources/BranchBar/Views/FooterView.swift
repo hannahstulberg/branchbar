@@ -102,13 +102,13 @@ struct FooterView: View {
     /// the only evidence a hidden repo exists, so it is in the label rather than in a tooltip.
     private var showHidden: some View {
         Toggle(
-            ShellStrings.showHiddenToggleLabel(count: hiddenCount),
+            Strings.showHiddenToggleLabel(count: hiddenCount),
             isOn: Binding(get: { showsHidden }, set: setShowsHidden)
         )
         .toggleStyle(.checkbox)
         .font(.caption)
         .padding(.horizontal, Metrics.horizontalPadding)
-        .accessibilityHint(ShellStrings.unhideRepoActionLabel)
+        .accessibilityHint(Strings.unhideRepoActionLabel)
     }
 
     /// PLAN.md §3's opt-in toggle. Disabled rather than hidden where it cannot work, because a

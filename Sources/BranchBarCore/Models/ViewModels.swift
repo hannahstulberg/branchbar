@@ -22,6 +22,10 @@ public struct SnapshotVM: Hashable, Codable, Sendable {
 public struct RepoSectionVM: Hashable, Codable, Sendable {
     public var id: RepoID
     public var title: String
+    /// The repo's own folder, so a section-level menu (open in an editor, Show in Finder, Copy
+    /// path) names it instead of guessing it off whichever row happens to be first. Optional and
+    /// defaulted so a `RepoSectionVM` recorded before the field existed still decodes.
+    public var path: String?
     public var isCollapsed: Bool
     public var active: [BranchRowVM]
     public var openElsewhere: [PRRowVM]
@@ -35,6 +39,7 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
     public init(
         id: RepoID,
         title: String,
+        path: String? = nil,
         isCollapsed: Bool = false,
         active: [BranchRowVM] = [],
         openElsewhere: [PRRowVM] = [],
@@ -45,6 +50,7 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
     ) {
         self.id = id
         self.title = title
+        self.path = path
         self.isCollapsed = isCollapsed
         self.active = active
         self.openElsewhere = openElsewhere
@@ -62,6 +68,10 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
     /// "Worktree at commit abc1234 (no branch)" and friends; empty when there is no worktree.
     public var worktreeMarker: String?
     public var prPill: PRPillVM?
+    /// The matched PR's web address, so the row's menu can offer "Open PR" without the shell
+    /// having to hold a `PRInfo`. Nil when no PR matched this branch. Optional and defaulted so a
+    /// `BranchRowVM` recorded before the field existed still decodes.
+    public var prURL: String?
     /// "Pushed from this Mac 2 days ago" or "Last push unknown · newest commit dated 2 days ago".
     public var pushLabel: String
     public var pushTooltip: String
@@ -74,6 +84,7 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
         title: String,
         worktreeMarker: String? = nil,
         prPill: PRPillVM? = nil,
+        prURL: String? = nil,
         pushLabel: String,
         pushTooltip: String,
         aheadLabel: String? = nil,
@@ -83,6 +94,7 @@ public struct BranchRowVM: Hashable, Codable, Sendable {
         self.title = title
         self.worktreeMarker = worktreeMarker
         self.prPill = prPill
+        self.prURL = prURL
         self.pushLabel = pushLabel
         self.pushTooltip = pushTooltip
         self.aheadLabel = aheadLabel

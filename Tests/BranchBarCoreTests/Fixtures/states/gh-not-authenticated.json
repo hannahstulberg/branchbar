@@ -7,7 +7,8 @@
     "Not signed in to github.com",
     "The GitHub CLI is installed but not signed in to github.com. BranchBar can open Terminal with the sign-in command ready for you to run.",
     "Open Terminal",
-    "gh auth login --hostname github.com"
+    "gh auth login --hostname github.com",
+    "BranchBar: sign in to the GitHub CLI"
   ],
   "id" : "gh-not-authenticated",
   "now" : 810302400,

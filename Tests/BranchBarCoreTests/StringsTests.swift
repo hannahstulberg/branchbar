@@ -247,6 +247,8 @@ enum UIStates {
         detachedWorktree,
         worktreeCheckout,
         refreshRunning,
+        hiddenRepo,
+        launchAtLoginNeedsApproval,
     ]
 
     // 1
@@ -292,6 +294,7 @@ enum UIStates {
             ("skippedCategoriesSummary", Strings.skippedCategoriesSummary),
             ("scanRootsHeading", Strings.scanRootsHeading),
             ("removeScanRootActionLabel", Strings.removeScanRootActionLabel),
+            ("filesAndFoldersSettingsURL", Strings.filesAndFoldersSettingsURL),
         ],
         snapshot: UIFixtures.snapshot([UIFixtures.repo(branches: [UIFixtures.branch("main")])]),
         refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
@@ -340,6 +343,7 @@ enum UIStates {
             ("ghNotAuthenticatedMessage", Strings.ghNotAuthenticatedMessage(host: "github.com")),
             ("openTerminalActionLabel", Strings.openTerminalActionLabel),
             ("ghAuthLoginCommand", Strings.ghAuthLoginCommand(host: "github.com")),
+            ("ghSignInScriptBanner", Strings.ghSignInScriptBanner),
         ],
         snapshot: UIFixtures.snapshot(
             [
@@ -608,6 +612,10 @@ enum UIStates {
             ("cursorNotInstalledNotice", Strings.cursorNotInstalledNotice),
             ("openInVSCodeActionLabel", Strings.openInVSCodeActionLabel),
             ("openInTerminalActionLabel", Strings.openInTerminalActionLabel),
+            (
+                "openInAvailableEditorLabel",
+                Strings.openInAvailableEditorLabel(EditorAvailability(cursor: false, vsCode: true))
+            ),
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(branches: [UIFixtures.branch("main", prStatus: .none)])
@@ -1049,6 +1057,51 @@ enum UIStates {
             UIFixtures.repo(branches: [UIFixtures.branch("main", prStatus: .none)])
         ]),
         refreshState: .running(completed: 3, total: 12)
+    )
+
+    // 33
+    static let hiddenRepo = UIState(
+        id: "hidden-repo",
+        title: "A repo the user hid, and the footer control that brings it back",
+        planReference: "§8 packet 4.2: per-row Hide, the Show hidden (N) toggle, the Hidden marker",
+        entries: [
+            ("hideRepoActionLabel", Strings.hideRepoActionLabel),
+            ("unhideRepoActionLabel", Strings.unhideRepoActionLabel),
+            ("showHiddenToggleLabel", Strings.showHiddenToggleLabel(count: 1)),
+            ("hiddenRepoMarker", Strings.hiddenRepoMarker),
+        ],
+        // Two repos so the second can be the hidden one. Hiding is a choice a person makes rather
+        // than a state a `Snapshot` can be found in, so which repo is hidden — and whether "Show
+        // hidden" is on — lives outside the frozen envelope: the shell's `BRANCHBAR_PREVIEW_HIDDEN`
+        // hides this fixture's last repo, and `=shown` is the on half of the toggle.
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo("demo", branches: [UIFixtures.branch("main", prStatus: .none)]),
+            UIFixtures.repo("archived-experiment", branches: [
+                UIFixtures.branch("main", prStatus: .none)
+            ]),
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 34
+    static let launchAtLoginNeedsApproval = UIState(
+        id: "launch-at-login-needs-approval",
+        title: "The login-item toggle was flipped and macOS has not allowed it yet",
+        planReference: "§3, §5b: launch at login through SMAppService with a LaunchAgent fallback",
+        entries: [
+            ("launchAtLoginNeedsApproval", Strings.launchAtLoginNeedsApproval),
+            ("launchAtLoginTranslocated", Strings.launchAtLoginTranslocated),
+            ("launchAtLoginUnbundled", Strings.launchAtLoginUnbundled),
+            ("launchAtLoginNotInApplications", Strings.launchAtLoginNotInApplications),
+            ("launchAtLoginFailed", Strings.launchAtLoginFailed),
+        ],
+        // The five outcomes are facts about this Mac — where the bundle sits, what `SMAppService`
+        // answered — not about the `Snapshot`, so the fixture carries an ordinary populated list
+        // and the sentence beside the toggle is what the state is named for.
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [UIFixtures.branch("main", prStatus: .none)])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
     )
 }
 

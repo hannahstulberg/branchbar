@@ -68,6 +68,13 @@ struct BranchRowView: View {
         .accessibilityLabel(row.accessibilityLabel)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: row.primaryAction.label) { perform(row.primaryAction) }
+        // VoiceOver reaches a context menu through the rotor, so the item the mouse just gained is
+        // an accessibility action too (§5a: a control the mouse has, the keyboard has).
+        .accessibilityActions {
+            if let url = row.prURL, !url.isEmpty {
+                Button(Strings.openPRActionLabel) { Actions.openPR(url: url) }
+            }
+        }
     }
 
     /// The secondary actions §5a names. `BranchRowVM` holds only `primaryAction`, so these labels
@@ -77,6 +84,15 @@ struct BranchRowView: View {
             perform(row.primaryAction)
         } label: {
             Label(row.primaryAction.label, systemImage: Glyph.openInEditor)
+        }
+        // Only on a row whose branch actually matched a PR (packet 4.3's `BranchRowVM.prURL`): an
+        // item that opens nothing is worse than no item.
+        if let url = row.prURL, !url.isEmpty {
+            Button {
+                Actions.openPR(url: url)
+            } label: {
+                Label(Strings.openPRActionLabel, systemImage: Glyph.openPR)
+            }
         }
         if let path = folderPath {
             Button {

@@ -157,15 +157,61 @@ let scanPolicy = ScanPolicy(homeRoot: roots[0], extraRoots: Array(roots.dropFirs
 let scanner = RepoScanner(fileSystem: fileSystem, commandRunner: runner, gitExecutable: gitPath)
 
 // One CLI run is one whole answer, so every repo it finds is treated as expanded and its PRs are
-// fetched. The scan is done here rather than left to the coordinator so the repo IDs are known
-// before the refresh starts; seeding the cache with it means the coordinator reuses it instead of
-// walking the tree a second time.
-let scan: ScanResult
-do {
-    scan = try await scanner.scan(policy: scanPolicy)
-} catch {
-    fail("scan failed: \(error)")
+// fetched — which means the repo IDs have to be known before the refresh that fetches them starts.
+//
+// Packet 4.3: that used to be a bare `scanner.scan`, run ahead of the coordinator and therefore
+// outside `RefreshPolicy.scanDeadline`, so the CLI could hang exactly where packet 4.1's first
+// launch did — inside the walk, behind a folder macOS had not been given permission to read, with
+// nothing able to end it. The walk now runs where the app's does: inside a `RefreshCoordinator`,
+// wired the way `AppModel` wires one, whose `scanWithinDeadline` bounds it and hands back what it
+// found.
+//
+// The discovery coordinator is a second one, with its own throwaway cache, for two reasons. A
+// refresh always persists its snapshot, and a snapshot in the cache the real refresh reads would
+// become that refresh's "previous" — which is what decides repo order, so the table would reorder
+// itself between runs. And its loader is wired to a runner that launches nothing, so discovering
+// the repos costs one walk rather than a second pass of git over every repo it finds.
+
+/// A `CommandRunner` that answers every command with an empty success. The discovery pass wants
+/// the coordinator's scan and nothing else; the repos it walks past are loaded again, for real, by
+/// the refresh below.
+struct NoCommandsRunner: CommandRunner {
+    func run(_ command: Command) async throws -> CommandOutput {
+        CommandOutput(exitCode: 0, standardOutput: Data(), standardError: Data())
+    }
 }
+
+let discoveryDirectory = (NSTemporaryDirectory() as NSString)
+    .appendingPathComponent("branchbar-cli-scan-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(
+    atPath: discoveryDirectory, withIntermediateDirectories: true)
+let discoveryCache = FileCacheStore(
+    fileURL: URL(
+        fileURLWithPath: (discoveryDirectory as NSString).appendingPathComponent("cache.json")))
+let silentRunner = NoCommandsRunner()
+let discovery = RefreshCoordinator(
+    scanner: scanner,
+    loader: RepoLoader(
+        git: GitClient(runner: silentRunner, gitPath: gitPath, timeout: policy.gitTimeout),
+        gh: nil,
+        reflog: ReflogFileReader(fileSystem: fileSystem),
+        policy: policy),
+    cache: discoveryCache,
+    policy: policy,
+    scanPolicy: scanPolicy,
+    fileSystem: fileSystem)
+
+_ = await discovery.refresh(
+    force: true,
+    expandedRepoIDs: [],
+    tools: tools,
+    onProgress: { _ in },
+    rescan: true)
+
+guard let scan = ((try? discoveryCache.load()) ?? nil)?.scan else {
+    fail("scan failed: the discovery refresh recorded no scan under \(scanPolicy.homeRoot)")
+}
+try? FileManager.default.removeItem(atPath: discoveryDirectory)
 try? cache.save(CacheFile(scan: scan))
 
 let loader = RepoLoader(
@@ -201,12 +247,17 @@ if options.json {
     exit(0)
 }
 
+// The refresh rescans when the discovery pass was cut short by `scanDeadline`, so the scan the
+// table describes is read back the way `AppModel.reloadScanFromCache` reads it: whatever the
+// refresh actually used. Identical to `scan` on any run the deadline did not fire on.
+let finalScan = ((try? cache.load()) ?? nil)?.scan ?? scan
+
 let presenter = SnapshotPresenter()
 let viewModel = presenter.present(
     snapshot,
     refreshState: .idle(lastRefreshedAt: snapshot.refreshedAt),
     collapsedRepoIDs: [],
-    scanResult: scan,
+    scanResult: finalScan,
     appVersion: "cli",
     now: Date())
 
