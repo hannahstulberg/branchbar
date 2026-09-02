@@ -4,16 +4,68 @@
 
   ],
   "expectedStrings" : [
-    "Open",
-    "Open PR"
+    "BranchBar stopped looking for repos before it finished. What you see may be incomplete. Rescan to try again.",
+    "Rescan"
   ],
-  "id" : "pr-open",
+  "id" : "scan-incomplete",
   "now" : 810302400,
-  "planReference" : "PRStatus.open",
+  "planReference" : "§3: a scan the deadline cut off is not a scan the list can be trusted from",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
     }
+  },
+  "scanResult" : {
+    "candidatesExamined" : 1204,
+    "depthCutDirectories" : 0,
+    "policy" : {
+      "descendIntoRepos" : false,
+      "extraRoots" : [
+
+      ],
+      "homeRoot" : "/Users/tester",
+      "maxDepth" : 6,
+      "skipDirectoryNames" : [
+        "Library",
+        "Applications",
+        "Pictures",
+        "Movies",
+        "Music",
+        "Public",
+        "node_modules",
+        "vendor",
+        "Pods",
+        "DerivedData",
+        "build",
+        "dist",
+        "target",
+        "venv",
+        "site-packages",
+        "__pycache__",
+        "go/pkg"
+      ],
+      "skipHiddenDirectories" : true
+    },
+    "repos" : [
+      {
+        "id" : {
+          "commonDir" : "/Users/tester/demo0/.git"
+        },
+        "path" : "/Users/tester/demo0"
+      }
+    ],
+    "scannedAt" : 810302340,
+    "skippedHiddenDirectories" : 0,
+    "skippedSubmodules" : [
+
+    ],
+    "skippedWorktreeCheckouts" : [
+
+    ],
+    "truncatedByDeadline" : true,
+    "unreadableDirectories" : [
+
+    ]
   },
   "snapshot" : {
     "refreshedAt" : 810302388,
@@ -24,39 +76,17 @@
             "committerDate" : 810129600,
             "group" : "active",
             "isCheckedOutInPrimary" : true,
-            "name" : "search-filters",
-            "pr" : {
-              "baseRefName" : "main",
-              "headRefName" : "search-filters",
-              "headRefOid" : "1111111111111111111111111111111111111111",
-              "headRepositoryOwnerLogin" : "tester",
-              "isDraft" : false,
-              "number" : 102,
-              "reviewDecision" : "",
-              "state" : "OPEN",
-              "updatedAt" : 810298800,
-              "url" : "https://github.com/tester/demo/pull/102"
-            },
-            "prStatus" : "open",
+            "name" : "main",
+            "prStatus" : "notChecked",
             "push" : {
-              "aheadOfLastKnownRemote" : 0,
-              "hasUpstream" : true,
-              "observedPushAt" : 810129600,
-              "observedPushOID" : "1111111111111111111111111111111111111111",
+              "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,
               "remoteRefsKnown" : true,
-              "source" : "reflogObserved",
+              "source" : "none",
               "upstreamGone" : false
             },
-            "tipSHA" : "1111111111111111111111111111111111111111",
-            "upstream" : {
-              "ahead" : 0,
-              "behind" : 0,
-              "isGone" : false,
-              "ref" : "origin/search-filters",
-              "remote" : "origin"
-            }
+            "tipSHA" : "1111111111111111111111111111111111111111"
           }
         ],
         "errors" : [
@@ -112,5 +142,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "Branch with an open PR"
+  "title" : "The scan was cut short and named no folder it could not read"
 }

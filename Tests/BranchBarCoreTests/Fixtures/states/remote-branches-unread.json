@@ -4,12 +4,13 @@
 
   ],
   "expectedStrings" : [
-    "Open",
-    "Open PR"
+    "Push history not checked",
+    "BranchBar could not read this repo's branches on origin this time, so it is not saying anything about where this branch stands against them.",
+    "Could not read this repo's last-known origin. Refresh to try again."
   ],
-  "id" : "pr-open",
+  "id" : "remote-branches-unread",
   "now" : 810302400,
-  "planReference" : "PRStatus.open",
+  "planReference" : "§3: absence copy follows a successful query proving absence, never a failed one",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
@@ -24,29 +25,16 @@
             "committerDate" : 810129600,
             "group" : "active",
             "isCheckedOutInPrimary" : true,
-            "name" : "search-filters",
-            "pr" : {
-              "baseRefName" : "main",
-              "headRefName" : "search-filters",
-              "headRefOid" : "1111111111111111111111111111111111111111",
-              "headRepositoryOwnerLogin" : "tester",
-              "isDraft" : false,
-              "number" : 102,
-              "reviewDecision" : "",
-              "state" : "OPEN",
-              "updatedAt" : 810298800,
-              "url" : "https://github.com/tester/demo/pull/102"
-            },
-            "prStatus" : "open",
+            "name" : "feature",
+            "prStatus" : "none",
             "push" : {
               "aheadOfLastKnownRemote" : 0,
               "hasUpstream" : true,
-              "observedPushAt" : 810129600,
-              "observedPushOID" : "1111111111111111111111111111111111111111",
               "originMovedSince" : false,
+              "remoteName" : "origin",
               "remoteRefExists" : false,
-              "remoteRefsKnown" : true,
-              "source" : "reflogObserved",
+              "remoteRefsKnown" : false,
+              "source" : "none",
               "upstreamGone" : false
             },
             "tipSHA" : "1111111111111111111111111111111111111111",
@@ -54,13 +42,16 @@
               "ahead" : 0,
               "behind" : 0,
               "isGone" : false,
-              "ref" : "origin/search-filters",
+              "ref" : "origin/feature",
               "remote" : "origin"
             }
           }
         ],
         "errors" : [
-
+          {
+            "message" : "git for-each-ref -- refs/remotes/ failed",
+            "stage" : "remotes"
+          }
         ],
         "githubSlug" : {
           "host" : "github.com",
@@ -112,5 +103,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "Branch with an open PR"
+  "title" : "Reading this repo's branches on origin failed"
 }

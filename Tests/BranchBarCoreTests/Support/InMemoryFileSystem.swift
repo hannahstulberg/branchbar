@@ -117,10 +117,42 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
         return seen.values.sorted { $0.name < $1.name }
     }
 
+    /// Counted so `reflogAbsenceIsDeterminedByOpenErrno` can prove the reflog reader stopped
+    /// preflighting with it (codex round 3, BLOCKER 2).
+    public private(set) var fileExistsCallCount = 0
+
     public func fileExists(atPath path: String) -> Bool {
         let normalized = Self.normalized(path)
         lock.lock(); defer { lock.unlock() }
+        fileExistsCallCount += 1
         return files[normalized] != nil || directories.contains(normalized)
+    }
+
+    /// The double's answer to the no-follow directory check: an entry this tree holds as a
+    /// directory and does not hold as a symlink. A symlink is refused for the same reason
+    /// `RealFileSystem` passes `O_NOFOLLOW` — the row claims to open the thing at this path.
+    public func isDirectoryNoFollow(atPath path: String) -> Bool {
+        let normalized = Self.normalized(path)
+        lock.lock(); defer { lock.unlock() }
+        return directories.contains(normalized) && !symlinks.contains(normalized)
+    }
+
+    /// nil for a path this tree does not hold at all; throws for one it holds as unreadable or as
+    /// something that is not a regular file — the two answers `RealFileSystem` gives from one
+    /// `open` plus one `fstat`, with no `fileExists` in front of either.
+    public func statRegularFile(atPath path: String) throws -> RegularFileStat? {
+        let normalized = Self.normalized(path)
+        lock.lock(); defer { lock.unlock() }
+        if unreadable.contains(normalized) { throw PermissionDenied(path: normalized) }
+        if let data = files[normalized] {
+            return RegularFileStat(
+                size: data.count,
+                modificationDate: mtimes[normalized] ?? Date(timeIntervalSince1970: 0))
+        }
+        if directories.contains(normalized) {
+            throw FileReadError.notARegularFile(path: normalized)
+        }
+        return nil
     }
 
     public func isExecutableFile(atPath path: String) -> Bool {

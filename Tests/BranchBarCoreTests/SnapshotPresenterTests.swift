@@ -61,8 +61,8 @@ extension BranchRowVM {
             pushLabel,
             pushTooltip,
             aheadLabel ?? "",
-            primaryAction.label,
-            primaryAction.payload ?? "",
+            primaryAction?.label ?? "",
+            primaryAction?.payload ?? "",
             accessibilityLabel,
         ]
     }
@@ -200,9 +200,12 @@ struct SnapshotPresenterTests {
         // idle half of the stale-row warning.
         // F11 added `non-origin-in-sync` and `non-origin-upstream-missing`: the two other things a
         // fork-tracking row can say, both of which named origin before codex round 2's MAJOR 5.
+        // codex round 3 added three, one per finding that named a state with no row:
+        // `scan-incomplete` (MAJOR 2), `push-history-unreadable` (MAJOR 7),
+        // `remote-branches-unread` (MAJOR 6).
         #expect(
-            stateFixtureIDs.count == 45,
-            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1, codex round 2 added 5, F11 added 2; found \(stateFixtureIDs.count)")
+            stateFixtureIDs.count == 48,
+            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1, codex round 2 added 5, F11 added 2, codex round 3 added 3; found \(stateFixtureIDs.count)")
 
         // Nothing is exempted that no fixture actually asks for.
         var contracted: Set<String> = []
@@ -844,7 +847,7 @@ struct SnapshotPresenterTests {
 
         // The repo's own folder, not the first row's — that row opens a worktree elsewhere.
         #expect(section.path == "/Users/tester/demo")
-        #expect(section.active.first?.primaryAction.payload == "/Users/tester/demo-agents-2")
+        #expect(section.active.first?.primaryAction?.payload == "/Users/tester/demo-agents-2")
 
         let withPR = try #require(section.active.first { $0.title == "agent-task-2" })
         #expect(withPR.prURL == "https://github.com/tester/demo/pull/102")
@@ -889,7 +892,7 @@ struct SnapshotPresenterTests {
                 appVersion: uiAppVersion,
                 now: UIClock.now
             )
-            return try #require(vm.sections.first?.active.first?.primaryAction.label)
+            return try #require(vm.sections.first?.active.first?.primaryAction?.label)
         }
 
         #expect(try label(EditorAvailability(cursor: true, vsCode: true)) == Strings.openInCursorActionLabel)
@@ -961,5 +964,169 @@ struct SnapshotPresenterTests {
             now: fixture.now
         )
         return vm.sections.flatMap { $0.active + $0.merged + $0.closedUnmerged }
+    }
+}
+
+// MARK: - Packet F13 — codex round 3, BLOCKER 1, MAJOR 2, MAJOR 6, MAJOR 7
+
+/// The presenter half of the round-3 findings: a row offers an action only for a folder something
+/// established is a folder, a scan cut short says so whether or not it named a folder, and two
+/// push wordings that used to be claims the data did not support.
+@Suite("A row claims only what the refresh established")
+struct SnapshotPresenterRoundThreeTests {
+
+    private static func present(_ repo: Repo, scanResult: ScanResult? = nil) -> SnapshotVM {
+        SnapshotPresenter().present(
+            UIFixtures.snapshot([repo]),
+            refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+            collapsedRepoIDs: [],
+            scanResult: scanResult,
+            appVersion: uiAppVersion,
+            now: UIClock.now)
+    }
+
+    /// codex round 3, BLOCKER 1. `git worktree list` prints whatever `.git/worktrees` says, and
+    /// those records are files anyone who can write under `~` can write. A record git itself calls
+    /// prunable — or one `RepoLoader` marked prunable because its path will not open as a
+    /// directory — still shows as a row, because the worktree is part of the repo, and offers
+    /// nothing to click, because Terminal is the last fallback and executes a `.command` document.
+    @Test("prunableWorktreeGetsNoRowAction")
+    func prunableWorktreeGetsNoRowAction() throws {
+        let path = "\(UIFixtures.home)/demo"
+        let repo = UIFixtures.repo(worktrees: [
+            Worktree(path: path, headSHA: UIFixtures.tipSHA, branch: "refs/heads/main", isPrimary: true),
+            Worktree(path: "/tmp/payload.command", headSHA: UIFixtures.otherSHA, isPrunable: true),
+            Worktree(path: "\(UIFixtures.home)/demo-review", headSHA: UIFixtures.otherSHA),
+        ])
+
+        let section = try #require(Self.present(repo).sections.first)
+        let refused = try #require(section.active.first { $0.title == "payload.command" })
+        #expect(refused.primaryAction == nil,
+                "a prunable worktree's path reached a clickable row: \(String(describing: refused.primaryAction))")
+
+        // The healthy detached worktree beside it still opens, so the rule is about the record and
+        // not about detached worktrees.
+        let usable = try #require(section.active.first { $0.title == "demo-review" })
+        #expect(usable.primaryAction?.payload == "\(UIFixtures.home)/demo-review")
+
+        // And nothing anywhere in the rendered view models carries the payload path.
+        #expect(!Self.present(repo).renderedStrings.contains { $0.contains("payload.command") && $0.hasPrefix("/") })
+    }
+
+    /// The repo's own folder is the fallback every branch row opens, so it carries the same
+    /// verdict: a cached snapshot naming a path that is no longer a directory offers no action.
+    @Test("branchRowsOfferNothingWhenTheRepoFolderIsNotADirectory")
+    func branchRowsOfferNothingWhenTheRepoFolderIsNotADirectory() throws {
+        var repo = UIFixtures.repo(branches: [UIFixtures.branch("main")])
+        #expect(try #require(Self.present(repo).sections.first?.active.first).primaryAction != nil)
+
+        repo.pathIsDirectory = false
+        #expect(try #require(Self.present(repo).sections.first?.active.first).primaryAction == nil)
+    }
+
+    /// codex round 3, MAJOR 2. The notice was gated on the unreadable-folder list alone, so a walk
+    /// killed inside an ordinary directory — which names no folder, because nothing refused it —
+    /// left a short repo list with nothing at all saying it was short.
+    @Test("truncatedScanWithNoUnreadableFoldersStillShowsTheIncompleteNotice")
+    func truncatedScanWithNoUnreadableFoldersStillShowsTheIncompleteNotice() throws {
+        let repo = UIFixtures.repo(branches: [UIFixtures.branch("main")])
+        let truncated = UIFixtures.scanResult(truncated: true)
+        #expect(truncated.unreadableDirectories.isEmpty)
+
+        let notice = try #require(Self.present(repo, scanResult: truncated).sections.first?.notScannedNotice)
+        #expect(notice.text.contains(Strings.scanIncomplete))
+        #expect(notice.action?.kind == .rescan)
+
+        // A finished scan with nothing to report still shows nothing.
+        #expect(Self.present(repo, scanResult: UIFixtures.scanResult()).sections.first?.notScannedNotice == nil)
+
+        // A truncated scan that *did* name a folder keeps the actionable "Allow access…" and adds
+        // the incomplete sentence rather than replacing it.
+        let both = UIFixtures.scanResult(unreadable: ["/Users/tester/Documents"], truncated: true)
+        let mixed = try #require(Self.present(repo, scanResult: both).sections.first?.notScannedNotice)
+        #expect(mixed.text.contains(Strings.notScanned(folders: ["Documents"])))
+        #expect(mixed.text.contains(Strings.scanIncomplete))
+        #expect(mixed.action?.kind == .grantFolderAccess)
+
+        // With zero repos there is no section to carry it, and the empty state does (codex MAJOR 3
+        // established that slot; this is the truncated case reaching it).
+        let empty = SnapshotPresenter().present(
+            UIFixtures.snapshot([]),
+            refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+            collapsedRepoIDs: [],
+            scanResult: truncated,
+            appVersion: uiAppVersion,
+            now: UIClock.now)
+        #expect(empty.emptyState?.notice?.text.contains(Strings.scanIncomplete) == true)
+    }
+
+    /// codex round 3, MAJOR 6. `for-each-ref -- refs/remotes/` failed, so there is no tip for a
+    /// reason that says nothing about this branch. The row used to read "No tracked remote branch"
+    /// over a tertiary line claiming the branch was in sync with that same remote.
+    @Test("failedRemoteRefListingDoesNotClaimInSyncOrNoTrackedBranch")
+    func failedRemoteRefListingDoesNotClaimInSyncOrNoTrackedBranch() throws {
+        let unread = UIFixtures.repo(branches: [
+            UIFixtures.branch(
+                "feature",
+                upstream: Upstream(ref: "origin/feature", remote: "origin"),
+                push: PushInfo(
+                    source: .none,
+                    hasUpstream: true,
+                    aheadOfLastKnownRemote: 0,
+                    remoteName: "origin",
+                    remoteRefsKnown: false))
+        ])
+        let row = try #require(Self.present(unread).sections.first?.active.first)
+
+        #expect(row.pushLabel == Strings.pushHistoryNotChecked)
+        #expect(row.pushTooltip == Strings.pushHistoryNotCheckedTooltip)
+        #expect(!row.pushLabel.contains("No tracked remote branch"))
+        #expect(row.aheadLabel?.contains("In sync") != true, "\(row.aheadLabel ?? "nil")")
+
+        // An untracked branch is the other half: with the listing failed, "No matching branch on
+        // last-known origin" is a claim nobody checked.
+        let untracked = UIFixtures.repo(branches: [
+            UIFixtures.branch("solo", push: PushInfo(source: .none, remoteRefsKnown: false))
+        ])
+        let soloRow = try #require(Self.present(untracked).sections.first?.active.first)
+        #expect(soloRow.aheadLabel == nil, "\(soloRow.aheadLabel ?? "nil")")
+
+        // And with the listing intact both sentences come back, so the suppression is the failure
+        // and not a new silence.
+        let known = UIFixtures.repo(branches: [
+            UIFixtures.branch(
+                "feature",
+                upstream: Upstream(ref: "origin/feature", remote: "origin"),
+                push: PushInfo(
+                    source: .none, hasUpstream: true, aheadOfLastKnownRemote: 0, remoteName: "origin"))
+        ])
+        let knownRow = try #require(Self.present(known).sections.first?.active.first)
+        #expect(knownRow.pushLabel == Strings.noTrackedRemoteBranch)
+        #expect(knownRow.aheadLabel == Strings.inSync(remote: "origin"))
+    }
+
+    /// codex round 3, MAJOR 7. A reflog that stopped at an uncertainty boundary has no date to
+    /// report, and the tip-commit fallback would be reporting one over the corruption that stopped
+    /// the walk.
+    @Test("unreadablePushHistoryStatesNoDateAtAll")
+    func unreadablePushHistoryStatesNoDateAtAll() throws {
+        let repo = UIFixtures.repo(branches: [
+            UIFixtures.branch(
+                "recreated",
+                upstream: Upstream(ref: "origin/recreated", remote: "origin"),
+                push: PushInfo(
+                    source: .unreadable,
+                    hasUpstream: true,
+                    aheadOfLastKnownRemote: 0,
+                    remoteTipCommitDate: UIClock.ago(2 * UIClock.day),
+                    remoteName: "origin",
+                    remoteRefExists: true))
+        ])
+        let row = try #require(Self.present(repo).sections.first?.active.first)
+
+        #expect(row.pushLabel == Strings.pushHistoryUnreadable)
+        #expect(row.pushTooltip == Strings.pushHistoryUnreadableTooltip)
+        #expect(!row.pushLabel.contains("ago"), "a date was reported over the corruption")
+        #expect(!row.pushLabel.contains("Last push unknown"))
     }
 }

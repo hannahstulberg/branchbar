@@ -309,8 +309,12 @@ struct ReflogFileReaderTailBoundTests {
             + "0000000000000000000000000000000000000002 "
             + "Tester tester@example.com 1788310851 -0400\tupdate by push"
 
-        // The parser itself still reads the whole string it is handed: the bound is the read.
-        #expect(ReflogFileReader.parse(line) != nil)
+        // Read whole, this line used to parse, which is what made the bound load-bearing. Since
+        // codex round 3 MAJOR 7 it does not: field 2 of the shifted header is the word `word`, not
+        // a 40- or 64-character hexadecimal OID, so the line is malformed and the reader stops at
+        // it. Both defences hold independently, and the test now pins the second as well.
+        #expect(ReflogFileReader.parse(line) == nil, "an OID taken from mid-line was accepted")
+        #expect(ReflogFileReader.read(line) == .uncertain)
 
         #expect(try Self.observation(Self.reader(contents: line)) == nil,
                 "a half line in the tail window was parsed as if it were a whole one")
@@ -394,5 +398,138 @@ struct ReflogSpecialFileTests {
         let found = try #require(try ReflogFileReader(fileSystem: RealFileSystem())
             .observation(commonDirectory: commonDirectory, remote: "origin", branch: "main"))
         #expect(found.newOID == "00000000000000000000000000000000000000bb")
+    }
+}
+
+// MARK: - Packet F13 — codex round 3, BLOCKER 2 and MAJOR 7
+
+/// codex round 3, MAJOR 7: "Malformed reflog lines can cross a deletion boundary and fabricate
+/// push history." Every malformed line was skipped, so a torn or crafted deletion entry was
+/// ignored and an older pre-deletion push was attributed to the branch that replaced it. The
+/// parser also accepted arbitrary OID text, arbitrary timestamps, and any message that merely
+/// began `update by push`.
+///
+/// BLOCKER 2 is the other half of this file's contract: absence comes from the open's errno, not
+/// from a `fileExists` preflight that answers about a path a moment before the read answers about
+/// a descriptor.
+@Suite("A reflog line this reader cannot vouch for stops the walk")
+struct ReflogUncertaintyTests {
+
+    private static let commonDirectory = "/Users/tester/repo/.git"
+
+    private static func reader(contents: String) -> (ReflogFileReader, InMemoryFileSystem) {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addFile(
+            ReflogFileReader.reflogPath(
+                commonDirectory: commonDirectory, remote: "origin", branch: "main"),
+            contents: contents)
+        return (ReflogFileReader(fileSystem: fs), fs)
+    }
+
+    private static func line(
+        old: String = String(repeating: "a", count: 40),
+        new: String = String(repeating: "b", count: 40),
+        at seconds: Int = 1_788_310_851,
+        message: String = "update by push"
+    ) -> String {
+        "\(old) \(new) Tester Person <tester@example.com> \(seconds) -0400\t\(message)"
+    }
+
+    /// The finding's own scenario. Newest-first, the walk meets a line it cannot parse before it
+    /// reaches the push above it. That unparsable line may be a deletion entry torn by a partial
+    /// write, in which case the push above it belongs to a branch that no longer exists.
+    @Test("malformedLineAboveAPushIsAnUncertaintyBoundary")
+    func malformedLineAboveAPushIsAnUncertaintyBoundary() throws {
+        let contents = [
+            Self.line(new: String(repeating: "c", count: 40), at: 1_788_000_000),
+            "this line is not a reflog entry at all",
+        ].joined(separator: "\n") + "\n"
+
+        #expect(ReflogFileReader.read(contents) == .uncertain)
+        #expect(ReflogFileReader.parse(contents) == nil,
+                "a push found above corruption was reported as this branch's own")
+
+        let (reader, _) = Self.reader(contents: contents)
+        #expect(try reader.reading(
+            commonDirectory: Self.commonDirectory, remote: "origin", branch: "main") == .uncertain)
+
+        // Without the corruption the same push is reported, so the boundary is what changed the
+        // answer and not the fixture.
+        #expect(ReflogFileReader.read(Self.line(new: String(repeating: "c", count: 40)))
+                == .observed(ReflogObservation(
+                    pushedAt: Date(timeIntervalSince1970: 1_788_310_851),
+                    newOID: String(repeating: "c", count: 40))))
+    }
+
+    /// An OID is 40 hexadecimal characters for SHA-1 or 64 for SHA-256. "Whatever sat in field 2"
+    /// let a header whose fields had shifted report a fragment of an author's name as the pushed
+    /// commit — the value `originMovedSince` is then decided by.
+    @Test("nonHexOIDIsMalformed")
+    func nonHexOIDIsMalformed() {
+        #expect(ReflogFileReader.read(Self.line(new: "not-a-real-object-id-but-forty-chars-long")) == .uncertain)
+        #expect(ReflogFileReader.read(Self.line(new: String(repeating: "b", count: 39))) == .uncertain)
+        #expect(ReflogFileReader.read(Self.line(old: "zzzz")) == .uncertain)
+
+        // 64 hexadecimal characters is SHA-256, which git writes and this reader accepts.
+        let sha256 = String(repeating: "9", count: 64)
+        #expect(ReflogFileReader.read(Self.line(old: String(repeating: "0", count: 64), new: sha256))
+                == .observed(ReflogObservation(
+                    pushedAt: Date(timeIntervalSince1970: 1_788_310_851), newOID: sha256)))
+    }
+
+    /// A timestamp that has not happened is not evidence of a past push, and neither is one before
+    /// git existed. One day of slack absorbs clock skew between two machines.
+    @Test("futureTimestampIsMalformed")
+    func futureTimestampIsMalformed() {
+        let now = Date(timeIntervalSince1970: 1_788_310_851)
+        let farFuture = Int(now.timeIntervalSince1970) + 10 * 24 * 60 * 60
+
+        #expect(ReflogFileReader.read(Self.line(at: farFuture), now: now) == .uncertain)
+        #expect(ReflogFileReader.read(Self.line(at: 0), now: now) == .uncertain)
+        #expect(ReflogFileReader.read(Self.line(at: -5), now: now) == .uncertain)
+
+        // An hour ahead is clock skew, not a claim about the future, and still reads.
+        let skewed = Int(now.timeIntervalSince1970) + 3_600
+        #expect(ReflogFileReader.read(Self.line(at: skewed), now: now).observation?.pushedAt
+                == Date(timeIntervalSince1970: TimeInterval(skewed)))
+    }
+
+    /// The documented grammar is the message `update by push`, optionally followed by git's own
+    /// detail. `update by pushbot` is another operation wearing the same first two words.
+    @Test("onlyTheDocumentedPushMessageIsAPush")
+    func onlyTheDocumentedPushMessageIsAPush() {
+        #expect(ReflogFileReader.read(Self.line(message: "update by pushbot")) == .nothingObserved)
+        #expect(ReflogFileReader.read(Self.line(message: "update by push")).observation != nil)
+        #expect(ReflogFileReader.read(Self.line(message: "update by push: forced")).observation != nil)
+    }
+
+    /// codex round 3, BLOCKER 2. The preflight was a second path lookup in front of the read, and
+    /// `FileManager.fileExists` follows symlinks and answers about a path rather than about the
+    /// descriptor the answer is used with. Absence is the open's errno now, and this proves the
+    /// preflight is gone rather than merely unused.
+    @Test("reflogAbsenceIsDeterminedByOpenErrno")
+    func reflogAbsenceIsDeterminedByOpenErrno() throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory(Self.commonDirectory)
+        let reader = ReflogFileReader(fileSystem: fs)
+
+        #expect(try reader.reading(
+            commonDirectory: Self.commonDirectory, remote: "origin", branch: "never-pushed")
+                == .nothingObserved)
+        #expect(try reader.observation(
+            commonDirectory: Self.commonDirectory, remote: "origin", branch: "never-pushed") == nil)
+        #expect(fs.fileExistsCallCount == 0,
+                "the reader still preflights with fileExists, which the open's errno replaced")
+
+        // A file that is there and cannot be read is still an error, not an absence: reporting it
+        // as "never pushed" is the lie this distinction exists to prevent.
+        let denied = ReflogFileReader.reflogPath(
+            commonDirectory: Self.commonDirectory, remote: "origin", branch: "denied")
+        fs.addFile(denied, contents: Self.line())
+        fs.markUnreadable(denied)
+        #expect(throws: (any Error).self) {
+            _ = try reader.reading(
+                commonDirectory: Self.commonDirectory, remote: "origin", branch: "denied")
+        }
     }
 }

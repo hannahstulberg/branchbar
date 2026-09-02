@@ -730,3 +730,220 @@ struct RepoLoaderTests {
                 "unknown worktrees may not be read as no worktrees")
     }
 }
+
+// MARK: - Packet F13 — codex round 3, BLOCKER 1, BLOCKER 2, MAJOR 6
+
+/// The loader half of the round-3 findings: it is the only place that can decide whether a
+/// worktree path or the repo's own folder is a folder at all, whether `FETCH_HEAD` is a regular
+/// file, and whether a remote read answered or failed.
+@Suite("RepoLoader establishes what it reports, and reports nothing else")
+struct RepoLoaderRoundThreeTests {
+
+    private enum Argv {
+        static let repo = "/Users/tester/monorepo"
+        static let commonDirectory = "/Users/tester/monorepo/.git"
+        static let headsFormat =
+            "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(upstream:short)%1f%(upstream:remotename)%1f%(upstream:track,nobracket)%1f%(HEAD)"
+        static let remotesFormat = "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)"
+        static let identityCommonDir = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+        static let identityTopLevel = ["-C", repo, "rev-parse", "--path-format=absolute", "--show-toplevel"]
+        static let remoteOriginURL = ["-C", repo, "config", "--get", "remote.origin.url"]
+        static let branchRefs = ["-C", repo, "for-each-ref", headsFormat, "--", "refs/heads"]
+        static let remoteRefs = ["-C", repo, "for-each-ref", remotesFormat, "--", "refs/remotes/"]
+        static let worktrees = ["-C", repo, "worktree", "list", "--porcelain", "-z"]
+    }
+
+    private static let discovered = DiscoveredRepo(
+        path: Argv.repo, id: RepoID(commonDir: Argv.commonDirectory))
+    private static let now = Date(timeIntervalSince1970: 1_788_400_000)
+
+    /// `git worktree list --porcelain -z`: every line is NUL-terminated and every record carries
+    /// one more NUL.
+    private static func porcelain(_ records: [[String]]) -> String {
+        records.map { $0.map { "\($0)\0" }.joined() + "\0" }.joined()
+    }
+
+    private static func stubGit(
+        _ runner: RecordedCommandRunner,
+        worktrees: String,
+        heads: String = "refs/heads/main\u{1f}1111111111111111111111111111111111111111\u{1f}1788300000\u{1f}origin/main\u{1f}origin\u{1f}\u{1f}*\n"
+    ) {
+        runner.stubGit(Argv.identityCommonDir, stdout: "\(Argv.commonDirectory)\n")
+        runner.stubGit(Argv.identityTopLevel, stdout: "\(Argv.repo)\n")
+        runner.stubGit(Argv.remoteOriginURL, stdout: "https://github.com/tester/demo.git\n")
+        runner.stubGit(Argv.branchRefs, stdout: heads)
+        runner.stubGit(Argv.remoteRefs, stdout: "")
+        runner.stubGit(Argv.worktrees, stdout: worktrees)
+    }
+
+    private static func loader(_ runner: RecordedCommandRunner, fileSystem: FileSystem) -> RepoLoader {
+        RepoLoader(
+            git: GitClient(runner: runner, gitPath: "/usr/bin/git"),
+            gh: nil,
+            reflog: ReflogFileReader(fileSystem: fileSystem),
+            fileSystem: fileSystem)
+    }
+
+    /// codex round 3, BLOCKER 1, and the exact shape the finding describes: a `.git/worktrees`
+    /// record naming `/tmp/payload.command`. Terminal executes a `.command` document, and Terminal
+    /// is the last editor in the row's fallback chain.
+    @Test("worktreePathThatIsARegularFileGetsNoRowAction")
+    func worktreePathThatIsARegularFileGetsNoRowAction() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory(Argv.repo)
+        fs.addFile("/tmp/payload.command", contents: "#!/bin/sh\ntouch /tmp/pwned\n")
+
+        let runner = RecordedCommandRunner()
+        Self.stubGit(runner, worktrees: Self.porcelain([
+            ["worktree \(Argv.repo)", "HEAD 1111111111111111111111111111111111111111", "branch refs/heads/main"],
+            ["worktree /tmp/payload.command", "HEAD 2222222222222222222222222222222222222222", "detached"],
+        ]))
+
+        let repo = await Self.loader(runner, fileSystem: fs).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let payload = try #require(repo.worktrees.first { $0.path == "/tmp/payload.command" })
+        #expect(payload.isPrunable, "a path that will not open as a directory was accepted verbatim")
+        #expect(repo.pathIsDirectory, "the repo's own folder really is one")
+
+        let section = try #require(SnapshotPresenter().present(
+            Snapshot(repos: [repo], refreshedAt: Self.now),
+            refreshState: .idle(lastRefreshedAt: Self.now),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: Self.now).sections.first)
+
+        let row = try #require(section.active.first { $0.title == "payload.command" })
+        #expect(row.primaryAction == nil,
+                "clicking this row handed a .command file to Terminal: \(String(describing: row.primaryAction))")
+    }
+
+    /// The same rule applied to a record that claims a branch: the branch keeps its row and stops
+    /// claiming a worktree nobody can open.
+    @Test("aBranchNeverClaimsAWorktreeWhosePathIsNotADirectory")
+    func branchNeverClaimsAnUnopenableWorktree() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory(Argv.repo)
+        fs.addFile("/tmp/payload.command", contents: "")
+
+        let runner = RecordedCommandRunner()
+        Self.stubGit(
+            runner,
+            worktrees: Self.porcelain([
+                ["worktree \(Argv.repo)", "HEAD 1111111111111111111111111111111111111111", "branch refs/heads/main"],
+                ["worktree /tmp/payload.command", "HEAD 2222222222222222222222222222222222222222",
+                 "branch refs/heads/spike"],
+            ]),
+            heads: "refs/heads/main\u{1f}1111111111111111111111111111111111111111\u{1f}1788300000\u{1f}origin/main\u{1f}origin\u{1f}\u{1f}*\n"
+                + "refs/heads/spike\u{1f}2222222222222222222222222222222222222222\u{1f}1788300000\u{1f}\u{1f}\u{1f}\u{1f}\n")
+
+        let repo = await Self.loader(runner, fileSystem: fs).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let spike = try #require(repo.branches.first { $0.name == "spike" })
+        #expect(spike.worktreePath == nil, "a branch claimed a worktree at a path that is not a folder")
+    }
+
+    /// codex round 3, BLOCKER 2. `FETCH_HEAD`'s date used to come from a URL resource-value read,
+    /// which follows a symlink and blocks in `open()` on a named pipe — on the repo-loading path,
+    /// outside the killable helper. This runs against the real filesystem because the bug is in
+    /// the syscalls, not in the seam.
+    @Test("fifoFetchHeadDoesNotBlockAndYieldsNoObservation")
+    func fifoFetchHeadDoesNotBlockAndYieldsNoObservation() async throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+
+        let repoPath = temp.url.appendingPathComponent("monorepo").path
+        let commonDirectory = repoPath + "/.git"
+        try FileManager.default.createDirectory(atPath: commonDirectory, withIntermediateDirectories: true)
+        let fetchHead = commonDirectory + "/FETCH_HEAD"
+        #expect(mkfifo(fetchHead, 0o600) == 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+
+        let runner = RecordedCommandRunner()
+        runner.stubGit(["-C", repoPath, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                       stdout: "\(commonDirectory)\n")
+        runner.stubGit(["-C", repoPath, "rev-parse", "--path-format=absolute", "--show-toplevel"],
+                       stdout: "\(repoPath)\n")
+        runner.stubGit(["-C", repoPath, "config", "--get", "remote.origin.url"],
+                       stdout: "https://github.com/tester/demo.git\n")
+        runner.stubGit(["-C", repoPath, "for-each-ref", Argv.headsFormat, "--", "refs/heads"], stdout: "")
+        runner.stubGit(["-C", repoPath, "for-each-ref", Argv.remotesFormat, "--", "refs/remotes/"], stdout: "")
+        runner.stubGit(["-C", repoPath, "worktree", "list", "--porcelain", "-z"], stdout: "")
+
+        let started = Date()
+        let repo = await Self.loader(runner, fileSystem: RealFileSystem()).load(
+            DiscoveredRepo(path: repoPath, id: RepoID(commonDir: commonDirectory)),
+            wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        #expect(Date().timeIntervalSince(started) < 10, "the refresh blocked reading a FIFO FETCH_HEAD")
+        #expect(repo.branches.isEmpty)
+        #expect(repo.pathIsDirectory)
+    }
+
+    /// codex round 3, MAJOR 6. `git config --get remote.origin.url` exiting non-zero and the key
+    /// being unset both left `remoteURL == nil`, and "No origin for this repo" is a claim only the
+    /// second of the two supports.
+    @Test("failedRemoteURLQueryDoesNotClaimNoOrigin")
+    func failedRemoteURLQueryDoesNotClaimNoOrigin() async throws {
+        func availability(originURL: RecordedCommandRunner.StubResult) async -> Repo {
+            let fs = InMemoryFileSystem(home: "/Users/tester")
+            fs.addDirectory(Argv.repo)
+            let runner = RecordedCommandRunner()
+            runner.stub(.init(executableName: "git", arguments: Argv.remoteOriginURL, result: originURL))
+            Self.stubGit(runner, worktrees: "")
+            let loader = RepoLoader(
+                git: GitClient(runner: runner, gitPath: "/usr/bin/git"),
+                gh: GHClient(runner: runner, ghPath: "/opt/homebrew/bin/gh"),
+                reflog: ReflogFileReader(fileSystem: fs),
+                fileSystem: fs)
+            return await loader.load(
+                Self.discovered, wantsPullRequests: true, cachedPRs: nil, now: Self.now)
+        }
+
+        // Exit 128 is a failure: the read did not happen, so nothing is known about origin.
+        let failed = await availability(originURL: .exit(128, stderr: "fatal: not a git repository"))
+        #expect(failed.remoteURL == nil)
+        #expect(failed.prAvailability == .available,
+                "a failed read of origin was reported as a fact about origin: \(failed.prAvailability)")
+        #expect(failed.errors.map(\.stage).contains(.remotes), "and the stage that failed is named")
+        #expect(try #require(failed.branches.first).prStatus == .notChecked,
+                "no head was queried, so `none` is not reachable")
+
+        // Exit 1 with no output is git saying the key is unset, which really is no origin.
+        let unset = await availability(originURL: .exit(1))
+        #expect(unset.prAvailability == .unavailable(.noRemote, detail: nil))
+    }
+
+    /// codex round 3, MAJOR 6, the second read. A failed `for-each-ref -- refs/remotes/` produces
+    /// no tip for a reason that says nothing about the branch, and the row used to render "No
+    /// tracked remote branch" over a tertiary line claiming it was in sync with that same remote.
+    @Test("failedRemoteRefListingDoesNotClaimInSyncOrNoTrackedBranch")
+    func failedRemoteRefListingDoesNotClaimInSyncOrNoTrackedBranch() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory(Argv.repo)
+        let runner = RecordedCommandRunner()
+        runner.stub(.init(executableName: "git", arguments: Argv.remoteRefs,
+                          result: .exit(128, stderr: "fatal: bad object")))
+        Self.stubGit(runner, worktrees: "")
+
+        let repo = await Self.loader(runner, fileSystem: fs).load(
+            Self.discovered, wantsPullRequests: false, cachedPRs: nil, now: Self.now)
+
+        let main = try #require(repo.branches.first { $0.name == "main" })
+        #expect(!main.push.remoteRefsKnown, "a failed listing was recorded as an answered one")
+        #expect(repo.errors.map(\.stage).contains(.remotes))
+
+        let row = try #require(SnapshotPresenter().present(
+            Snapshot(repos: [repo], refreshedAt: Self.now),
+            refreshState: .idle(lastRefreshedAt: Self.now),
+            collapsedRepoIDs: [],
+            scanResult: nil,
+            appVersion: "0.9.0",
+            now: Self.now).sections.first?.active.first)
+
+        #expect(row.pushLabel == Strings.pushHistoryNotChecked)
+        #expect(!row.pushLabel.contains("No tracked remote branch"))
+        #expect(row.aheadLabel?.contains("In sync") != true, "\(row.aheadLabel ?? "nil")")
+    }
+}

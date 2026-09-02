@@ -32,6 +32,7 @@
               "originMovedSince" : false,
               "remoteRefExists" : false,
               "remoteRefObservedAt" : 810298800,
+              "remoteRefsKnown" : true,
               "remoteTipCommitDate" : 810129600,
               "source" : "tipCommitDate",
               "upstreamGone" : false
@@ -65,6 +66,7 @@
 
         ],
         "path" : "/Users/tester/demo",
+        "pathIsDirectory" : true,
         "prAvailability" : {
           "available" : {
 

@@ -44,6 +44,7 @@
               "observedPushOID" : "1111111111111111111111111111111111111111",
               "originMovedSince" : false,
               "remoteRefExists" : false,
+              "remoteRefsKnown" : true,
               "source" : "reflogObserved",
               "upstreamGone" : false
             },
@@ -76,6 +77,7 @@
 
         ],
         "path" : "/Users/tester/demo",
+        "pathIsDirectory" : true,
         "prAvailability" : {
           "available" : {
 

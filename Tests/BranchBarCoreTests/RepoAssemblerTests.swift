@@ -70,7 +70,7 @@ struct RepoAssemblerTests {
         pullRequests: [PRInfo] = [],
         authoredOpenPullRequests: [PRInfo] = [],
         queriedHeads: Set<String> = [],
-        remoteOwners: [String: String] = [:],
+        remoteOwners: [String: RemoteIdentity] = [:],
         prAvailability: PRAvailability = .available,
         prLoadState: PRLoadState = .loaded,
         remoteURL: String? = RepoAssemblerTests.remoteURL
@@ -494,7 +494,7 @@ struct RepoAssemblerTests {
             branchRefs: [Self.ref("fork-feature", upstream: "fork")],
             pullRequests: Self.mixedPRs,
             queriedHeads: ["fork-feature"],
-            remoteOwners: ["fork": "contributor"]
+            remoteOwners: ["fork": RemoteIdentity(host: "github.com", owner: "contributor")]
         ))
 
         let branch = try #require(Self.branch(repo, "fork-feature"))
@@ -507,11 +507,97 @@ struct RepoAssemblerTests {
             branchRefs: [Self.ref("fork-feature", upstream: "fork")],
             pullRequests: Self.mixedPRs,
             queriedHeads: ["fork-feature"],
-            remoteOwners: ["fork": "someone-else"]
+            remoteOwners: ["fork": RemoteIdentity(host: "github.com", owner: "someone-else")]
         ))
         let other = try #require(Self.branch(elsewhere, "fork-feature"))
         #expect(other.pr == nil)
         #expect(other.prStatus == PRStatus.none)
+    }
+
+    // MARK: - Packet F13 — codex round 3, BLOCKER 1 and MAJOR 4
+
+    /// codex round 3, BLOCKER 1. A bare repository has no working tree, so a record that claims a
+    /// branch in one names a folder nobody can open — and the path went straight into the row's
+    /// action payload, where Terminal is the last fallback and executes what it is handed.
+    @Test("bareWorktreeNeverJoinsABranch")
+    func bareWorktreeNeverJoinsABranch() throws {
+        let repo = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("main"), Self.ref("mirrored")],
+            worktrees: [
+                Worktree(path: Self.repoPath, headSHA: "1", branch: "refs/heads/main", isPrimary: true),
+                Worktree(
+                    path: "/Users/tester/mirrors/archive.git",
+                    headSHA: "",
+                    branch: "refs/heads/mirrored",
+                    isBare: true),
+            ]))
+
+        #expect(try #require(Self.branch(repo, "mirrored")).worktreePath == nil,
+                "a bare record has no working tree, so no branch may claim one from it")
+        #expect(try #require(Self.branch(repo, "main")).worktreePath == Self.repoPath)
+    }
+
+    /// codex round 3, BLOCKER 1, the other record git itself disowns. `prunable` is git saying the
+    /// record does not point at a usable working tree, and `RepoLoader` sets the same flag for a
+    /// path that will not open as a directory — which is how `/tmp/payload.command` reached a row.
+    @Test("prunableWorktreeNeverJoinsABranch")
+    func prunableWorktreeNeverJoinsABranch() throws {
+        let repo = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("spike")],
+            worktrees: [
+                Worktree(
+                    path: "/tmp/payload.command",
+                    headSHA: "2",
+                    branch: "refs/heads/spike",
+                    isPrunable: true)
+            ]))
+
+        #expect(try #require(Self.branch(repo, "spike")).worktreePath == nil)
+    }
+
+    /// codex round 3, MAJOR 4. Origin is `github.com/tester/demo`; the branch tracks a remote on
+    /// another service whose owner happens to be the PR's head owner. Two strings match and the
+    /// head does not: that PR cannot live on a remote this repository is not part of.
+    @Test("upstreamOnAnotherHostRendersNotCheckedNeverAMatch")
+    func upstreamOnAnotherHostRendersNotCheckedNeverAMatch() throws {
+        let elsewhere = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature", upstream: "fork")],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["fork-feature"],
+            remoteOwners: ["fork": RemoteIdentity(host: "gitlab.com", owner: "contributor")]))
+
+        let branch = try #require(Self.branch(elsewhere, "fork-feature"))
+        #expect(branch.pr == nil, "a PR on github.com was attached to a branch tracking gitlab.com")
+        #expect(branch.prStatus == .notChecked, "an unresolvable head is notChecked, never none")
+
+        // The same owner on the repo's own host still matches, so the gate is the host and not a
+        // blanket refusal of non-origin remotes.
+        let sameHost = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature", upstream: "fork")],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["fork-feature"],
+            remoteOwners: ["fork": RemoteIdentity(host: "github.com", owner: "contributor")]))
+        #expect(try #require(Self.branch(sameHost, "fork-feature")).pr?.number == 110)
+
+        // And a GitHub Enterprise host is a different host from github.com, not a synonym.
+        let enterprise = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature", upstream: "fork")],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["fork-feature"],
+            remoteOwners: ["fork": RemoteIdentity(host: "github.nytimes.com", owner: "contributor")]))
+        #expect(try #require(Self.branch(enterprise, "fork-feature")).prStatus == .notChecked)
+    }
+
+    /// The identities the lookup resolved ride onto the repo, so the shell reports which
+    /// repository a row was counted against instead of reconstructing it from matched PRs (F11),
+    /// now with the host each owner belongs to (codex round 3, MAJOR 4).
+    @Test("assembledRepoCarriesTheResolvedRemoteIdentities")
+    func assembledRepoCarriesTheResolvedRemoteIdentities() throws {
+        let repo = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature", upstream: "fork")],
+            remoteOwners: ["fork": RemoteIdentity(host: "gitlab.com", owner: "contributor")]))
+
+        #expect(repo.remoteOwners["fork"] == RemoteIdentity(host: "gitlab.com", owner: "contributor"))
     }
 
     /// codex MAJOR 12, the grouping half. When `git worktree list` fails there is no worktree

@@ -1402,3 +1402,112 @@ struct RefreshCoordinatorCancelOutcomeTests {
         #expect(harness.cache.saveCount == 1, "a deadline persists what it has")
     }
 }
+
+// MARK: - Packet F13 — codex round 3, MAJOR 8
+
+/// codex round 3, MAJOR 8: "A tampered cache can install persistent unbounded scan roots."
+/// `cachedScanPolicyIsNotTrusted` rebuilt the policy's *shape* from the app's own defaults, and
+/// then trusted every `manuallyAddedRepos` value verbatim. Extra roots are walked with **no depth
+/// limit** by design, so a cache holding `/` or a dead volume forced a full-disk walk that the
+/// scan deadline killed after 20 seconds, every refresh, forever.
+@Suite("Cached scan roots are bounded, checked, and counted")
+struct CachedScanRootBoundsTests {
+
+    private static func fileSystem(withDirectories directories: [String]) -> InMemoryFileSystem {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        for directory in directories { fs.addDirectory(directory) }
+        return fs
+    }
+
+    /// The finding's own example. `/` is not a folder anybody picked in a panel, and neither is a
+    /// bare mount point: both are somebody's whole disk.
+    @Test("rootSlashIsRejected")
+    func rootSlashIsRejected() {
+        let fs = Self.fileSystem(withDirectories: ["/", "/Users", "/Volumes", "/opt", "/Volumes/work/code"])
+
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/"], fileSystem: fs).isEmpty)
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Users"], fileSystem: fs).isEmpty)
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Volumes"], fileSystem: fs).isEmpty)
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/opt"], fileSystem: fs).isEmpty)
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Volumes/work/code"], fileSystem: fs)
+                == ["/Volumes/work/code"])
+    }
+
+    /// The other shapes a cache file can hold that a folder panel cannot produce.
+    @Test("onlyAnExistingDirectoryUnderAnExpectedPrefixIsAcceptedAsARoot")
+    func onlyAnExistingDirectoryUnderAnExpectedPrefixIsAccepted() {
+        let fs = Self.fileSystem(withDirectories: [
+            "/Users/tester/code", "/Volumes/work/repos", "/opt/homebrew/src", "/System/Library",
+        ])
+        fs.addFile("/Users/tester/notes.txt", contents: "not a folder")
+        fs.addSymbolicLink("/Users/tester/link")
+
+        let accepted = RefreshCoordinator.acceptableExtraRoots([
+            "/Users/tester/code",            // the modal case
+            "/Volumes/work/repos",           // an external volume the user picked
+            "/opt/homebrew/src",             // a Homebrew-style tree
+            "/System/Library",               // not a place repos live
+            "relative/path",                 // not absolute
+            "/Users/tester/notes.txt",       // a regular file
+            "/Users/tester/link",            // a symlink, which the check refuses to follow
+            "/Users/tester/vanished",        // a folder that is no longer there
+            "/Users/tester/" + String(repeating: "x", count: 2000),  // longer than any real path
+            "/Users/tester/../../etc",       // a traversal, not a picked folder
+        ], fileSystem: fs)
+
+        #expect(accepted == ["/Users/tester/code", "/Volumes/work/repos", "/opt/homebrew/src"])
+    }
+
+    @Test("tooManyCachedRootsAreTruncatedToTheBound")
+    func tooManyCachedRootsAreTruncatedToTheBound() {
+        let roots = (0..<200).map { "/Users/tester/root-\($0)" }
+        let fs = Self.fileSystem(withDirectories: roots)
+
+        let accepted = RefreshCoordinator.acceptableExtraRoots(roots, fileSystem: fs)
+
+        #expect(accepted.count == RefreshCoordinator.maximumCachedRoots)
+        #expect(accepted == Array(roots.prefix(RefreshCoordinator.maximumCachedRoots)),
+                "the bound reordered the roots instead of taking the first ones the file lists")
+    }
+
+    /// End to end: a cache naming `/` never becomes a policy this refresh scans by, and the root
+    /// the user really picked still does.
+    @Test("aCachedSlashRootNeverReachesTheScanPolicy")
+    func cachedSlashRootNeverReachesTheScanPolicy() async throws {
+        let fileSystem = InMemoryFileSystem(home: RepoStub.home)
+        for repo in RepoStub.all { fileSystem.addRepository(at: repo.path) }
+        fileSystem.addGitFile(at: "/Volumes/work/added", gitdir: "/x/.git/modules/added")
+
+        let runner = RecordedCommandRunner()
+        let policy = RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0)
+        for repo in RepoStub.all {
+            stubGit(repo, into: runner, delay: 0, failing: [])
+            stubGH(repo, into: runner)
+        }
+
+        let cache = InMemoryCacheStore(initial: CacheFile(
+            manuallyAddedRepos: ["/", "/Volumes", "/Volumes/work", "/Volumes/gone"]))
+
+        let coordinator = RefreshCoordinator(
+            scanner: RepoScanner(fileSystem: fileSystem),
+            loader: RepoLoader(
+                git: GitClient(runner: runner, gitPath: gitPath),
+                gh: GHClient(runner: runner, ghPath: ghPath, policy: policy),
+                reflog: ReflogFileReader(fileSystem: fileSystem),
+                policy: policy),
+            cache: cache,
+            policy: policy,
+            now: { Date(timeIntervalSince1970: 1_788_400_000) },
+            scanPolicy: ScanPolicy(homeRoot: RepoStub.home),
+            fileSystem: fileSystem)
+
+        _ = await coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+
+        let persisted = try #require(cache.current?.scan)
+        #expect(persisted.policy.extraRoots == ["/Volumes/work"],
+                "a cached root that is not a folder anybody picked reached the policy: \(persisted.policy.extraRoots)")
+        // The user's own list is untouched: this bounds what is scanned, not what is remembered.
+        #expect(cache.current?.manuallyAddedRepos == ["/", "/Volumes", "/Volumes/work", "/Volumes/gone"])
+    }
+}

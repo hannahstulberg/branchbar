@@ -30,6 +30,7 @@
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,
+              "remoteRefsKnown" : true,
               "source" : "none",
               "upstreamGone" : false
             },
@@ -50,6 +51,7 @@
 
         ],
         "path" : "/Users/tester/scratch",
+        "pathIsDirectory" : true,
         "prAvailability" : {
           "unavailable" : {
             "_0" : {

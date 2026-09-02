@@ -633,9 +633,16 @@ struct RepoScannerProgressTests {
         _ = try await scanner.scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
 
         #expect(events.entering.contains("/Users/tester/Documents"))
+        // Was "only the folders macOS gates are announced" until codex round 3, MAJOR 2. That
+        // narrowness was the bug: a helper killed inside an ordinary directory left a truncated
+        // result naming no folder at all, and the presenter suppressed its warning on exactly that
+        // emptiness. Everything at depth 1 under the home root is announced now, so the folder the
+        // walk was inside is always on the wire; nothing deeper is, because "Not scanned:
+        // Documents" is a row the user can act on and `Documents/notes/vendor` is not.
         #expect(events.entering.allSatisfy { path in
-            RepoScanner.tccGatedFolderNames.contains((path as NSString).lastPathComponent)
-        }, "only the folders macOS gates are announced: \(events.entering)")
+            let parent = (path as NSString).deletingLastPathComponent
+            return path == "/Users/tester" || parent == "/Users/tester"
+        }, "a folder deeper than the home root's own children was announced: \(events.entering)")
 
         // Every repo outside the gated folders is on the wire before the gated listing starts.
         let enteringIndex = try #require(events.all.firstIndex {
@@ -645,5 +652,90 @@ struct RepoScannerProgressTests {
             if case .repo(let repo) = $0 { return repo.path == "/Users/tester/alpha" } else { return false }
         })
         #expect(alphaIndex < enteringIndex)
+    }
+}
+
+// MARK: - Packet F13 — codex round 3, MAJOR 2 and MAJOR 8
+
+/// codex round 3, MAJOR 2: "A killed scan can silently present an incomplete repository list."
+/// `.entering` was emitted for the three gated home folders only, so a helper killed inside an
+/// ordinary directory or an added root produced a truncated result naming no folder at all — and
+/// the presenter suppressed its warning on exactly that emptiness.
+///
+/// MAJOR 8's other half: an extra root is walked with no depth limit by design, which makes a root
+/// on a huge volume an unbounded walk that the deadline kills every refresh forever.
+@Suite("Every root the walk enters says so, and an added root has a budget")
+struct ScanNarrationAndBudgetTests {
+
+    /// A recorder that is safe to hand a `@Sendable` callback (the suite above keeps its own).
+    private final class Events: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [ScanEvent] = []
+        func append(_ event: ScanEvent) { lock.lock(); storage.append(event); lock.unlock() }
+        var all: [ScanEvent] { lock.lock(); defer { lock.unlock() }; return storage }
+        var unreadable: [String] { all.compactMap { if case .unreadable(let p) = $0 { return p } else { return nil } } }
+        var entering: [String] { all.compactMap { if case .entering(let p) = $0 { return p } else { return nil } } }
+    }
+
+    @Test("enteringIsEmittedForExtraRoots")
+    func enteringIsEmittedForExtraRoots() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addRepository(at: "/Users/tester/alpha")
+        fs.addRepository(at: "/Volumes/work/beta")
+        fs.addDirectory("/Volumes/work/deep/nested/folder")
+
+        let events = Events()
+        let scanner = RepoScanner(fileSystem: fs, onProgress: { events.append($0) })
+        _ = try await scanner.scan(policy: ScanPolicy(
+            homeRoot: "/Users/tester", extraRoots: ["/Volumes/work"]))
+
+        #expect(events.entering.contains("/Volumes/work"),
+                "an added root that blocks leaves no record of where the walk was: \(events.entering)")
+        // The home root and its own children are announced too, so a kill inside an ordinary
+        // folder names a folder the user can act on.
+        #expect(events.entering.contains("/Users/tester"))
+        #expect(events.entering.contains("/Users/tester/alpha"))
+        // And nothing deeper: "Not scanned: alpha" is actionable, "alpha/src/vendor" is not.
+        #expect(!events.entering.contains("/Volumes/work/deep/nested/folder"))
+    }
+
+    /// The budget makes an unbounded root finite **and visible**: the root joins the not-scanned
+    /// list and the result is truncated, so the incomplete-scan notice appears and the next
+    /// refresh walks again rather than freezing a partial list into the cache for a week.
+    @Test("extraRootCandidateBudgetIsEnforced")
+    func extraRootCandidateBudgetIsEnforced() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        // One directory more than the budget, all directly under the root, so the walk lists the
+        // root and then each child in turn.
+        for index in 0...(RepoScanner.extraRootCandidateBudget) {
+            fs.addDirectory("/Volumes/huge/folder-\(index)")
+        }
+
+        let events = Events()
+        let scanner = RepoScanner(fileSystem: fs, onProgress: { events.append($0) })
+        let result = try await scanner.scan(policy: ScanPolicy(
+            homeRoot: "/Users/tester", extraRoots: ["/Volumes/huge"]))
+
+        #expect(result.truncatedByDeadline, "an unbounded added root ran to the end of the volume")
+        #expect(result.unreadableDirectories.contains("/Volumes/huge"),
+                "the root the budget stopped is not named: \(result.unreadableDirectories)")
+        #expect(result.candidatesExamined <= RepoScanner.extraRootCandidateBudget + 2,
+                "the budget did not stop the walk: \(result.candidatesExamined)")
+        #expect(events.unreadable.contains("/Volumes/huge"),
+                "the stream never carried the folder the row is rebuilt from")
+    }
+
+    /// A root well inside the budget still walks to the bottom, which is the whole point of an
+    /// added root having no depth limit (PLAN.md §3).
+    @Test("anAddedRootUnderTheBudgetIsStillWalkedToTheBottom")
+    func addedRootUnderTheBudgetIsWalkedFully() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addRepository(at: "/Volumes/work/one/two/three/four/five/six/seven/deep")
+
+        let result = try await RepoScanner(fileSystem: fs).scan(policy: ScanPolicy(
+            homeRoot: "/Users/tester", extraRoots: ["/Volumes/work"]))
+
+        #expect(result.repos.map(\.path) == ["/Volumes/work/one/two/three/four/five/six/seven/deep"])
+        #expect(!result.truncatedByDeadline)
     }
 }

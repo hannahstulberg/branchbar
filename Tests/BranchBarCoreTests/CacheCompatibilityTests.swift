@@ -219,6 +219,77 @@ struct AddedFieldDefaultTests {
         #expect(row.title == "main")
     }
 
+    /// codex round 3, MAJOR 4. `Repo.remoteOwners` was `[String: String]`; every cache on disk
+    /// holds bare logins. A `RemoteIdentity` decodes one as an owner with no host, and the host it
+    /// could only ever have meant is origin's — reading it as "unknown host" instead would strip
+    /// the PR match off every cached fork-tracking row until the next refresh.
+    @Test("remoteOwnersFromAnOlderCacheDecodeWithOriginsHost")
+    func remoteOwnersFromAnOlderCacheDecodeWithOriginsHost() throws {
+        let repo = try Self.decode(
+            Repo.self,
+            #"""
+            {"id":{"commonDir":"/Users/tester/demo/.git"},"name":"demo","path":"/Users/tester/demo",
+             "githubSlug":{"host":"github.nytimes.com","owner":"newsroom","name":"demo"},
+             "remoteOwners":{"origin":"newsroom","fork":"contributor"},
+             "worktrees":[],"branches":[],"openPRsNotOnThisMac":[],
+             "prAvailability":{"available":{}},"prLoadState":"loaded","errors":[],"isStale":false}
+            """#)
+
+        #expect(repo.remoteOwners["origin"] == RemoteIdentity(host: "github.nytimes.com", owner: "newsroom"))
+        #expect(repo.remoteOwners["fork"] == RemoteIdentity(host: "github.nytimes.com", owner: "contributor"))
+        // And the folder check a pre-round-3 cache never recorded reads as "it was a folder",
+        // which is what the refresh that wrote the cache had established by walking to it.
+        #expect(repo.pathIsDirectory)
+
+        // A value written by this build keeps the host it was written with.
+        let current = try Self.decode(
+            Repo.self,
+            #"""
+            {"id":{"commonDir":"/Users/tester/demo/.git"},"name":"demo","path":"/Users/tester/demo",
+             "githubSlug":{"host":"github.com","owner":"tester","name":"demo"},
+             "remoteOwners":{"fork":{"host":"gitlab.com","owner":"contributor"}},
+             "pathIsDirectory":false,
+             "worktrees":[],"branches":[],"openPRsNotOnThisMac":[],
+             "prAvailability":{"available":{}},"prLoadState":"loaded","errors":[],"isStale":false}
+            """#)
+        #expect(current.remoteOwners["fork"] == RemoteIdentity(host: "gitlab.com", owner: "contributor"))
+        #expect(!current.pathIsDirectory)
+    }
+
+    /// The two fields packet F13 added to `PushInfo`, read the way every post-freeze field is.
+    @Test("pushInfoRemoteRefsKnownDefaultsToTrue")
+    func pushInfoRemoteRefsKnownDefaultsToTrue() throws {
+        let push = try Self.decode(
+            PushInfo.self,
+            #"""
+            {"originMovedSince":false,"source":"none","hasUpstream":false,"upstreamGone":false}
+            """#)
+
+        #expect(push.remoteRefsKnown, "a cache written before the field read as an unread remote")
+        #expect(push.source == .none)
+    }
+
+    /// codex round 3, BLOCKER 1 made `BranchRowVM.primaryAction` optional; a recorded row that
+    /// carries one still decodes it.
+    @Test("branchRowVMPrimaryActionIsOptionalAndStillDecodes")
+    func branchRowPrimaryActionOptional() throws {
+        let withAction = try Self.decode(
+            BranchRowVM.self,
+            #"""
+            {"title":"main","pushLabel":"Pushed from this Mac 2 days ago","pushTooltip":"t",
+             "primaryAction":{"label":"Open in Cursor","kind":"openURL","payload":"/Users/tester/demo"},
+             "accessibilityLabel":"main"}
+            """#)
+        #expect(withAction.primaryAction?.payload == "/Users/tester/demo")
+
+        let without = try Self.decode(
+            BranchRowVM.self,
+            #"""
+            {"title":"main","pushLabel":"","pushTooltip":"","accessibilityLabel":"main"}
+            """#)
+        #expect(without.primaryAction == nil)
+    }
+
     @Test("emptyStateVMNoticeDefaultsToNil")
     func emptyStateDefault() throws {
         let empty = try Self.decode(

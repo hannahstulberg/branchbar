@@ -32,6 +32,7 @@
               "hasUpstream" : false,
               "originMovedSince" : false,
               "remoteRefExists" : false,
+              "remoteRefsKnown" : true,
               "source" : "none",
               "upstreamGone" : false
             },
@@ -57,6 +58,7 @@
 
         ],
         "path" : "/Users/tester/healthy",
+        "pathIsDirectory" : true,
         "prAvailability" : {
           "available" : {
 
@@ -110,6 +112,7 @@
 
         ],
         "path" : "/Users/tester/broken",
+        "pathIsDirectory" : true,
         "prAvailability" : {
           "available" : {
 

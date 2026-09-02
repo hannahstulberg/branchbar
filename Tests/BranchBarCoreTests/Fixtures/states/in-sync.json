@@ -33,6 +33,7 @@
               "originMovedSince" : false,
               "remoteRefExists" : false,
               "remoteRefObservedAt" : 810129600,
+              "remoteRefsKnown" : true,
               "source" : "reflogObserved",
               "upstreamGone" : false
             },
@@ -65,6 +66,7 @@
 
         ],
         "path" : "/Users/tester/demo",
+        "pathIsDirectory" : true,
         "prAvailability" : {
           "available" : {
 

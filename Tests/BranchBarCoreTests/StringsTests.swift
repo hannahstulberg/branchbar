@@ -191,7 +191,8 @@ enum UIFixtures {
         unreadable: [String] = [],
         depthCut: Int = 0,
         hidden: Int = 0,
-        extraRoots: [String] = []
+        extraRoots: [String] = [],
+        truncated: Bool = false
     ) -> ScanResult {
         let policy = ScanPolicy(homeRoot: home, extraRoots: extraRoots)
         let repos = (0..<repoCount).map { DiscoveredRepo(path: "\(home)/demo\($0)", id: id("demo\($0)")) }
@@ -202,7 +203,8 @@ enum UIFixtures {
             candidatesExamined: 1_204,
             unreadableDirectories: unreadable,
             depthCutDirectories: depthCut,
-            skippedHiddenDirectories: hidden
+            skippedHiddenDirectories: hidden,
+            truncatedByDeadline: truncated
         )
     }
 }
@@ -260,7 +262,91 @@ enum UIStates {
         staleRowsIdle,
         nonOriginInSync,
         nonOriginUpstreamMissing,
+        // codex round 3 added three: one per finding that names a state the contract had no row
+        // for — MAJOR 2's incomplete scan, MAJOR 7's unreadable push history, MAJOR 6's unread
+        // remote branches.
+        scanIncomplete,
+        pushHistoryUnreadable,
+        remoteBranchesUnread,
     ]
+
+    // 45 — codex round 3, MAJOR 2. The scan was cut off before it drained its queue and named no
+    // folder it could not read, which is what a helper killed inside an ordinary directory or an
+    // added root leaves behind. The repo list on screen is short and, until this row existed,
+    // nothing said so.
+    static let scanIncomplete = UIState(
+        id: "scan-incomplete",
+        title: "The scan was cut short and named no folder it could not read",
+        planReference: "§3: a scan the deadline cut off is not a scan the list can be trusted from",
+        entries: [
+            ("scanIncomplete", Strings.scanIncomplete),
+            ("rescanActionLabel", Strings.rescanActionLabel),
+        ],
+        snapshot: UIFixtures.snapshot([UIFixtures.repo(branches: [UIFixtures.branch("main")])]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12)),
+        scanResult: UIFixtures.scanResult(truncated: true)
+    )
+
+    // 46 — codex round 3, MAJOR 7. The reflog file held a line the reader could not vouch for, so
+    // it stopped there. The row may not fall back to a commit date: what sits below the corruption
+    // could be the deletion that makes every line above it belong to another branch.
+    static let pushHistoryUnreadable = UIState(
+        id: "push-history-unreadable",
+        title: "The record of pushes held something BranchBar could not read",
+        planReference: "§3: an uncertainty boundary is reported, never walked past",
+        entries: [
+            ("pushHistoryUnreadable", Strings.pushHistoryUnreadable),
+            ("pushHistoryUnreadableTooltip", Strings.pushHistoryUnreadableTooltip),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "recreated-after-delete",
+                    upstream: Upstream(ref: "origin/recreated-after-delete", remote: "origin"),
+                    prStatus: .none,
+                    push: PushInfo(
+                        source: .unreadable,
+                        hasUpstream: true,
+                        aheadOfLastKnownRemote: 0,
+                        remoteName: "origin",
+                        remoteRefExists: true)
+                )
+            ])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 47 — codex round 3, MAJOR 6. `for-each-ref -- refs/remotes/` failed, so there is no tip for
+    // a reason that says nothing about this branch. The row may not say there is no tracked remote
+    // branch and may not say the branch is in sync with one.
+    static let remoteBranchesUnread = UIState(
+        id: "remote-branches-unread",
+        title: "Reading this repo's branches on origin failed",
+        planReference: "§3: absence copy follows a successful query proving absence, never a failed one",
+        entries: [
+            ("pushHistoryNotChecked", Strings.pushHistoryNotChecked),
+            ("pushHistoryNotCheckedTooltip", Strings.pushHistoryNotCheckedTooltip),
+            ("repoRemotesFailed", Strings.repoRemotesFailed),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(
+                branches: [
+                    UIFixtures.branch(
+                        "feature",
+                        upstream: Upstream(ref: "origin/feature", remote: "origin"),
+                        prStatus: .none,
+                        push: PushInfo(
+                            source: .none,
+                            hasUpstream: true,
+                            aheadOfLastKnownRemote: 0,
+                            remoteName: "origin",
+                            remoteRefsKnown: false)
+                    )
+                ],
+                errors: [RepoError(stage: .remotes, message: "git for-each-ref -- refs/remotes/ failed")])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
 
     // 1
     static let firstRunScanning = UIState(

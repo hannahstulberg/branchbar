@@ -792,3 +792,69 @@ struct GHClientHardeningTests {
         #expect(runner.calls.filter { $0.arguments.first == "pr" }.count == 2)
     }
 }
+
+// MARK: - Packet F13 — codex round 3, MAJOR 3
+
+/// codex round 3, MAJOR 3: "F7's authentication-error classification is not wired into the real
+/// preflight." `gh auth status` returning any non-zero exit was hard-coded to `ghNotAuthenticated`
+/// while the 401/403/rate-limit classifier sat one method away, reachable only from a **thrown**
+/// `CommandError` — and the real runner returns a `CommandOutput` for an ordinary non-zero exit.
+/// A managed account refused by SAML was therefore sent round a `gh auth login` loop that cannot
+/// lift it.
+@Suite("The auth preflight classifies its failure instead of assuming one")
+struct GHClientAuthClassificationTests {
+
+    @Test("authStatusPolicyFailureIsForbiddenNotNotAuthenticated")
+    func authStatusPolicyFailureIsForbiddenNotNotAuthenticated() async throws {
+        let runner = RecordedCommandRunner()
+        runner.stub(.init(
+            executableName: "gh",
+            arguments: GH.authArguments(host: "github.com"),
+            result: .exit(1, stderr: "HTTP 403: Resource protected by organization SAML enforcement "
+                + "(https://api.github.com/graphql)")))
+        let client = GHClient(runner: runner, ghPath: GH.path)
+
+        let availability = await client.authStatus(host: "github.com")
+        #expect(reason(availability) == .forbidden(repo: "github.com"),
+                "a policy refusal was reported as a credential problem, whose one action is gh auth login")
+        #expect(Strings.unavailable(reason: .forbidden(repo: "github.com")).action?.kind == .retryRefresh)
+    }
+
+    /// The report is on **stdout** on gh 2.89 and on stderr on older releases (ARCHITECTURE.md
+    /// §8), so classifying one stream by name reads the wrong one on half the versions this ships
+    /// to. Both are classified together.
+    @Test("authStatusClassifiesStdoutAsWellAsStderr")
+    func authStatusClassifiesStdoutAsWellAsStderr() async throws {
+        let runner = RecordedCommandRunner()
+        runner.stub(.init(
+            executableName: "gh",
+            arguments: GH.authArguments(host: "github.com"),
+            result: .exit(1, stdout: Fixture.text("synthetic-gh-auth-status-401.txt"))))
+        let client = GHClient(runner: runner, ghPath: GH.path)
+
+        let availability = await client.authStatus(host: "github.com")
+        #expect(reason(availability) == .ghNotAuthenticated(host: "github.com"))
+        #expect(detail(availability)?.contains("HTTP 401: Bad credentials") == true)
+    }
+
+    /// The two reasons that were unreachable from the preflight before, and the fallback that is
+    /// neither: a rate limit is a wait, and anything the list does not name claims nothing.
+    @Test("authStatusRateLimitAndUnknownFailuresKeepTheirOwnReasons")
+    func authStatusRateLimitAndUnknownFailuresKeepTheirOwnReasons() async throws {
+        func availability(stderr: String) async -> PRAvailability {
+            let runner = RecordedCommandRunner()
+            runner.stub(.init(
+                executableName: "gh",
+                arguments: GH.authArguments(host: "github.com"),
+                result: .exit(1, stderr: stderr)))
+            return await GHClient(runner: runner, ghPath: GH.path).authStatus(host: "github.com")
+        }
+
+        #expect(reason(await availability(stderr: "HTTP 429: API rate limit exceeded")) == .rateLimited)
+        #expect(reason(await availability(stderr: "dial tcp: lookup github.com: no such host")) == .commandFailed)
+        // And `gh`'s own logged-out wording still means what it always meant.
+        #expect(reason(await availability(
+            stderr: "You are not logged into any GitHub hosts. To log in, run: gh auth login"))
+                == .ghNotAuthenticated(host: "github.com"))
+    }
+}

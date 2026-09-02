@@ -32,6 +32,7 @@
               "originMovedSince" : false,
               "remoteName" : "fork",
               "remoteRefExists" : false,
+              "remoteRefsKnown" : true,
               "source" : "reflogObserved",
               "upstreamGone" : true
             },
@@ -64,6 +65,7 @@
 
         ],
         "path" : "/Users/tester/demo",
+        "pathIsDirectory" : true,
         "prAvailability" : {
           "available" : {
 

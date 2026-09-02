@@ -333,3 +333,86 @@ struct RealFileSystemBoundedReadTests {
         #expect(!directory.isSymbolicLink)
     }
 }
+
+// MARK: - Packet F13 — codex round 3, BLOCKER 1 and BLOCKER 2
+
+/// codex round 3, BLOCKER 1: "Untrusted worktree/cache paths can execute a `.command` file through
+/// Terminal." A row's action payload is a path a repository or a cache file supplied, and the last
+/// editor in the fallback chain is Terminal, which executes a `.command` document. Nothing is
+/// offered as "open this folder" until this call says it is one.
+///
+/// BLOCKER 2 is the sibling: absence is decided by the open's errno, and the modification time
+/// comes off the descriptor that open produced, so no path lookup follows a symlink or blocks on a
+/// named pipe.
+@Suite("The no-follow directory check and the FD-based file metadata read")
+struct RealFileSystemNoFollowTests {
+
+    @Test("isDirectoryNoFollowAcceptsOnlyARealDirectory")
+    func isDirectoryNoFollowAcceptsOnlyARealDirectory() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let fileSystem = RealFileSystem()
+
+        #expect(fileSystem.isDirectoryNoFollow(atPath: temp.url.path))
+
+        // The attack the finding names: a `.command` document Terminal would run.
+        let payload = temp.file("payload.command")
+        try Data("#!/bin/sh\ntouch /tmp/pwned\n".utf8).write(to: payload)
+        #expect(!fileSystem.isDirectoryNoFollow(atPath: payload.path))
+
+        // A symlink to a real directory is refused too: the row claims to open the thing at this
+        // path, not wherever it points today.
+        let real = temp.file("real-folder")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let link = temp.file("link-to-folder")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        #expect(fileSystem.isDirectoryNoFollow(atPath: real.path))
+        #expect(!fileSystem.isDirectoryNoFollow(atPath: link.path))
+
+        #expect(!fileSystem.isDirectoryNoFollow(atPath: temp.file("nothing-here").path))
+    }
+
+    /// A FIFO where a folder belongs: the call has to **return**, and return false.
+    @Test("isDirectoryNoFollowDoesNotBlockOnAFifo")
+    func isDirectoryNoFollowDoesNotBlockOnAFifo() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let fifo = temp.file("pipe").path
+        #expect(mkfifo(fifo, 0o600) == 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+
+        let started = Date()
+        #expect(!RealFileSystem().isDirectoryNoFollow(atPath: fifo))
+        #expect(Date().timeIntervalSince(started) < 5, "the directory check blocked on a FIFO")
+    }
+
+    /// codex round 3, BLOCKER 2. nil is "there is nothing here" and nothing else: a FIFO, a
+    /// directory, and a symlink all throw, because reading any of them as absence would render
+    /// "never pushed" for a branch whose history was simply not readable.
+    @Test("statRegularFileReportsAbsenceFromErrnoAndRefusesEverythingElse")
+    func statRegularFileReportsAbsenceFromErrnoAndRefusesEverythingElse() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let fileSystem = RealFileSystem()
+
+        #expect(try fileSystem.statRegularFile(atPath: temp.file("nothing-here").path) == nil)
+
+        let file = temp.file("FETCH_HEAD")
+        try Data("abc\n".utf8).write(to: file)
+        let stat = try #require(try fileSystem.statRegularFile(atPath: file.path))
+        #expect(stat.size == 4)
+        #expect(abs(stat.modificationDate.timeIntervalSinceNow) < 60)
+
+        #expect(throws: (any Error).self) { _ = try fileSystem.statRegularFile(atPath: temp.url.path) }
+
+        let link = temp.file("link-to-file")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+        #expect(try fileSystem.statRegularFile(atPath: link.path) == nil,
+                "a symlink is not a regular file this reader will vouch for")
+
+        let fifo = temp.file("pipe").path
+        #expect(mkfifo(fifo, 0o600) == 0)
+        let started = Date()
+        #expect(throws: (any Error).self) { _ = try fileSystem.statRegularFile(atPath: fifo) }
+        #expect(Date().timeIntervalSince(started) < 5, "the metadata read blocked on a FIFO")
+    }
+}
