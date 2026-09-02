@@ -567,7 +567,7 @@ struct RefreshCoordinatorDeadlineTests {
 
     /// PLAN.md §3 and §7 `refreshHonorsOverallDeadlineAndMarksUnfinishedReposStale`. The deadline
     /// is shrunk to 0.5 s (that is what `RefreshPolicy` is a value for) and one repo's every git
-    /// stage sleeps 3 s, so it cannot finish: it lands in the snapshot marked `isStale` with a
+    /// stage sleeps 30 s, so it cannot finish: it lands in the snapshot marked `isStale` with a
     /// `RepoError(stage: .deadlineExceeded)`, the other two are complete and unmarked, and the
     /// refresh returns instead of waiting out the slow repo.
     @Test("refreshHonorsOverallDeadlineAndMarksUnfinishedReposStale")
@@ -576,7 +576,7 @@ struct RefreshCoordinatorDeadlineTests {
         let harness = makeHarness(
             policy: RefreshPolicy(debounce: 0, overallDeadline: 0.5, maxConcurrentRepos: 4, perHeadFallbackCap: 0),
             cacheFile: cached,
-            delays: [RepoStub.charlie.path: 3.0]
+            delays: [RepoStub.charlie.path: 30.0]
         )
 
         let started = Date()
@@ -584,9 +584,9 @@ struct RefreshCoordinatorDeadlineTests {
             force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
         let elapsed = Date().timeIntervalSince(started)
 
-        // 0.5 s deadline; the slow stub would take far longer. The bound is loose on purpose: a loaded
-        // CI runner measured 2.52 s against a 2.5 s bound on 2026-09-02 (docs-only commit 1436e52).
-        #expect(elapsed < 8, "the refresh waited \(elapsed) s for a repo the deadline had cut off")
+        // 0.5 s deadline against a 30 s stub: any elapsed time under 10 s proves the deadline cut it
+        // off, and 10 s absorbs a loaded CI runner (2.52 s against a 2.5 s bound on 2026-09-02).
+        #expect(elapsed < 10, "the refresh waited \(elapsed) s for a repo the deadline had cut off")
 
         let slow = try #require(snapshot.repos.first { $0.name == RepoStub.charlie.name })
         #expect(slow.isStale)
