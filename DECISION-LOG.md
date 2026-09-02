@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-02 — Codex round 5: no blocker; five truthfulness majors go into F18 before the cut
+
+- **What:** codex-cli 0.152.1, fifth pass on c7a71bb: "No new direct code-execution BLOCKER under the documented threat model and accepted deferrals." Majors, all of which falsify a user-facing claim and therefore fix before shipping (stop rule): PR cache keyed by `RepoID` only, so an origin change or a recreated checkout can show another repo's PRs; a branch without an upstream is assumed to belong to the base owner, so a normal fork PR vanishes as "No PR"; "push history not checked" shown after `origin/<name>` was in fact checked; a refused FETCH_HEAD read shown as "This repo has not fetched yet"; a detached primary checkout has no row in the popover. Minors adopted: `--deadline inf` trap, silent `.git` marker read failures, cache entries claiming an observation without a date.
+- **Why:** PLAN.md §1 quality bar: an honest list.
+- **Limits:** The three deferred classes stand (dead-filesystem isolation of the whole repo load; component-wise `openat` for every path; `posix_spawn`). Round 5 is the last review before v0.9.1; F18 closes with the suite and a build, not another full challenge.
+- **Cost accepted:** Cut slips to after F18 (same day).
+- **Deliberately not changed:** The threat model in PLAN.md §6.
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-02 — Wave 4 F15–F16 accepted (431 tests); round-4 blockers 1 and 2 closed, 3 closed in its cheap half
 
 - **What:** F15 (Core, 915aeef): git commands carry `-C` only and never a working directory; `RunningCommand.start` arms the deadline first and launches on a dedicated thread with the lock released, so a blocked `Process.run()` costs the caller only the deadline; pid recorded as its own group at spawn with `getpgid` as a logging guard; `FileCacheStore.load` has no metadata preflight and reads at most the cap plus one byte; `VolumeKind` via `statfs` and repos on network or unreachable `/Volumes` roots skip direct file reads; per-head query limit 20 with `PerHeadResult.isExhaustive`; `/Volumes/<name>` rejected as a root and every root walked with `openat(O_DIRECTORY | O_NOFOLLOW)` from `/`; `PRStatusMapper.State` closed (unknown → unavailable). F16 (shell + CLI): Terminal is never a document target for repository paths (chain Cursor → VS Code → Show in Finder; `openInTerminal` deleted; the sign-in script is the only Terminal call and the probe greps for it); bundle path must be symlink-free at every component and only the walked canonical path is registered; `RepositoryText` escapes control and bidi scalars and isolates every repository-controlled string in SwiftUI; header actions only for a path verified per snapshot; the CLI prints detached-worktree and open-elsewhere rows and repeats the refresh for repos a rescan added.
