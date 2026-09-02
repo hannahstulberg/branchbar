@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-02 — Phase 2 lanes: 2.4, 2.5, 2.3 green; one test-author error corrected by the orchestrator
+
+- **What:** Accepted green(2.4) 9835132 (scanner; `scan` became async and gained defaulted `commandRunner`/`gitExecutable` init params so tests stayed untouched), green(2.5) 770140c (runner drains both pipes on dedicated threads, timeout and cancellation SIGTERM then SIGKILL, cache store writes via `replaceItemAt`), green(2.3) (GHClient with the batch `pullRequests(slug:unmatchedHeads:)` entry point: heads past the cap are absent from the result, which is what renders `notChecked`). In `PRStatusMapperTests.openPRsNotOnThisMacExcludesHeadsThatExistLocally` the test author expected PR 104 (`needs-changes`, no local head) to be excluded; PLAN.md §5 keeps it. The orchestrator changed the expected set to `[102, 103, 104, 109]`; the implementer did not touch the test.
+- **Why:** Separate test authors catch implementer bias; this round the error was on the test side, caught because the implementer refused to edit the test and reported the conflict instead.
+- **Limits:** The frozen `GHClient` surface has no "Refresh PRs now" bypass yet; packet 3.1/3.2 adds a `force` path. `Command.environment` is merged over the inherited environment (implementer's reading; the seam doc comment says "replaces" and will be corrected in the 3.x docs sync). Packet 2.5's red SHA fails by missing symbols (`RealFileSystem`, `GitVersion`), not an OWNER trap.
+- **Cost accepted:** A non-compiling test target on local main for ~1 hour between red(2.3) and green(2.3); nothing was pushed in that window.
+- **Deliberately not changed:** `CacheFile.prCache` stays keyed by `RepoID` (encodes as an alternating array; round-trip tested).
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-01 — Packet 1.1: contracts frozen, 19 recorded fixtures, 43 tests green
 
 - **What:** Every PLAN.md §5 type under `Sources/BranchBarCore/Models/`, the three seams under `Seams/`, 16 stub components with 68 `OWNER:` fatalError sites, test doubles, `Fixture` loader, `scripts/record-fixtures.sh` (19 byte-exact recordings from `/usr/bin/git` 2.39.5 and `gh` 2.89.0; fails non-zero on empty output where rows are expected, including `[]`), 15 synthetic fixtures each with a sibling `.md` header, two live-repo sanity tests (skip on CI with a reason), three structural guards, `docs/TEST-PLAN.md` mapping all 59 §7 invariants.
