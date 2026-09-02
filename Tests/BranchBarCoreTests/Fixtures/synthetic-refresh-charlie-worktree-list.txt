@@ -1,0 +1,4 @@
+worktree /Users/hannahstulberg/code/charlie
+HEAD c0ffee11c0ffee11c0ffee11c0ffee11c0ffee11
+branch refs/heads/main
+
