@@ -568,8 +568,15 @@ struct ProcessLaunchDeadlineTests {
     /// left on its own thread rather than waited on.
     @Test("aLaunchThatBlocksDoesNotBlockTheCaller")
     func launchThatBlocksDoesNotBlockTheCaller() async throws {
+        // 10 s, not 3: the assertion is that the caller returns *well before* the launch does,
+        // and a 3 s hook against a 2 s bound left only a second of headroom — the CI runner spent
+        // it (5.26 s and 3.86 s on macos-15, 2026-09-01) and the test failed on the runner's load
+        // rather than on the runner's behaviour. Same shape as
+        // `refreshHonorsOverallDeadlineAndMarksUnfinishedReposStale`: a stub far longer than
+        // anything a loaded machine can explain, and a bound comfortably under it. Any elapsed
+        // time under 4 s proves the caller was not waiting on the launch, which is the whole claim.
         let hooks = ProcessCommandRunner.SystemHooks(
-            launch: { Thread.sleep(forTimeInterval: 3) })
+            launch: { Thread.sleep(forTimeInterval: 10) })
         let runner = ProcessCommandRunner(hooks: hooks)
         let started = Date()
 
@@ -581,7 +588,7 @@ struct ProcessLaunchDeadlineTests {
         }
 
         let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed < 2,
+        #expect(elapsed < 4,
                 "the caller waited \(elapsed) s on a launch it was never supposed to wait on")
     }
 

@@ -1047,7 +1047,10 @@ private final class DeadlineGateFileSystem: FileSystem, @unchecked Sendable {
     func contentsOfDirectory(atPath path: String) throws -> [DirectoryEntry] {
         lock.lock(); _listings += 1; lock.unlock()
         if path == gate || path.hasPrefix(gate + "/") {
-            let hardStop = Date().addingTimeInterval(10)
+            // 30 s, not 10: the gate is meant to be cut off by the scan deadline and never
+            // reached, so it has to be long enough that no loaded runner can be mistaken for a
+            // cancellation that worked. Same 30 s stub the overall-deadline test uses.
+            let hardStop = Date().addingTimeInterval(30)
             while !Task.isCancelled && Date() < hardStop {
                 Thread.sleep(forTimeInterval: 0.005)
             }
@@ -1105,8 +1108,10 @@ struct RefreshCoordinatorScanDeadlineTests {
             force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
         let elapsed = Date().timeIntervalSince(started)
 
-        // The scan was bounded, not waited out: the gate holds for 10 s if nobody cancels it.
-        #expect(elapsed < 5, "the refresh took \(elapsed) s, so the scan ran outside the deadline")
+        // The scan was bounded, not waited out: the gate holds for 30 s if nobody cancels it, so
+        // any elapsed time under 10 s proves the 0.3 s deadline cut it off, and 10 s absorbs a
+        // loaded CI runner (5.49 s against a 5 s bound on macos-15, 2026-09-01).
+        #expect(elapsed < 10, "the refresh took \(elapsed) s, so the scan ran outside the deadline")
         // Every repo discovered before the blocked folder is in the answer, fully loaded.
         #expect(Set(snapshot.repos.map(\.path)) == Set(RepoStub.all.map(\.path)))
         #expect(snapshot.repos.allSatisfy { !$0.branches.isEmpty })

@@ -154,9 +154,20 @@ private final class RunningCommand: @unchecked Sendable {
     private let command: Command
     private let hooks: ProcessCommandRunner.SystemHooks
     private let lock = NSLock()
-    private let queue = DispatchQueue(
-        label: "com.branchbar.process-command-runner",
-        attributes: .concurrent
+    /// Every deadline this runner arms — the command timeout, the SIGTERM→SIGKILL grace, the
+    /// force-finish grace — is scheduled here, and nothing that blocks is (packet F19).
+    ///
+    /// It is **serial on purpose**. A private concurrent queue drains on libdispatch's default
+    /// root queue, which is not overcommit: a work item submitted to it waits for a free worker
+    /// thread, and the pool is capped at 64 threads per QoS. This runner used to submit its own
+    /// blocking work — two pipe reads and a waiter, three parked threads per in-flight command —
+    /// to that same pool, so roughly twenty concurrent commands filled it and the timeout item
+    /// that was supposed to cut them off could not get a thread to run on. Measured on this
+    /// machine: with 66 workers parked, a 0.3 s deadline on a private *concurrent* queue had not
+    /// fired 20 s later, while the same deadline on a *serial* queue fired at 0.311 s. Serial
+    /// queues drain on the overcommit root queue, which always brings a thread up.
+    private let deadlineQueue = DispatchQueue(
+        label: "com.branchbar.process-command-runner.deadline"
     )
 
     private var process: Process?
@@ -242,15 +253,27 @@ private final class RunningCommand: @unchecked Sendable {
         // stretch of a command's life with no child process to kill was also the one stretch no
         // deadline covered, and holding the lock across it meant the cancellation handler blocked
         // behind the same call it was trying to end.
-        queue.asyncAfter(deadline: .now() + max(0, command.timeout), execute: timeoutItem)
+        deadlineQueue.asyncAfter(deadline: .now() + max(0, command.timeout), execute: timeoutItem)
 
         // A dedicated thread, not a queue work item: if the launch never returns, the thread it
         // owns is lost and nothing else is. The caller is resumed by the deadline that is already
         // running, and never waits on this.
-        let launcher = Thread { [self] in self.launchAndSupervise() }
-        launcher.name = "com.branchbar.process-launch"
-        launcher.stackSize = 512 * 1024
-        launcher.start()
+        Self.onOwnThread("com.branchbar.process-launch") { [self] in self.launchAndSupervise() }
+    }
+
+    /// Runs one blocking job on a thread of its own (packet F19).
+    ///
+    /// Every job this runner starts parks: a pipe read blocks until the child writes or exits, and
+    /// the waiter blocks until both readers are done. libdispatch's shared pool is the wrong place
+    /// for work that parks — a parked worker is a worker no other work item can have, the pool is
+    /// capped, and the item left waiting for a thread was this runner's own deadline. A thread per
+    /// blocking job costs ~512 KB of stack that is released when the child ends, and it means the
+    /// number of commands in flight can never decide whether a timeout is delivered.
+    private static func onOwnThread(_ name: String, _ body: @escaping @Sendable () -> Void) {
+        let thread = Thread(block: body)
+        thread.name = name
+        thread.stackSize = 512 * 1024
+        thread.start()
     }
 
     /// Runs the launch, then — only if the launch actually produced a child — records its group
@@ -304,31 +327,38 @@ private final class RunningCommand: @unchecked Sendable {
             }
         }
 
-        // The deadline or a cancellation arrived while the launch was still in flight. The child
-        // exists now and nobody is waiting for it, so it is signalled rather than left running.
+        // The deadline or a cancellation arrived while the launch was still in flight, so the
+        // caller has already been resumed by whichever of them it was and no reader or waiter was
+        // ever started. The child exists now and nobody is watching it: this thread owns the
+        // orphan. It signals the group, escalates, and reaps — and it never touches the
+        // continuation, which `finish` has already answered (packet F19).
         guard !alreadyOver else {
             signalGroup(SIGTERM)
-            queue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
+            deadlineQueue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
                 self.signalGroup(SIGKILL)
             }
+            // Bounded by the SIGKILL above. Guarded on the pid because a `Process` that never
+            // reached `run()` — the injected-launch case — has nothing to wait for.
+            if pid > 0 { process.waitUntilExit() }
             return
         }
 
-        // Two readers, running at the same time, each blocking on its own pipe.
+        // Two readers, running at the same time, each blocking on its own pipe — on threads of
+        // their own, so a full dispatch pool cannot delay the reads or the deadline that ends them.
         let readers = DispatchGroup()
         readers.enter()
-        queue.async { [self] in
+        Self.onOwnThread("com.branchbar.process-read-stdout") { [self] in
             self.drain(self.outputPipe?.fileHandleForReading, stream: .standardOutput)
             readers.leave()
         }
         readers.enter()
-        queue.async { [self] in
+        Self.onOwnThread("com.branchbar.process-read-stderr") { [self] in
             self.drain(self.errorPipe?.fileHandleForReading, stream: .standardError)
             readers.leave()
         }
 
         // The waiter joins both readers before reaping, so no output is lost to a fast exit.
-        queue.async { [self] in
+        Self.onOwnThread("com.branchbar.process-wait") { [self] in
             readers.wait()
             self.process?.waitUntilExit()
             self.finish(exitCode: self.process?.terminationStatus ?? -1)
@@ -340,16 +370,31 @@ private final class RunningCommand: @unchecked Sendable {
         lock.lock()
         guard !didFinish, !didCancel else { lock.unlock(); return }
         didCancel = true
+        // Read under the same lock that records the cancellation — see `timeOut`.
+        let childExisted = didLaunchChild
         lock.unlock()
-        terminateChild()
+        terminateChild(childExisted: childExisted)
     }
 
     private func timeOut() {
         lock.lock()
         guard !didFinish, !didTimeOut, !didCancel else { lock.unlock(); return }
         didTimeOut = true
+        // Whether a child existed is decided **here**, under the same lock that records the
+        // timeout, and never re-read later (packet F19).
+        //
+        // `terminateChild` used to take its own lock and ask again, which let the launcher thread
+        // slip in between: it sets `didLaunchChild` and reads `didTimeOut` in one lock hold, so a
+        // launch that returned a pid a moment after the deadline fired saw `alreadyOver` and went
+        // straight to signalling the orphan — no reader, no waiter, nothing left that could resume
+        // the caller — while `terminateChild`, asking afterwards, saw the pid and took the
+        // signal-and-wait path. The only thing that could answer the caller was then the 3 s
+        // force-finish timer, so a 0.3 s timeout cost 3.3 s. Deciding at the moment the deadline
+        // fires makes the two threads agree: if the pid was not there yet, the caller is resumed
+        // now and the launcher owns the orphan.
+        let childExisted = didLaunchChild
         lock.unlock()
-        terminateChild()
+        terminateChild(childExisted: childExisted)
     }
 
     /// SIGTERM to the child's **process group**, then SIGKILL to the group after a grace period,
@@ -362,28 +407,28 @@ private final class RunningCommand: @unchecked Sendable {
     /// (`childRunsInItsOwnProcessGroup`), so the negative pid reaches the child and everything it
     /// started, and `cancellationKillsAGrandchildThatDidNotExec` is the parent that ignores
     /// SIGTERM and leaves a background child behind.
-    private func terminateChild() {
-        lock.lock()
-        let launched = didLaunchChild
-        lock.unlock()
-
+    ///
+    /// `childExisted` is the caller's snapshot of `didLaunchChild`, taken under the lock that
+    /// recorded the cancellation or the timeout, so this decision cannot be overtaken by a launch
+    /// that returns a pid immediately afterwards (packet F19).
+    private func terminateChild(childExisted: Bool) {
         // codex round 4, BLOCKER 2: the launch has not produced a child yet, so there is no group
         // to signal and no output that could still arrive. Waiting out the kill grace here would
         // make a blocked launch cost the caller the deadline *plus* three seconds, on a call that
         // will never come back. The launch thread is left to whatever it is stuck in;
-        // `launchAndSupervise` signals the child if one ever appears.
-        guard launched else {
+        // `launchAndSupervise` signals and reaps the child if one ever appears.
+        guard childExisted else {
             finish(exitCode: -1)
             return
         }
 
         signalGroup(SIGTERM)
 
-        queue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
+        deadlineQueue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
             self.signalGroup(SIGKILL)
         }
 
-        queue.asyncAfter(deadline: .now() + Self.forceFinishGrace) { [self] in
+        deadlineQueue.asyncAfter(deadline: .now() + Self.forceFinishGrace) { [self] in
             self.finish(exitCode: -1)
         }
     }
@@ -442,16 +487,18 @@ private final class RunningCommand: @unchecked Sendable {
         } catch is PipeDrain.Overflow {
             lock.lock()
             if overflowedStream == nil { overflowedStream = stream }
+            let childExisted = didLaunchChild
             lock.unlock()
-            terminateChild()
+            terminateChild(childExisted: childExisted)
         } catch {
             // codex round 2, MINOR 2: a read that failed partway is not a short answer. The
             // partial buffer is never stored, so nothing downstream can read it as a complete
             // one, and the caller gets `readFailed`.
             lock.lock()
             if readFailure == nil { readFailure = (stream, String(describing: error)) }
+            let childExisted = didLaunchChild
             lock.unlock()
-            terminateChild()
+            terminateChild(childExisted: childExisted)
         }
     }
 
