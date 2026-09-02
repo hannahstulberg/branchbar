@@ -1,0 +1,140 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "Could not read this repo's branches. Refresh to try again.",
+    "Could not read this repo's worktrees. Refresh to try again.",
+    "Could not read this repo's last-known origin. Refresh to try again.",
+    "Could not read this repo's push history, so push dates may be missing."
+  ],
+  "id" : "repo-failed",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: one repo failed; RepoError.Stage",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "none",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/healthy/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "healthy",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/healthy",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/healthy"
+          }
+        ]
+      },
+      {
+        "branches" : [
+
+        ],
+        "errors" : [
+          {
+            "message" : "git exited 128",
+            "stage" : "branches"
+          },
+          {
+            "message" : "git exited 128",
+            "stage" : "worktrees"
+          }
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/broken/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "broken",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/broken",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/broken"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "One repo failed while the others populated"
+}

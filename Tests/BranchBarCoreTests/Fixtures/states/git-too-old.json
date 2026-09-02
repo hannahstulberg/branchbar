@@ -1,0 +1,87 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "BranchBar works best with git 2.39 or newer. This Mac has 2.30.1, so some branch details may be missing."
+  ],
+  "id" : "git-too-old",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: git older than 2.39",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "none",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.30.1 (Apple Git-130)"
+    }
+  },
+  "title" : "git on this Mac is older than 2.39"
+}

@@ -1,0 +1,99 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "2 ahead of last-known origin",
+    "Counted against last-known origin, last seen 3 hours ago. BranchBar never fetches, so origin may have moved."
+  ],
+  "id" : "ahead-of-last-known-origin",
+  "now" : 810302400,
+  "planReference" : "§3: ahead renders as \"2 ahead of last-known origin\"",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "worktree-docs",
+            "prStatus" : "open",
+            "push" : {
+              "aheadOfLastKnownRemote" : 2,
+              "hasUpstream" : true,
+              "observedPushAt" : 810216000,
+              "observedPushOID" : "2222222222222222222222222222222222222222",
+              "originMovedSince" : false,
+              "remoteRefObservedAt" : 810291600,
+              "source" : "reflogObserved",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 2,
+              "behind" : 1,
+              "isGone" : false,
+              "ref" : "origin/worktree-docs",
+              "remote" : "origin"
+            }
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Local commits that last-known origin has not seen"
+}

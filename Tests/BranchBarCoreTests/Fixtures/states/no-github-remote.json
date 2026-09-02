@@ -1,0 +1,92 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "Origin is not on GitHub",
+    "This repo's origin is not a GitHub address, so BranchBar cannot look up PRs for it. Branches, worktrees, and pushes still show."
+  ],
+  "id" : "no-github-remote",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: no GitHub remote; PRUnavailableReason.notGitHubRemote",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "unavailable",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "git.example.internal",
+          "name" : "internal-tools",
+          "owner" : "team"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/internal-tools/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "internal-tools",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/internal-tools",
+        "prAvailability" : {
+          "unavailable" : {
+            "_0" : {
+              "notGitHubRemote" : {
+
+              }
+            }
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "notLoaded",
+        "remoteURL" : "git@git.example.internal:team/internal-tools.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/internal-tools"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Origin is not a GitHub address"
+}

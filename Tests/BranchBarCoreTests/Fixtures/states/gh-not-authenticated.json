@@ -1,0 +1,94 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "Not signed in to github.com",
+    "The GitHub CLI is installed but not signed in to github.com. BranchBar can open Terminal with the sign-in command ready for you to run.",
+    "Open Terminal",
+    "gh auth login --hostname github.com"
+  ],
+  "id" : "gh-not-authenticated",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: gh not signed in, per host, with the Open-Terminal setup action",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "unavailable",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "unavailable" : {
+            "_0" : {
+              "ghNotAuthenticated" : {
+                "host" : "github.com"
+              }
+            }
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "notLoaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : false
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "GitHub CLI is installed but not signed in to this host"
+}

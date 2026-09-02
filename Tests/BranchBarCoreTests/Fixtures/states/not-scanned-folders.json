@@ -1,0 +1,143 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "Not scanned: Documents, Desktop",
+    "Allow access…",
+    "Also skipped on purpose: hidden folders, Library, anything more than six folders deep, and folders inside a repo BranchBar already found.",
+    "Folders you added",
+    "Remove"
+  ],
+  "id" : "not-scanned-folders",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: Not-scanned folders row and the skipped-categories summary",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "scanResult" : {
+    "candidatesExamined" : 1204,
+    "depthCutDirectories" : 37,
+    "policy" : {
+      "descendIntoRepos" : false,
+      "extraRoots" : [
+        "/Users/tester/Library/CloudStorage/Dropbox"
+      ],
+      "homeRoot" : "/Users/tester",
+      "maxDepth" : 6,
+      "skipDirectoryNames" : [
+        "Library",
+        "Applications",
+        "Pictures",
+        "Movies",
+        "Music",
+        "Public",
+        "node_modules",
+        "vendor",
+        "Pods",
+        "DerivedData",
+        "build",
+        "dist",
+        "target",
+        "venv",
+        "site-packages",
+        "__pycache__",
+        "go/pkg"
+      ],
+      "skipHiddenDirectories" : true
+    },
+    "repos" : [
+      {
+        "id" : {
+          "commonDir" : "/Users/tester/demo0/.git"
+        },
+        "path" : "/Users/tester/demo0"
+      }
+    ],
+    "scannedAt" : 810302340,
+    "skippedHiddenDirectories" : 412,
+    "skippedSubmodules" : [
+
+    ],
+    "skippedWorktreeCheckouts" : [
+
+    ],
+    "unreadableDirectories" : [
+      "/Users/tester/Documents",
+      "/Users/tester/Desktop"
+    ]
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "notChecked",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Folders BranchBar could not read, plus what it skipped on purpose"
+}

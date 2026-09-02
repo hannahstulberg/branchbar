@@ -1,0 +1,101 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "Open PRs not on this Mac",
+    "Yours and open on GitHub, with no branch of that name on this Mac.",
+    "#128 · hotfix-from-laptop",
+    "PR 128, hotfix-from-laptop. Open."
+  ],
+  "id" : "open-prs-not-on-this-mac",
+  "now" : 810302400,
+  "planReference" : "§3 and §5a item 3: Open PRs not on this Mac group",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "none",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+          {
+            "baseRefName" : "main",
+            "headRefName" : "hotfix-from-laptop",
+            "headRefOid" : "2222222222222222222222222222222222222222",
+            "headRepositoryOwnerLogin" : "tester",
+            "isDraft" : false,
+            "number" : 128,
+            "reviewDecision" : "",
+            "state" : "OPEN",
+            "updatedAt" : 810298800,
+            "url" : "https://github.com/tester/demo/pull/128"
+          }
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Your open PR whose branch is not on this Mac"
+}

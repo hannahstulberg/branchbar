@@ -1,0 +1,81 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "No repos found",
+    "BranchBar looked under your home folder and found no repos. Repos kept in Google Drive, Dropbox, or iCloud Drive, or more than six folders deep, are not part of that first look. Add the folder that holds yours and BranchBar will look all the way down it.",
+    "Add folder…",
+    "Rescan"
+  ],
+  "id" : "zero-repos",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: zero repos, primary action Add folder…",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "scanResult" : {
+    "candidatesExamined" : 1204,
+    "depthCutDirectories" : 0,
+    "policy" : {
+      "descendIntoRepos" : false,
+      "extraRoots" : [
+
+      ],
+      "homeRoot" : "/Users/tester",
+      "maxDepth" : 6,
+      "skipDirectoryNames" : [
+        "Library",
+        "Applications",
+        "Pictures",
+        "Movies",
+        "Music",
+        "Public",
+        "node_modules",
+        "vendor",
+        "Pods",
+        "DerivedData",
+        "build",
+        "dist",
+        "target",
+        "venv",
+        "site-packages",
+        "__pycache__",
+        "go/pkg"
+      ],
+      "skipHiddenDirectories" : true
+    },
+    "repos" : [
+
+    ],
+    "scannedAt" : 810302340,
+    "skippedHiddenDirectories" : 0,
+    "skippedSubmodules" : [
+
+    ],
+    "skippedWorktreeCheckouts" : [
+
+    ],
+    "unreadableDirectories" : [
+
+    ]
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Zero repos found"
+}

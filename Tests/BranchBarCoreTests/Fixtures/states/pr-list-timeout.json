@@ -1,0 +1,98 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "PR status did not load",
+    "The GitHub CLI did not answer for this repo in time. Refreshing usually fixes it.",
+    "Could not read PR status for this repo. Refresh to try again.",
+    "Could not read PR status for this repo. Refresh to try again."
+  ],
+  "id" : "pr-list-timeout",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: gh pr list timeout; PRUnavailableReason.commandFailed",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "unavailable",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+          {
+            "message" : "timed out after 25 s",
+            "stage" : "github"
+          }
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "unavailable" : {
+            "_0" : {
+              "commandFailed" : {
+
+              }
+            },
+            "detail" : "timed out after 25 s"
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "notLoaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "The PR lookup did not answer in time"
+}

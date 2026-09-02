@@ -1,0 +1,36 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "BranchBar: branches, worktrees, and PR status",
+    "Looking for repos",
+    "BranchBar is looking through your home folder for repos. It does this once, then remembers what it found.",
+    "Not updated yet",
+    "Version 0.9.0"
+  ],
+  "id" : "first-run-scanning",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: first run while scanning",
+  "refreshState" : {
+    "running" : {
+      "completed" : 0,
+      "total" : 0
+    }
+  },
+  "snapshot" : {
+    "repos" : [
+
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "First run, still looking for repos"
+}

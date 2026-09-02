@@ -1,0 +1,100 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "Pushed from this Mac 2 days ago (origin has moved since)",
+    "(origin has moved since)",
+    "BranchBar saw this push leave this Mac. It cannot see pushes made from your other computers."
+  ],
+  "id" : "origin-moved-since",
+  "now" : 810302400,
+  "planReference" : "§5a item 1: origin moved since the observed push; PushInfo.Source.reflogObserved",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "shared-draft",
+            "prStatus" : "open",
+            "push" : {
+              "aheadOfLastKnownRemote" : 0,
+              "hasUpstream" : true,
+              "observedPushAt" : 810129600,
+              "observedPushOID" : "2222222222222222222222222222222222222222",
+              "originMovedSince" : true,
+              "remoteRefObservedAt" : 810298800,
+              "source" : "reflogObserved",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 0,
+              "behind" : 0,
+              "isGone" : false,
+              "ref" : "origin/shared-draft",
+              "remote" : "origin"
+            }
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "The observed push is no longer the tip of last-known origin"
+}

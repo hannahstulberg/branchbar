@@ -1,0 +1,86 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "No origin for this repo",
+    "This repo has no origin, so there is no PR to look up. Branches, worktrees, and commits still show."
+  ],
+  "id" : "no-remote",
+  "now" : 810302400,
+  "planReference" : "PRUnavailableReason.noRemote",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "unavailable",
+            "push" : {
+              "hasUpstream" : false,
+              "originMovedSince" : false,
+              "source" : "none",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111"
+          }
+        ],
+        "errors" : [
+
+        ],
+        "id" : {
+          "commonDir" : "/Users/tester/scratch/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "scratch",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/scratch",
+        "prAvailability" : {
+          "unavailable" : {
+            "_0" : {
+              "noRemote" : {
+
+              }
+            }
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "notLoaded",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/scratch"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Repo has no origin at all"
+}

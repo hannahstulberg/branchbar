@@ -1,0 +1,111 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "Closed without merging",
+    "Closed",
+    "PR closed without merging. This branch may hold work that was never merged."
+  ],
+  "id" : "closed-unmerged-group",
+  "now" : 810302400,
+  "planReference" : "§3 Closed without merging group; PRStatus.closed",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "closedUnmerged",
+            "isCheckedOutInPrimary" : true,
+            "name" : "abandoned-experiment",
+            "pr" : {
+              "baseRefName" : "main",
+              "headRefName" : "abandoned-experiment",
+              "headRefOid" : "1111111111111111111111111111111111111111",
+              "headRepositoryOwnerLogin" : "tester",
+              "isDraft" : false,
+              "number" : 106,
+              "reviewDecision" : "",
+              "state" : "CLOSED",
+              "updatedAt" : 810298800,
+              "url" : "https://github.com/tester/demo/pull/106"
+            },
+            "prStatus" : "closed",
+            "push" : {
+              "aheadOfLastKnownRemote" : 0,
+              "hasUpstream" : true,
+              "observedPushAt" : 809524800,
+              "observedPushOID" : "1111111111111111111111111111111111111111",
+              "originMovedSince" : false,
+              "source" : "reflogObserved",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 0,
+              "behind" : 0,
+              "isGone" : false,
+              "ref" : "origin/abandoned-experiment",
+              "remote" : "origin"
+            }
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "PR closed without merging"
+}

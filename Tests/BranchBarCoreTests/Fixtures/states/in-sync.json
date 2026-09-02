@@ -1,0 +1,98 @@
+{
+  "appVersion" : "0.9.0",
+  "collapsedRepoIDs" : [
+
+  ],
+  "expectedStrings" : [
+    "In sync with last-known origin"
+  ],
+  "id" : "in-sync",
+  "now" : 810302400,
+  "planReference" : "§3: \"In sync\" vs \"no upstream\" decided by upstream:short",
+  "refreshState" : {
+    "idle" : {
+      "lastRefreshedAt" : 810302388
+    }
+  },
+  "snapshot" : {
+    "refreshedAt" : 810302388,
+    "repos" : [
+      {
+        "branches" : [
+          {
+            "committerDate" : 810129600,
+            "group" : "active",
+            "isCheckedOutInPrimary" : true,
+            "name" : "main",
+            "prStatus" : "none",
+            "push" : {
+              "aheadOfLastKnownRemote" : 0,
+              "hasUpstream" : true,
+              "observedPushAt" : 810129600,
+              "observedPushOID" : "1111111111111111111111111111111111111111",
+              "originMovedSince" : false,
+              "remoteRefObservedAt" : 810129600,
+              "source" : "reflogObserved",
+              "upstreamGone" : false
+            },
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 0,
+              "behind" : 0,
+              "isGone" : false,
+              "ref" : "origin/main",
+              "remote" : "origin"
+            }
+          }
+        ],
+        "errors" : [
+
+        ],
+        "githubSlug" : {
+          "host" : "github.com",
+          "name" : "demo",
+          "owner" : "tester"
+        },
+        "id" : {
+          "commonDir" : "/Users/tester/demo/.git"
+        },
+        "isStale" : false,
+        "lastActivity" : 810129600,
+        "lastRefreshed" : 810302388,
+        "name" : "demo",
+        "openPRsNotOnThisMac" : [
+
+        ],
+        "path" : "/Users/tester/demo",
+        "prAvailability" : {
+          "available" : {
+
+          }
+        },
+        "prFetchedAt" : 810302100,
+        "prLoadState" : "loaded",
+        "remoteURL" : "git@github.com:tester/demo.git",
+        "worktrees" : [
+          {
+            "branch" : "refs/heads/main",
+            "headSHA" : "1111111111111111111111111111111111111111",
+            "isBare" : false,
+            "isLocked" : false,
+            "isPrimary" : true,
+            "isPrunable" : false,
+            "path" : "/Users/tester/demo"
+          }
+        ]
+      }
+    ],
+    "tools" : {
+      "ghAuthByHost" : {
+        "github.com" : true
+      },
+      "ghPath" : "/opt/homebrew/bin/gh",
+      "gitPath" : "/usr/bin/git",
+      "gitVersion" : "git version 2.39.5 (Apple Git-154)"
+    }
+  },
+  "title" : "Nothing local that last-known origin does not have"
+}
