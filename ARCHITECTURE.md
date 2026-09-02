@@ -386,7 +386,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | `.git` file classification into worktree checkout, submodule, or candidate | `classifyGitFile` | `Sources/BranchBarCore/RepoScanner.swift:182` | A checkout's common directory is everything before `/worktrees/` |
 | Tool discovery for a GUI process whose PATH has no Homebrew | `ToolLocator` | `Sources/BranchBarCore/ToolLocator.swift:54` | Env override, then four install locations, then PATH, then Apple git |
 | **Core: presentation** | | | |
-| `Snapshot` to view models, the only place a user-facing sentence is built | `SnapshotPresenter` | `Sources/BranchBarCore/SnapshotPresenter.swift:49` | Six frozen arguments; `EditorAvailability` is an initializer property |
+| `Snapshot` to view models, the only place a user-facing sentence is built | `SnapshotPresenter` | `Sources/BranchBarCore/SnapshotPresenter.swift:50` | Six frozen arguments; `EditorAvailability` is an initializer property |
 | Every user-facing literal, one static member per string | `Strings` | `Sources/BranchBarCore/Strings.swift:27` | `make doc-strings` regenerates the UI-CONTRACT table from its doc comments |
 | **Core: seams** | | | |
 | The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:90` | Argument arrays only, never a shell string |
