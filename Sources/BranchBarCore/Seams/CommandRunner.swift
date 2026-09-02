@@ -71,6 +71,12 @@ public enum CommandError: Error, Hashable, Codable, Sendable {
     /// to EOF into memory and can end the app before any timeout helps. `stream` names which
     /// pipe blew the cap so the log says which command to look at.
     case outputTooLarge(stream: OutputStream, limit: Int)
+    /// A read from the child's pipe failed partway and every byte already read was discarded
+    /// (codex round 2, MINOR 2). The loop used to swallow the error with `try?`, which returns a
+    /// short buffer as a complete answer — and a truncated `for-each-ref` that happens to end on a
+    /// record boundary reads as a shorter branch list, which is a lie. `stream` names which pipe
+    /// failed so the log says which half of the command to look at.
+    case readFailed(stream: OutputStream, message: String)
 
     /// Which of the two captured pipes exceeded the cap.
     public enum OutputStream: String, Hashable, Codable, Sendable {

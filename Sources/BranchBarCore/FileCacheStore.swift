@@ -41,6 +41,13 @@ public struct FileCacheStore: CacheStore {
     /// says an unknown version loads nil rather than migrating
     /// (`unknownSchemaVersionLoadsNil`) — a cache written by a newer BranchBar is discarded and
     /// rebuilt on the next refresh, which costs a scan and never shows wrong rows.
+    /// One more way it can be wrong, and the reason this read goes through `RealFileSystem`'s
+    /// bounded primitive rather than `FileManager.contents` (codex round 2, BLOCKER 2): the cache
+    /// lives at a fixed path under Application Support that any process running as the user can
+    /// replace, the load is synchronous and on the launch path, and `FileManager.contents` on a
+    /// FIFO — or on a symlink to one — blocks inside `open()` until a writer appears. That hung
+    /// app initialization with nothing able to end it. A cache file that is not a plain regular
+    /// file is simply not a cache.
     public func load() throws -> CacheFile? {
         // Size before contents (codex MAJOR 2): the load is synchronous and on the launch path,
         // so an unbounded file is an unbounded launch, and the decode is the expensive half.
@@ -48,8 +55,10 @@ public struct FileCacheStore: CacheStore {
         if let size = (attributes?[.size] as? NSNumber)?.intValue, size > Self.maximumFileBytes {
             return nil
         }
-        guard let data = FileManager.default.contents(atPath: fileURL.path) else { return nil }
-        guard data.count <= Self.maximumFileBytes else { return nil }
+        guard let data = try? RealFileSystem().readBoundedRegularFile(
+            path: fileURL.path, maxBytes: Self.maximumFileBytes, tail: false)
+        else { return nil }
+        guard !data.isEmpty else { return nil }
         guard let cache = try? Self.makeDecoder().decode(CacheFile.self, from: data) else { return nil }
         guard cache.schemaVersion == CacheFile.currentSchemaVersion else { return nil }
         return Self.withoutFutureDates(cache)

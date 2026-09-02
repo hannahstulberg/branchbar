@@ -35,19 +35,41 @@ public struct GitClient: Sendable {
         self.timeout = timeout
     }
 
-    /// Run `git -C <path> rev-parse --path-format=absolute --git-common-dir --show-toplevel` and
-    /// return the two absolute paths it prints, in that order. Without `--path-format=absolute`
-    /// git prints a relative common dir and the reflog path breaks.
+    /// Run `git -C <path> rev-parse --path-format=absolute <option>` **twice**, once per path, and
+    /// return the two absolute paths. Without `--path-format=absolute` git prints a relative
+    /// common dir and the reflog path breaks.
+    ///
+    /// Two invocations, not one (codex round 2, MAJOR 3). `rev-parse` separates the two paths it
+    /// prints with a newline, and a directory name may legally contain one, so a repo at
+    /// `~/project\narchive` shifted the fields of the combined answer: dedupe keyed on the wrong
+    /// id, later commands ran with a fragment as their working directory, and Open, Reveal in
+    /// Finder and Copy path pointed somewhere other than the repo. Worktree output was moved to
+    /// NUL framing for the same reason in the first review round (MAJOR 12); repo identity was
+    /// the one that was left.
+    ///
+    /// Each answer is stripped of exactly one trailing record newline and nothing else, so a path
+    /// that really ends in a newline keeps it.
     public func identity(at path: String) async throws -> (commonDirectory: String, topLevel: String) {
-        let output = try await run(
-            ["rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"], at: path)
-        let lines = Self.lines(output)
-        guard lines.count >= 2 else {
+        let commonDirectory = try await revParsePath("--git-common-dir", at: path)
+        let topLevel = try await revParsePath("--show-toplevel", at: path)
+        return (commonDirectory: commonDirectory, topLevel: topLevel)
+    }
+
+    private func revParsePath(_ option: String, at path: String) async throws -> String {
+        let output = try await run(["rev-parse", "--path-format=absolute", option], at: path)
+        let answer = Self.strippingOneTrailingNewline(output.standardOutputText)
+        guard !answer.isEmpty else {
             throw CommandError.nonZeroExit(
                 exitCode: output.exitCode,
-                standardError: "rev-parse printed \(lines.count) path(s), expected 2")
+                standardError: "rev-parse \(option) printed no path")
         }
-        return (commonDirectory: lines[0], topLevel: lines[1])
+        return answer
+    }
+
+    /// Removes the single record separator git writes after the path, and nothing else. A
+    /// `trimmingCharacters` here would eat a newline that belongs to the path.
+    static func strippingOneTrailingNewline(_ text: String) -> String {
+        text.hasSuffix("\n") ? String(text.dropLast()) : text
     }
 
     /// Run `git -C <path> config --get remote.origin.url`. An unset key is git exit 1 with empty
@@ -164,12 +186,5 @@ public struct GitClient: Sendable {
         throw CommandError.nonZeroExit(
             exitCode: output.exitCode,
             standardError: output.standardErrorText.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    private static func lines(_ output: CommandOutput) -> [String] {
-        output.standardOutputText
-            .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
     }
 }

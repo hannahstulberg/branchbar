@@ -41,8 +41,12 @@ install: bundle  ## copy to /Applications (login-item and Gatekeeper rehearsals 
 	rm -rf /Applications/BranchBar.app && ditto $(APP) /Applications/BranchBar.app
 
 verify:          ## what CI checks before publishing
+	@test -x $(APP)/Contents/MacOS/branchbar-cli \
+	  || { echo "missing $(APP)/Contents/MacOS/branchbar-cli: the app falls back to the in-process scan, which no deadline can kill (codex round 2, BLOCKER 1)" >&2; exit 1; }
 	codesign --verify --strict --verbose=2 $(APP)
+	codesign --verify --strict --verbose=2 $(APP)/Contents/MacOS/branchbar-cli
 	lipo -info $(APP)/Contents/MacOS/BranchBar
+	lipo -info $(APP)/Contents/MacOS/branchbar-cli
 	plutil -p $(APP)/Contents/Info.plist | grep -E 'LSUIElement|CFBundleShortVersionString|LSMinimumSystemVersion'
 
 record-fixtures: ## re-run every frozen git/gh invocation against real repos; rewrites Tests/BranchBarCoreTests/Fixtures/recorded-*

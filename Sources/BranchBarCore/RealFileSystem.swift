@@ -1,5 +1,13 @@
 import Foundation
 
+/// Why a bounded read refused (codex round 2, BLOCKER 2 and MINOR 3).
+public enum FileReadError: Error, Hashable, Sendable {
+    case openFailed(path: String, code: Int32)
+    case notARegularFile(path: String)
+    case readFailed(path: String, code: Int32)
+    case entryTypeUnknown(path: String)
+}
+
 /// The real `FileSystem`, backed by `FileManager`. Every unit test uses `InMemoryFileSystem`
 /// instead, so this type is the only thing in BranchBarCore that reads the user's disk.
 ///
@@ -41,7 +49,7 @@ public struct RealFileSystem: FileSystem {
             options: []
         )
 
-        return urls.map { url in
+        return try urls.map { url in
             let name = url.lastPathComponent
             // Built in the string domain from the path the caller gave, not from the URL: a URL
             // listing resolves `/var` to `/private/var`, and the scanner's dedupe keys and the
@@ -49,15 +57,16 @@ public struct RealFileSystem: FileSystem {
             let entryPath = (path as NSString).appendingPathComponent(name)
 
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            let isSymbolicLink = values?.isSymbolicLink ?? false
-            // A link is never a directory to descend into, so the target is never touched.
-            let isDirectory = isSymbolicLink ? false : (values?.isDirectory ?? false)
+            let flags = try Self.entryFlags(
+                isDirectory: values?.isDirectory,
+                isSymbolicLink: values?.isSymbolicLink,
+                path: entryPath)
 
             return DirectoryEntry(
                 name: name,
                 path: entryPath,
-                isDirectory: isDirectory,
-                isSymbolicLink: isSymbolicLink
+                isDirectory: flags.isDirectory,
+                isSymbolicLink: flags.isSymbolicLink
             )
         }
     }
@@ -130,23 +139,95 @@ extension FileSystem {
     }
 }
 
-extension RealFileSystem: BoundedFileReading {
-    /// One `open` and one `read` of at most `maximumBytes`, so the size of the file on disk never
-    /// becomes the size of an allocation here.
-    public func readFile(atPath path: String, maximumBytes: Int) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
-        defer { try? handle.close() }
-        return try handle.read(upToCount: max(0, maximumBytes)) ?? Data()
+extension RealFileSystem {
+    /// The one primitive every bounded read goes through: `.git` markers, reflog files, and the
+    /// cache file (codex round 2, BLOCKER 2).
+    ///
+    /// `FileHandle(forReadingFrom:)` is `open(O_RDONLY)` with symlinks followed and no type check.
+    /// A `.git`, a reflog, or a `cache.json` that is really a FIFO — or a symlink to one — parked
+    /// the caller inside the kernel until a writer appeared, which for an attacker-planted pipe is
+    /// never. That is BLOCKER 1's unkillable state reached through a file instead of a directory,
+    /// and no deadline above it helps.
+    ///
+    /// Four flags and a check, in this order, and each one is load-bearing:
+    ///
+    /// - `O_NOFOLLOW` refuses a symlink outright. The walk was told to stay inside a tree, and a
+    ///   marker that points somewhere else is not a marker this code will vouch for.
+    /// - `O_NONBLOCK` makes the **open** return even when the path is a FIFO with no writer.
+    /// - `O_CLOEXEC` keeps the descriptor out of the children `ProcessCommandRunner` spawns.
+    /// - `fstat` on the descriptor already opened (never a path, which could have changed
+    ///   underneath) must say `S_IFREG`. A directory, a FIFO, a device, or a socket is refused
+    ///   here rather than blocking in the read.
+    ///
+    /// Then one `pread` of the bounded window: `pread` rather than `read` because `O_NONBLOCK` is
+    /// still set and an offset read needs no seek. A short read is a short file, not an error.
+    public func readBoundedRegularFile(path: String, maxBytes: Int, tail: Bool) throws -> Data {
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw FileReadError.openFailed(path: path, code: errno) }
+        defer { close(descriptor) }
+
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else {
+            throw FileReadError.openFailed(path: path, code: errno)
+        }
+        guard (status.st_mode & S_IFMT) == S_IFREG else {
+            throw FileReadError.notARegularFile(path: path)
+        }
+
+        let bound = max(0, maxBytes)
+        let size = max(0, Int(status.st_size))
+        let count = min(bound, size)
+        guard count > 0 else { return Data() }
+        // The tail is what a reflog wants: its newest lines are its last ones.
+        let offset = tail ? size - count : 0
+
+        var buffer = [UInt8](repeating: 0, count: count)
+        var read = 0
+        while read < count {
+            let got = buffer[read...].withUnsafeMutableBufferPointer { slice in
+                pread(descriptor, slice.baseAddress, count - read, off_t(offset + read))
+            }
+            if got > 0 {
+                read += got
+                continue
+            }
+            if got == 0 { break }  // the file shrank under us; what was read is what there is
+            if errno == EINTR { continue }
+            throw FileReadError.readFailed(path: path, code: errno)
+        }
+        return Data(buffer.prefix(read))
     }
 
-    /// Seeks to `size - maximumBytes` and reads forward, so a reflog of any size costs one seek
-    /// and one bounded read.
+    /// What one directory entry's two resource values mean, with "the lookup failed" kept apart
+    /// from "the answer is no" (codex round 2, MINOR 3).
+    ///
+    /// A failed lookup used to collapse to `false/false`, so a directory on a degraded or unusual
+    /// filesystem was silently walked past as a file: no repo found inside it and nothing on
+    /// screen saying why. An entry whose type nobody can establish throws, and the caller reports
+    /// the **parent** directory as not scanned — the row the user can act on, and the same row a
+    /// TCC denial produces.
+    ///
+    /// A known symlink needs no directory answer: the walk never follows one, so the target is
+    /// never touched and its absence is not a failure.
+    static func entryFlags(
+        isDirectory: Bool?, isSymbolicLink: Bool?, path: String
+    ) throws -> (isDirectory: Bool, isSymbolicLink: Bool) {
+        if isSymbolicLink == true { return (isDirectory: false, isSymbolicLink: true) }
+        guard let isDirectory, isSymbolicLink != nil else {
+            throw FileReadError.entryTypeUnknown(path: path)
+        }
+        return (isDirectory: isDirectory, isSymbolicLink: false)
+    }
+}
+
+extension RealFileSystem: BoundedFileReading {
+    /// A bounded prefix of a regular file, and nothing else — see `readBoundedRegularFile`.
+    public func readFile(atPath path: String, maximumBytes: Int) throws -> Data {
+        try readBoundedRegularFile(path: path, maxBytes: maximumBytes, tail: false)
+    }
+
+    /// The last `maximumBytes` of a regular file, for a reflog whose newest lines are last.
     public func readFileTail(atPath path: String, maximumBytes: Int) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
-        defer { try? handle.close() }
-        let size = try handle.seekToEnd()
-        let bound = UInt64(max(0, maximumBytes))
-        try handle.seek(toOffset: size > bound ? size - bound : 0)
-        return try handle.readToEnd() ?? Data()
+        try readBoundedRegularFile(path: path, maxBytes: maximumBytes, tail: true)
     }
 }

@@ -44,6 +44,32 @@ public struct ProcessCommandRunner: CommandRunner {
     }
 }
 
+/// The bounded pipe drain, lifted out of `RunningCommand` so the error path is testable without
+/// a child process.
+enum PipeDrain {
+    /// The buffer passed the cap; the caller terminates the child and reports `outputTooLarge`.
+    struct Overflow: Error {}
+
+    /// Reads until EOF or the cap, and **throws** whatever the read threw (codex round 2,
+    /// MINOR 2).
+    ///
+    /// The loop used to be `guard let chunk = try? handle.read(...)`, which turns an I/O error
+    /// into the same nil a clean EOF produces: the bytes already buffered were returned as a
+    /// complete answer. If the truncation happened to land on a record boundary — and a
+    /// `for-each-ref` stream is nothing but record boundaries — the repo silently showed a
+    /// shorter branch list than it has. A failure to hear the answer is not an answer, so the
+    /// error propagates and every byte already read is dropped by the caller.
+    static func readBounded(cap: Int, _ next: () throws -> Data?) throws -> Data {
+        var buffer = Data()
+        while true {
+            guard let chunk = try next(), !chunk.isEmpty else { break }
+            buffer.append(chunk)
+            if buffer.count > cap { throw Overflow() }
+        }
+        return buffer
+    }
+}
+
 /// One in-flight child process and the three background threads that see it out: a stdout
 /// reader, a stderr reader, and a waiter that resumes the continuation once both readers have
 /// hit EOF and the child has been reaped.
@@ -75,6 +101,11 @@ private final class RunningCommand: @unchecked Sendable {
     private var didFinish = false
     private var didCancel = false
     private var didTimeOut = false
+    /// Captured immediately after `Process.run()` (codex round 2, MAJOR 2). Signalling asks this
+    /// value, never the live process, because the leader can be gone while its group is not.
+    private var savedProcessGroup: pid_t?
+    /// Set by whichever reader failed (codex round 2, MINOR 2); outranks the exit code.
+    private var readFailure: (stream: CommandError.OutputStream, message: String)?
     /// Set by whichever reader passed the byte cap first (codex MAJOR 15).
     private var overflowedStream: CommandError.OutputStream?
     private var timeoutItem: DispatchWorkItem?
@@ -135,6 +166,16 @@ private final class RunningCommand: @unchecked Sendable {
             return
         }
 
+        // codex round 2, MAJOR 2. The group id is read here, once, while the leader is certainly
+        // alive — not at signal time, when it may already have exited and taken `getpgid` and
+        // `Process.isRunning` with it. Foundation spawns each child with `POSIX_SPAWN_SETPGROUP`
+        // and pgroup 0, so the child leads its own group; the guard is what stops a negative pid
+        // reaching BranchBar's own group if that ever stops being true
+        // (`childRunsInItsOwnProcessGroup`).
+        let pid = process.processIdentifier
+        let group = getpgid(pid)
+        savedProcessGroup = (pid > 0 && group == pid && group != getpgrp()) ? group : nil
+
         let timeoutItem = DispatchWorkItem { [self] in self.timeOut() }
         self.timeoutItem = timeoutItem
         lock.unlock()
@@ -190,17 +231,10 @@ private final class RunningCommand: @unchecked Sendable {
     /// started, and `cancellationKillsAGrandchildThatDidNotExec` is the parent that ignores
     /// SIGTERM and leaves a background child behind.
     private func terminateChild() {
-        lock.lock()
-        let child = process
-        lock.unlock()
-
-        signalGroup(child, SIGTERM)
+        signalGroup(SIGTERM)
 
         queue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
-            self.lock.lock()
-            let stillRunning = self.process
-            self.lock.unlock()
-            self.signalGroup(stillRunning, SIGKILL)
+            self.signalGroup(SIGKILL)
         }
 
         queue.asyncAfter(deadline: .now() + Self.forceFinishGrace) { [self] in
@@ -208,20 +242,31 @@ private final class RunningCommand: @unchecked Sendable {
         }
     }
 
-    /// Signals the child's process group when the child leads one, and the child alone when it
-    /// does not — which would mean Foundation had stopped calling `posix_spawn` with
-    /// `POSIX_SPAWN_SETPGROUP`, and a negative pid would then reach BranchBar's own group.
-    private func signalGroup(_ child: Process?, _ signalNumber: Int32) {
-        guard let child, child.isRunning else { return }
-        let pid = child.processIdentifier
-        guard pid > 0 else { return }
+    /// Signals the **saved** process group, whatever the leader is doing now (codex round 2,
+    /// MAJOR 2).
+    ///
+    /// The old version asked `Process.isRunning` first and refused when it was false. That is
+    /// exactly the case the escalation exists for: the direct child accepts SIGTERM and exits,
+    /// a grandchild ignores it and keeps stdout open, and by SIGKILL time the leader is gone — so
+    /// nothing was ever sent, the descendant survived, and the runner returned on its force-finish
+    /// timer while the reader threads stayed blocked on a pipe the grandchild still held. A
+    /// process group outlives its leader; `killpg` on a group with no members returns ESRCH and
+    /// costs nothing.
+    ///
+    /// When the child did not lead its own group, `savedProcessGroup` is nil and the pid alone is
+    /// signalled: a negative pid on BranchBar's own group would signal BranchBar.
+    private func signalGroup(_ signalNumber: Int32) {
+        lock.lock()
+        let group = savedProcessGroup
+        let pid = process?.processIdentifier ?? -1
+        lock.unlock()
 
-        let group = getpgid(pid)
-        if group == pid, group != getpgrp() {
+        if let group, group > 0 {
             kill(-group, signalNumber)
-        } else {
-            kill(pid, signalNumber)
+            return
         }
+        guard pid > 0 else { return }
+        kill(pid, signalNumber)
     }
 
     /// Reads one pipe in bounded chunks, so the size of what a child decides to print is never
@@ -230,21 +275,25 @@ private final class RunningCommand: @unchecked Sendable {
     /// the child is terminated, and the caller gets `CommandError.outputTooLarge`.
     private func drain(_ handle: FileHandle?, stream: CommandError.OutputStream) {
         guard let handle else { return }
-        var buffer = Data()
-
-        while true {
-            guard let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty else { break }
-            buffer.append(chunk)
-            guard buffer.count <= ProcessCommandRunner.maximumOutputBytes else {
-                lock.lock()
-                if overflowedStream == nil { overflowedStream = stream }
-                lock.unlock()
-                terminateChild()
-                return
+        do {
+            let buffer = try PipeDrain.readBounded(cap: ProcessCommandRunner.maximumOutputBytes) {
+                try handle.read(upToCount: 64 * 1024)
             }
+            store(buffer, as: stream)
+        } catch is PipeDrain.Overflow {
+            lock.lock()
+            if overflowedStream == nil { overflowedStream = stream }
+            lock.unlock()
+            terminateChild()
+        } catch {
+            // codex round 2, MINOR 2: a read that failed partway is not a short answer. The
+            // partial buffer is never stored, so nothing downstream can read it as a complete
+            // one, and the caller gets `readFailed`.
+            lock.lock()
+            if readFailure == nil { readFailure = (stream, String(describing: error)) }
+            lock.unlock()
+            terminateChild()
         }
-
-        store(buffer, as: stream)
     }
 
     private func store(_ data: Data, as stream: CommandError.OutputStream) {
@@ -256,8 +305,8 @@ private final class RunningCommand: @unchecked Sendable {
     }
 
     /// Resumes the continuation exactly once. Cancellation outranks a timeout, both outrank a
-    /// blown output cap, and all three outrank whatever exit code the terminated child ended up
-    /// with.
+    /// blown output cap, that outranks a failed pipe read, and all four outrank whatever exit code
+    /// the terminated child ended up with.
     private func finish(exitCode: Int32) {
         lock.lock()
         guard !didFinish else { lock.unlock(); return }
@@ -269,6 +318,7 @@ private final class RunningCommand: @unchecked Sendable {
         let cancelled = didCancel
         let timedOut = didTimeOut
         let overflowed = overflowedStream
+        let readError = readFailure
         let output = CommandOutput(
             exitCode: exitCode,
             standardOutput: standardOutput,
@@ -284,6 +334,9 @@ private final class RunningCommand: @unchecked Sendable {
         } else if let overflowed {
             continuation.resume(throwing: CommandError.outputTooLarge(
                 stream: overflowed, limit: ProcessCommandRunner.maximumOutputBytes))
+        } else if let readError {
+            continuation.resume(throwing: CommandError.readFailed(
+                stream: readError.stream, message: readError.message))
         } else {
             continuation.resume(returning: output)
         }

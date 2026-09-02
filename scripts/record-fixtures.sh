@@ -129,8 +129,18 @@ for pair in "hannah-personal-agent:$REPO_A" "branchbar:$REPO_B"; do
     --format='%(refname)%1f%(objectname)%1f%(committerdate:unix)' \
     -- refs/remotes/
 
+  # One path per invocation since the codex round-2 review (MAJOR 3): asking for both in one
+  # `rev-parse` returns them newline-separated, and a directory name may legally contain a
+  # newline, so the response cannot be split back into the two paths that produced it. The
+  # combined form is still recorded because the live-repo sanity test pins that git accepts it.
   record "recorded-$label-rev-parse.txt" rows \
     "$GIT" -C "$repo" rev-parse --path-format=absolute --git-common-dir --show-toplevel
+
+  record "recorded-$label-rev-parse-common-dir.txt" rows \
+    "$GIT" -C "$repo" rev-parse --path-format=absolute --git-common-dir
+
+  record "recorded-$label-rev-parse-toplevel.txt" rows \
+    "$GIT" -C "$repo" rev-parse --path-format=absolute --show-toplevel
 
   record "recorded-$label-config-remote-origin-url.txt" rows \
     "$GIT" -C "$repo" config --get remote.origin.url

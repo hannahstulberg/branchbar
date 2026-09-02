@@ -1,7 +1,14 @@
 import BranchBarCore
 import Foundation
 
-// `branchbar-cli snapshot` — the Gate 3 harness and the Gate 0b fallback (PLAN.md §3, §8).
+// `branchbar-cli` — the Gate 3 harness, the Gate 0b fallback (PLAN.md §3, §8), and the app's
+// discovery helper.
+//
+// Two subcommands. `snapshot` prints every repo, branch, worktree, PR and push as a table or as
+// JSON. `scan` walks for repos and prints one `ScanResult` as JSON; that is the subcommand the
+// app spawns through `HelperProcessScanRunner`, and the reason it exists is that a walk blocked
+// inside `open()`/`readdir()` cannot be cancelled but a process can be killed (codex round 2,
+// BLOCKER 1). `scripts/bundle.sh` copies this binary into `Contents/MacOS` beside the app's own.
 //
 // It is the same Core the menu bar app runs, with the real `ProcessCommandRunner`,
 // `RealFileSystem`, and `FileCacheStore` behind it, so a table printed here and a popover drawn
@@ -16,30 +23,54 @@ import Foundation
 
 extension String: @retroactive Error {}
 
+enum Subcommand: String {
+    case snapshot
+    case scan
+}
+
 struct Options {
+    var command: Subcommand = .snapshot
     var json = false
     var gitPath: String?
     var roots: [String] = []
     var cacheDirectory: String?
+    /// `scan` only: the file holding the JSON-encoded `ScanPolicy` to walk under.
+    var policyJSONPath: String?
+    /// `scan` only: the walk's own cooperative bound, in seconds. The caller kills the process at
+    /// a slightly later hard deadline; this is what gives a walk that *can* still answer the
+    /// chance to print the repos it already found.
+    var deadline: TimeInterval?
 }
 
 let usage = """
 usage: branchbar-cli snapshot [--json] [--git PATH] [--root PATH]… [--cache-dir PATH]
+       branchbar-cli scan --policy-json PATH --json [--deadline SECONDS] [--git PATH]
 
+snapshot
   --json           print the Snapshot as JSON instead of a table
   --git PATH       git to run; overrides the BRANCHBAR_GIT environment variable
   --root PATH      folder to scan for repos; repeatable, defaults to the home folder
   --cache-dir PATH where to read and write the cache; defaults to a fresh temp directory,
                    so a CLI run never touches the app's cache
+
+scan
+  --policy-json PATH  file holding the JSON-encoded ScanPolicy to walk under
+  --json              print the ScanResult as JSON (the only supported form)
+  --deadline SECONDS  bound the walk and print what it found; the caller kills this
+                      process at its own, later, hard deadline
+  --git PATH          git to dedupe with; overrides BRANCHBAR_GIT
 """
 
 func parse(_ arguments: [String]) -> Result<Options, String> {
     var arguments = arguments
-    guard let command = arguments.first else { return .failure("no command given\n\n\(usage)") }
-    guard command == "snapshot" else { return .failure("unknown command '\(command)'\n\n\(usage)") }
+    guard let name = arguments.first else { return .failure("no command given\n\n\(usage)") }
+    guard let command = Subcommand(rawValue: name) else {
+        return .failure("unknown command '\(name)'\n\n\(usage)")
+    }
     arguments.removeFirst()
 
     var options = Options()
+    options.command = command
     // The environment override comes first so an explicit `--git` still wins (PLAN.md §5's
     // `BRANCHBAR_GIT`, which is how Gate 3 pins the harness to `/usr/bin/git`).
     options.gitPath = ProcessInfo.processInfo.environment["BRANCHBAR_GIT"].flatMap {
@@ -74,6 +105,20 @@ func parse(_ arguments: [String]) -> Result<Options, String> {
             case .success(let path): options.cacheDirectory = absolute(path)
             case .failure(let message): return .failure(message)
             }
+        case "--policy-json":
+            switch value("--policy-json") {
+            case .success(let path): options.policyJSONPath = absolute(path)
+            case .failure(let message): return .failure(message)
+            }
+        case "--deadline":
+            switch value("--deadline") {
+            case .success(let seconds):
+                guard let parsed = TimeInterval(seconds), parsed > 0 else {
+                    return .failure("--deadline needs a positive number of seconds")
+                }
+                options.deadline = parsed
+            case .failure: return .failure("--deadline needs a number of seconds")
+            }
         case "-h", "--help":
             return .failure(usage)
         default:
@@ -91,34 +136,29 @@ func absolute(_ path: String) -> String {
 }
 
 func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data((message + "\n").utf8))
+    // Escaped for the same reason the table cells are: a failure message names the path that
+    // failed, and the path belongs to whatever is on disk (codex round 2, MAJOR 10).
+    FileHandle.standardError.write(Data((SafeText.escapingControlScalars(message) + "\n").utf8))
     exit(2)
 }
 
 // MARK: - Table
 
 /// Left-aligned columns padded to the widest cell, which is all a hand-check needs.
+///
+/// The renderer lives in Core as `SafeText.table` because it escapes every cell and that rule has
+/// to be testable (codex round 2, MAJOR 10): a repository owns its own directory and branch names,
+/// and a name carrying a newline used to forge a table row while one carrying ESC could erase the
+/// output already printed or retitle the terminal. Only this human-readable path escapes; `--json`
+/// keeps exact values.
 func table(_ header: [String], _ rows: [[String]]) -> String {
-    let all = [header] + rows
-    let columns = header.count
-    var widths = [Int](repeating: 0, count: columns)
-    for row in all {
-        for index in 0..<columns {
-            widths[index] = max(widths[index], row[index].count)
-        }
-    }
-    func render(_ row: [String]) -> String {
-        (0..<columns)
-            .map { index in
-                index == columns - 1
-                    ? row[index]
-                    : row[index].padding(toLength: widths[index], withPad: " ", startingAt: 0)
-            }
-            .joined(separator: "  ")
-            .trimmingCharacters(in: CharacterSet(charactersIn: " "))
-    }
-    return ([render(header), render(widths.map { String(repeating: "-", count: $0) })]
-        + rows.map(render)).joined(separator: "\n")
+    SafeText.table(header: header, rows: rows)
+}
+
+/// Every human-readable line the CLI prints goes through here, for the same reason the table
+/// cells do.
+func say(_ text: String) {
+    print(SafeText.escapingControlScalars(text))
 }
 
 // MARK: - Run
@@ -136,6 +176,64 @@ let locator = ToolLocator()
 guard let gitPath = options.gitPath ?? locator.locate(.git).path else {
     fail("git not found. Searched: \(locator.locate(.git).searched.joined(separator: ", "))")
 }
+
+// MARK: - scan: the app's killable discovery helper
+
+// codex round 2, BLOCKER 1. `RepoScanner` checks `Task.isCancelled` before each listing, which is
+// the only place cancellation can land, so a walk already inside `open()`/`readdir()` — behind an
+// unanswered TCC dialog, a stalled automount, a dead network volume — cannot be stopped by any
+// deadline in the process running it. It can be stopped by killing the process, which is what the
+// app does to this subcommand.
+//
+// Two bounds, and they answer different questions. `--deadline` is this process's own cooperative
+// race: a walk that is merely slow, or blocked somewhere a cancellation check still follows, is
+// cut at a directory boundary and the repos it already found are printed. The caller's hard
+// deadline is a SIGTERM/SIGKILL a few hundred milliseconds later, for the case where nothing in
+// user space can help.
+if options.command == .scan {
+    guard let policyPath = options.policyJSONPath else {
+        fail("scan needs --policy-json PATH\n\n\(usage)")
+    }
+    guard
+        let policyData = try? fileSystem.readBoundedRegularFile(
+            path: policyPath, maxBytes: 1024 * 1024, tail: false),
+        let requested = try? HelperProcessScanRunner.makeDecoder()
+            .decode(ScanPolicy.self, from: policyData)
+    else {
+        fail("could not read a ScanPolicy from \(policyPath)")
+    }
+
+    let helperScanner = RepoScanner(
+        fileSystem: fileSystem, commandRunner: runner, gitExecutable: gitPath)
+    let softDeadline = options.deadline ?? RefreshPolicy.default.scanDeadline
+
+    let scanned = await withTaskGroup(of: ScanResult?.self, returning: ScanResult.self) { group in
+        group.addTask { try? await helperScanner.scan(policy: requested) }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, softDeadline) * 1_000_000_000))
+            return nil
+        }
+
+        var found: ScanResult?
+        for await outcome in group {
+            group.cancelAll()
+            // The deadline arrives as nil; the walk answers with what it has once its next
+            // cancellation check lands, which is the partial result worth printing.
+            if let outcome { found = outcome; break }
+        }
+        return found ?? HelperProcessScanRunner.truncatedResult(for: requested)
+    }
+
+    guard let encoded = try? HelperProcessScanRunner.makeEncoder().encode(scanned) else {
+        fail("could not encode the scan result as JSON")
+    }
+    FileHandle.standardOutput.write(encoded)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+    exit(0)
+}
+
+// MARK: - snapshot
+
 let ghPath = locator.locate(.gh).path
 
 let policy = RefreshPolicy()
@@ -279,13 +377,13 @@ for (section, repo) in zip(viewModel.sections, snapshot.repos) {
 
 print(table(["REPO", "BRANCH", "WORKTREE", "PR", "PUSH", "AHEAD"], rows))
 print("")
-print("\(viewModel.footer.updatedLabel) · \(snapshot.repos.count) repo(s) · \(rows.count) branch row(s)")
+say("\(viewModel.footer.updatedLabel) · \(snapshot.repos.count) repo(s) · \(rows.count) branch row(s)")
 if let notice = viewModel.footer.toolNotice {
-    print(notice.text)
+    say(notice.text)
 }
 for repo in snapshot.repos where !repo.errors.isEmpty {
     for error in repo.errors {
-        print("\(repo.name): \(error.stage.rawValue): \(error.message)")
+        say("\(repo.name): \(error.stage.rawValue): \(error.message)")
     }
 }
 exit(0)

@@ -235,7 +235,13 @@ public struct RepoScanner: Sendable {
             // folder the user pointed at, they get the repo they picked, and a nested one is
             // another "Add folder…" away.
             let isWalkRoot = depth == 0 && descendIntoRootRepo
-            if let marker = entries.first(where: { $0.name == ".git" }) {
+            //
+            // A **symlinked** `.git` is not a marker at all (codex round 2, BLOCKER 2). It is
+            // reported `isDirectory == false`, so it used to fall into the `.git` file arm and get
+            // opened, and `.git -> /path/to/some/fifo` parked the whole walk inside
+            // `open(O_RDONLY)` with nothing able to end it. It is classified `unrecognized`, never
+            // read, and the walk carries on into the directory's children.
+            if let marker = entries.first(where: { $0.name == ".git" }), !marker.isSymbolicLink {
                 if marker.isDirectory {
                     accumulator.candidates.append(
                         Candidate(path: path, commonDirectoryHint: path + "/.git", gitIsDirectory: true)
@@ -352,31 +358,46 @@ public struct RepoScanner: Sendable {
             return (candidate.commonDirectoryHint, candidate.path)
         }
 
-        let command = Command(
-            executable: gitExecutable,
-            arguments: [
-                "-C", candidate.path,
-                "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel",
-            ],
-            workingDirectory: candidate.path
-        )
-
+        // codex round 2, MAJOR 3: one invocation per path. Asking for both in one `rev-parse`
+        // returns them separated by a newline, and a directory name may legally contain one, so
+        // `project\narchive` shifted the two fields — the dedupe keyed on the wrong id, and every
+        // later command ran with a fragment as its working directory. Each answer is stripped of
+        // exactly one trailing record newline and nothing else, so a path that really ends in a
+        // newline keeps it.
         guard
-            let output = try? await commandRunner.run(command),
-            output.exitCode == 0
+            let commonDirectory = await path(
+                for: "--git-common-dir", at: candidate.path, using: commandRunner),
+            let topLevel = await path(
+                for: "--show-toplevel", at: candidate.path, using: commandRunner)
         else {
             return (candidate.commonDirectoryHint, candidate.path)
         }
+        return (commonDirectory, topLevel)
+    }
 
-        let lines = output.standardOutputText
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+    /// One `git -C <path> rev-parse --path-format=absolute <option>`, or nil when git failed or
+    /// printed nothing.
+    private func path(
+        for option: String, at path: String, using commandRunner: CommandRunner
+    ) async -> String? {
+        let command = Command(
+            executable: gitExecutable,
+            arguments: ["-C", path, "rev-parse", "--path-format=absolute", option],
+            workingDirectory: path
+        )
+        guard
+            let output = try? await commandRunner.run(command),
+            output.exitCode == 0
+        else { return nil }
 
-        guard lines.count >= 2 else {
-            return (candidate.commonDirectoryHint, candidate.path)
-        }
-        return (lines[0], lines[1])
+        let answer = Self.strippingOneTrailingNewline(output.standardOutputText)
+        return answer.isEmpty ? nil : answer
+    }
+
+    /// Removes the single record separator git writes after the path, and nothing else. A
+    /// `trimmingCharacters` here would eat a newline the path itself ends in.
+    static func strippingOneTrailingNewline(_ text: String) -> String {
+        text.hasSuffix("\n") ? String(text.dropLast()) : text
     }
 
     private static func normalized(_ path: String) -> String {

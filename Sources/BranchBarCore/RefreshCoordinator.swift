@@ -1,5 +1,13 @@
 import Foundation
 
+/// How a refresh ended (codex round 2, MAJOR 9). A deadline persists what it has; a cancel
+/// persists nothing and must not claim a new update time.
+public enum RefreshOutcome: String, Hashable, Codable, Sendable {
+    case completed
+    case cancelled
+    case deadline
+}
+
 /// Owns a refresh: coalescing, the concurrency cap, the overall deadline, cancellation, stable
 /// order, progressive emits, and the cache write. PLAN.md §4 refresh lifecycle.
 ///
@@ -15,6 +23,16 @@ public actor RefreshCoordinator {
     private let scanPolicy: ScanPolicy?
     private let fileSystem: FileSystem
     private let sleep: @Sendable (TimeInterval) async throws -> Void
+    /// Where discovery runs (codex round 2, BLOCKER 1). Defaulted to `InProcessScanRunner` over
+    /// the injected `scanner`, so every existing caller and test is unchanged; the shell hands it
+    /// `HelperProcessScanRunner` so a walk stuck inside `open()` can be killed rather than waited
+    /// on.
+    private let scanRunner: any ScanRunning
+
+    /// How the most recent refresh ended (codex round 2, MAJOR 9). The shell reads it to decide
+    /// whether to keep the previous "Updated" label and whether to suppress the follow-ups a
+    /// completed refresh triggers.
+    public private(set) var lastOutcome: RefreshOutcome?
 
     /// PLAN.md §3: "the cache has none, is older than 7 days, or reason == rescan".
     static let scanMaxAge: TimeInterval = 7 * 24 * 60 * 60
@@ -50,7 +68,8 @@ public actor RefreshCoordinator {
         fileSystem: FileSystem = RealFileSystem(),
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { seconds in
             try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-        }
+        },
+        scanRunner: (any ScanRunning)? = nil
     ) {
         self.scanner = scanner
         self.loader = loader
@@ -61,6 +80,7 @@ public actor RefreshCoordinator {
         self.scanPolicy = scanPolicy
         self.fileSystem = fileSystem
         self.sleep = sleep
+        self.scanRunner = scanRunner ?? InProcessScanRunner(scanner: scanner)
     }
 
     /// OWNER: packet 3.2 — coalesce into the in-flight refresh unless `force` is set or the
@@ -191,7 +211,6 @@ public actor RefreshCoordinator {
         // 3. PLAN.md §4's launch step, which is the first refresh of the process: the cached rows
         // are shown before any of them has been reloaded, every one marked stale
         // (`launchEmitsStaleCachedSnapshotBeforeRefreshing`).
-        var lastEmitted: Snapshot?
         if !hasEmittedLaunchSnapshot {
             hasEmittedLaunchSnapshot = true
             if previous != nil {
@@ -200,9 +219,7 @@ public actor RefreshCoordinator {
                     row.isStale = true
                     return row
                 }
-                let launch = Snapshot(repos: rows, refreshedAt: previous?.refreshedAt, tools: tools)
-                lastEmitted = launch
-                onProgress(launch)
+                onProgress(Snapshot(repos: rows, refreshedAt: previous?.refreshedAt, tools: tools))
             }
         }
 
@@ -264,9 +281,7 @@ public actor RefreshCoordinator {
                     }
                     // Every emit carries every repo, in the order computed at the start: rows
                     // fill in, the list never reorders (`rowOrderIsStableAcrossProgressiveEmits`).
-                    let emit = Snapshot(repos: rows, refreshedAt: startedAt, tools: tools)
-                    lastEmitted = emit
-                    onProgress(emit)
+                    onProgress(Snapshot(repos: rows, refreshedAt: startedAt, tools: tools))
 
                     if next < ordered.count {
                         addRepoTask(
@@ -286,8 +301,22 @@ public actor RefreshCoordinator {
         if Task.isCancelled {
             // PLAN.md §3: a cancelled refresh leaves the last emitted snapshot in place and
             // writes nothing over it.
+            //
+            // What it must also not do is claim to be an update (codex round 2, MAJOR 9). Every
+            // progressive emit carries `startedAt` as its `refreshedAt`, so returning the last one
+            // handed the shell a brand-new timestamp for a refresh that never finished: `AppModel`
+            // went idle and said "Updated just now", and the presenter only shows its stale-row
+            // warning while a refresh is running, so nothing on screen said otherwise. The
+            // cancelled answer therefore keeps the timestamp of the refresh that really finished
+            // and marks every row this one did not reload, which is the same treatment the
+            // deadline gives its unfinished rows.
+            for (index, repo) in ordered.enumerated() where !loaded.contains(repo.id) {
+                rows[index].isStale = true
+            }
+            let previousRefreshedAt = lastSnapshot?.refreshedAt ?? previous?.refreshedAt
+            lastOutcome = .cancelled
             finish(persisted: nil)
-            return lastEmitted ?? lastSnapshot ?? Snapshot(repos: rows, refreshedAt: startedAt, tools: tools)
+            return Snapshot(repos: rows, refreshedAt: previousRefreshedAt, tools: tools)
         }
 
         // 6. Whatever the deadline cut off keeps its previous row and says so, rather than
@@ -300,6 +329,7 @@ public actor RefreshCoordinator {
                 message: "the \(Int(policy.overallDeadline)) s refresh deadline elapsed before this repo finished"))
         }
 
+        lastOutcome = deadlineHit ? .deadline : .completed
         let snapshot = Snapshot(repos: rows, refreshedAt: startedAt, tools: tools)
         // The scan is the only source of truth for which repos exist, so a PR entry for a repo it
         // no longer lists is dead weight that would outlive the repo.
@@ -343,15 +373,24 @@ public actor RefreshCoordinator {
     /// with nothing able to end it.
     ///
     /// `policy.scanDeadline` is a bound, not a delay: a scan that finishes returns immediately.
-    /// When the bound wins, the scanner is cancelled and its **partial** result is taken, so the
+    /// When the bound wins, the runner is cancelled and its **partial** result is taken, so the
     /// refresh proceeds with the repos already discovered, `ScanResult.truncatedByDeadline`
     /// makes the next refresh rescan, and the folders the walk never reached ride the snapshot
     /// path as `unreadableDirectories`, which the presenter already turns into the "Not scanned"
     /// notice and its action.
+    ///
+    /// The race below is the **cooperative** half, and it is all this layer can do on its own
+    /// (codex round 2, BLOCKER 1): cancelling a task cannot end a listing already inside
+    /// `open()`/`readdir()`, so a walk blocked on an unanswered TCC dialog, a stalled automount,
+    /// or a dead network volume kept this method waiting forever and first launch stayed on
+    /// "Looking for repos…". The hard half belongs to the runner: `HelperProcessScanRunner`
+    /// enforces the same deadline as a SIGTERM/SIGKILL to a helper process, which the kernel does
+    /// honour. Both bounds are kept, because the in-process runner is still what the CLI and every
+    /// unit test use.
     private func scanWithinDeadline(_ scanPolicy: ScanPolicy) async -> ScanResult? {
-        await withTaskGroup(of: ScanOutcome.self, returning: ScanResult?.self) { [scanner, sleep, policy] group in
+        await withTaskGroup(of: ScanOutcome.self, returning: ScanResult?.self) { [scanRunner, sleep, policy] group in
             group.addTask {
-                .finished(try? await scanner.scan(policy: scanPolicy))
+                .finished(try? await scanRunner.scan(policy: scanPolicy))
             }
             group.addTask {
                 try? await sleep(policy.scanDeadline)
