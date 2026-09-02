@@ -17,3 +17,8 @@ session: cced85a0-5ced-4282-bc94-e23dcbe42d18 | model: Fable 5.1 orchestrator, O
 - Packet 0.2 spike agent dispatched (Opus); human-assisted items 5, 8, 9, 10 await Hannah.
 - Hannah to ask Andrew Lisy about JobRunner on managed Macs and name the NYT tester.
 - codex upgrade via npm pending; rerun Challenge after.
+
+## Later in session
+- Gate 0 PASSED on CLT (spike agent): arm64 SwiftUI links, universal via `--triple arm64-apple-macosx13.0` / `x86_64-apple-macosx13.0` + lipo, Swift Testing runs, bundle launches as UIElement, onAppear fires per open. Findings: app translocation under quarantine; screencapture blind to status items.
+- Codex 0.152.1 Challenge: KILL verdict; verified + folded (Gate 0b on 09-04 with spike zip, notChecked PR state, push wording/boundary, promise wording, arm64-only). Rejected KILL (Hannah decided handout).
+- Commits: feat(0.2) spike; docs: plan revised for codex round.
