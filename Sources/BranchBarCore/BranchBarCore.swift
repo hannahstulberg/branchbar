@@ -3,7 +3,7 @@ import Foundation
 /// Package-level identity. Kept trivial on purpose: packet 0.2 is a toolchain spike,
 /// not a feature packet.
 public enum BranchBarCore {
-    public static let version = "0.1.0"
+    public static let version = "0.9.1"
 }
 
 /// Text a human reads, as opposed to the JSON a machine reads.

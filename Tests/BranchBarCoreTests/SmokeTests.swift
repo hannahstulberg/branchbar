@@ -4,5 +4,5 @@ import Testing
 
 @Test("Core links and reports its version")
 func coreVersionIsPinned() {
-    #expect(BranchBarCore.version == "0.1.0")
+    #expect(BranchBarCore.version == "0.9.1")
 }

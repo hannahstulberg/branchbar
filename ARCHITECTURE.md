@@ -400,18 +400,18 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | The cache seam | `CacheStore` | `Sources/BranchBarCore/Seams/CacheStore.swift:6` | Two methods, both replaced in tests |
 | The cache file on disk, written through a temp file | `FileCacheStore` | `Sources/BranchBarCore/FileCacheStore.swift:7` | `replaceItemAt`, so an interrupted save leaves the previous file intact |
 | **Core: data model** | | | |
-| One repo, its branches, worktrees, PR availability, and errors | `Repo` | `Sources/BranchBarCore/Models/Repo.swift:151` | Identified by `RepoID`, the git common directory |
+| One repo, its branches, worktrees, PR availability, and errors | `Repo` | `Sources/BranchBarCore/Models/Repo.swift:159` | Identified by `RepoID`, the git common directory |
 | The remote address parsed into host, owner, and name for any GitHub host | `GitHubSlug` | `Sources/BranchBarCore/Models/Repo.swift:23` | Enterprise hosts resolve and preflight per host |
 | The hostname grammar every remote must pass before it becomes a slug | `isValidHostname` | `Sources/BranchBarCore/Models/Repo.swift:47` | RFC 1123 labels; the same pattern is re-applied in zsh by `SignInScript` (codex BLOCKER 1) |
 | One branch and the group it renders in | `Branch` | `Sources/BranchBarCore/Models/Branch.swift:4` | `group` is the assembler-to-presenter boundary |
 | The ten PR pill states, `notChecked` among them | `PRStatus` | `Sources/BranchBarCore/Models/PRStatus.swift:7` | `none` only after that head was actually queried |
-| What a row may say about a push | `PushInfo` | `Sources/BranchBarCore/Models/PushInfo.swift:9` | `source` decides the wording, not the presenter |
+| What a row may say about a push | `PushInfo` | `Sources/BranchBarCore/Models/PushInfo.swift:34` | `source` decides the wording, not the presenter |
 | One worktree record | `Worktree` | `Sources/BranchBarCore/Models/Worktree.swift:8` | A worktree with no branch is shown and claimed by no branch |
 | The scan policy: roots, depth, skip list | `ScanPolicy` | `Sources/BranchBarCore/Models/Scan.swift:8` | Added roots are recursive with no depth limit |
 | What one walk reports, cut folders included | `ScanResult` | `Sources/BranchBarCore/Models/Scan.swift:61` | `truncatedByDeadline` forces the next refresh to rescan |
 | Every timing constant in one place | `RefreshPolicy` | `Sources/BranchBarCore/Models/RefreshPolicy.swift:6` | Debounce 30 s, scan 20 s, overall 45 s, PR TTL 600 s, cap 4, per-head cap 20 |
 | The cache file and its schema version | `CacheFile` | `Sources/BranchBarCore/Models/Cache.swift:9` | An unknown `schemaVersion` loads as nil rather than half a state |
-| What one PR fetch is worth keeping, heads asked about included | `PRCacheEntry` | `Sources/BranchBarCore/Models/Cache.swift:42` | Without `queriedHeads` a warm cache would downgrade every `none` to `notChecked` |
+| What one PR fetch is worth keeping, heads asked about included | `PRCacheEntry` | `Sources/BranchBarCore/Models/Cache.swift:65` | Without `queriedHeads` a warm cache would downgrade every `none` to `notChecked` |
 | What the whole app renders from | `Snapshot` | `Sources/BranchBarCore/Models/Snapshot.swift:6` | Repos in stable order plus the tool status |
 | The failure a user reads, with one action | `UserFacingFailure` | `Sources/BranchBarCore/Models/Failure.swift:6` | `diagnostic` is logged and never rendered |
 | The row view models the SwiftUI layer is allowed to see | `SnapshotVM` | `Sources/BranchBarCore/Models/ViewModels.swift:7` | Views hold no copy and compute no sentence |
@@ -431,7 +431,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | **CLI** | | | |
 | The two subcommands: the harness and the app's discovery helper | `Subcommand` | `Sources/branchbar-cli/main.swift:29` | `scan` is what `Contents/MacOS/branchbar-cli` is spawned for |
 | `branchbar-cli snapshot` argument parsing | `Options` | `Sources/branchbar-cli/main.swift:34` | The Gate 3 harness and the Gate 0b fallback |
-| The runner the CLI hands its cache-only bootstrap | `NoCommandsRunner` | `Sources/branchbar-cli/main.swift:350` | Keeps the harness from writing over the app's own cached snapshot |
+| The runner the CLI hands its cache-only bootstrap | `NoCommandsRunner` | `Sources/branchbar-cli/main.swift:366` | Keeps the harness from writing over the app's own cached snapshot |
 
 ## §4 Data model
 
