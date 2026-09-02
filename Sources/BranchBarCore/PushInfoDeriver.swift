@@ -15,16 +15,21 @@ public enum PushInfoDeriver {
     /// `remoteRefObservedAt` from the upstream so the presenter never has to look at the reflog
     /// again.
     ///
-    /// `remoteTipCommitDate` is the committer date of the remote-tracking tip, which is exactly
-    /// what `PushInfo.remoteRefObservedAt` is defined to hold — the "last-known origin" anchor the
-    /// tooltip reads. No second field is added for it.
+    /// The two remote dates are different facts and travel in different fields (codex MAJOR 7):
+    /// `remoteTipCommitDate` is when the remote tip's commit was authored, and
+    /// `fetchHeadObservedAt` — the `FETCH_HEAD` modification date — is when this clone last heard
+    /// from origin. Only the second lands in `PushInfo.remoteRefObservedAt`, which is what the
+    /// "last seen" tooltip reads.
     ///
     /// Three edges the tests pin down, all of them cases where the honest answer is "nothing":
     ///
-    /// - **No upstream.** There is no remote branch, so there is nothing to date a push against
-    ///   and nothing to be ahead of: `source = .none`, `aheadOfLastKnownRemote = nil` rather than
-    ///   `0` (`noUpstreamRendersNeverPushedNotZeroCommits`; a `0` would render as "in sync with
-    ///   origin"). An observation handed in without an upstream is dropped for the same reason.
+    /// - **No upstream, nothing observed.** There is no tracked remote branch, so there is
+    ///   nothing to date a push against and nothing to be ahead of: `source = .none`,
+    ///   `aheadOfLastKnownRemote = nil` rather than `0`
+    ///   (`noUpstreamRendersNeverPushedNotZeroCommits`; a `0` would render as "in sync with
+    ///   origin"). An observation handed in **with** no upstream is kept, not dropped: `RepoLoader`
+    ///   reads `origin/<branch>`'s reflog whenever that ref exists, because a push without `-u`
+    ///   leaves a real push record behind an untracked branch (codex MAJOR 6).
     /// - **Gone upstream.** `%(upstream:track,nobracket)` said `gone`, so the ahead count has no
     ///   ref to count against and becomes nil — but the observation survives, because this clone
     ///   really did push, and the row says so beside "Upstream missing from last-known origin".
@@ -34,12 +39,25 @@ public enum PushInfoDeriver {
         observation: ReflogObservation?,
         upstream: Upstream?,
         remoteTipOID: String?,
-        remoteTipCommitDate: Date?
+        remoteTipCommitDate: Date?,
+        fetchHeadObservedAt: Date? = nil
     ) -> PushInfo {
         guard let upstream else {
-            // Everything about a push is keyed on the upstream. Without one the row's push line
-            // is "Never pushed from this Mac", which carries no date and no count.
-            return PushInfo(source: .none, hasUpstream: false)
+            // No tracking configuration, but the reflog of a same-named remote ref may still hold
+            // a real push. The count stays nil — there is no upstream to be ahead of — while the
+            // observation is reported for what it is.
+            guard let observation else {
+                return PushInfo(source: .none, hasUpstream: false)
+            }
+            return PushInfo(
+                observedPushAt: observation.pushedAt,
+                observedPushOID: observation.newOID,
+                originMovedSince: originMoved(observation: observation, remoteTipOID: remoteTipOID),
+                source: .reflogObserved,
+                hasUpstream: false,
+                aheadOfLastKnownRemote: nil,
+                remoteRefObservedAt: fetchHeadObservedAt,
+                remoteTipCommitDate: remoteTipCommitDate)
         }
 
         let source: PushInfo.Source
@@ -62,7 +80,8 @@ public enum PushInfoDeriver {
             hasUpstream: true,
             upstreamGone: upstream.isGone,
             aheadOfLastKnownRemote: upstream.isGone ? nil : upstream.ahead,
-            remoteRefObservedAt: remoteTipCommitDate
+            remoteRefObservedAt: fetchHeadObservedAt,
+            remoteTipCommitDate: remoteTipCommitDate
         )
     }
 

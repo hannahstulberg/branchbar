@@ -9,17 +9,29 @@ public struct RepoLoader: Sendable {
     private let git: GitClient
     private let gh: GHClient?
     private let reflog: ReflogFileReader
+    private let fileSystem: FileSystem
     private let policy: RefreshPolicy
 
-    public init(git: GitClient, gh: GHClient?, reflog: ReflogFileReader, policy: RefreshPolicy = .default) {
+    /// `fileSystem` is the same seam `reflog` already reads through, named separately because the
+    /// loader also has to stat `FETCH_HEAD` for the "last seen" anchor (codex MAJOR 7) and
+    /// `ReflogFileReader` holds its copy privately. It defaults to `RealFileSystem` the way
+    /// `RefreshCoordinator`'s does, so the two production call sites keep their argument lists.
+    public init(
+        git: GitClient,
+        gh: GHClient?,
+        reflog: ReflogFileReader,
+        fileSystem: FileSystem = RealFileSystem(),
+        policy: RefreshPolicy = .default
+    ) {
         self.git = git
         self.gh = gh
         self.reflog = reflog
+        self.fileSystem = fileSystem
         self.policy = policy
     }
 
     /// Run the five git stages for this repo (`rev-parse`, `config --get remote.origin.url`, both
-    /// `for-each-ref`s, `worktree list`) plus a reflog file read per upstream branch, catching each
+    /// `for-each-ref`s, `worktree list -z`) plus a reflog file read per branch, catching each
     /// stage into a `RepoError` instead of throwing; then, only when `wantsPullRequests` is true
     /// and `cachedPRs` is nil or older than `policy.prCacheTTL`, run the recent-100 `gh` list, up
     /// to `policy.perHeadFallbackCap` per-head queries for branches it did not match, and the
@@ -128,31 +140,62 @@ public struct RepoLoader: Sendable {
             errors.append(RepoError(stage: .remotes, message: "git for-each-ref -- refs/remotes/ failed (\(Self.describe(error)))"))
         }
 
-        // Stage 5 — worktrees. Losing them costs the worktree marker, never a branch row.
+        // Stage 5 — worktrees. Losing them costs the worktree marker, never a branch row — and
+        // `worktreesEnumerated` carries the difference between "no worktree holds this branch" and
+        // "we do not know", which is what keeps a checked-out branch out of the Merged group when
+        // the stage failed (codex MAJOR 12).
         var worktrees: [Worktree] = []
+        var worktreesEnumerated = true
         do {
             worktrees = try await git.worktrees(at: path)
         } catch {
-            errors.append(RepoError(stage: .worktrees, message: "git worktree list --porcelain failed (\(Self.describe(error)))"))
+            worktreesEnumerated = false
+            errors.append(RepoError(
+                stage: .worktrees,
+                message: "git worktree list --porcelain -z failed (\(Self.describe(error)))"))
         }
+
+        // When this clone last heard from origin. `FETCH_HEAD` is rewritten by every fetch and by
+        // nothing else, so its modification date is a local observation — unlike the remote tip's
+        // committer date, which the tooltip used to report as "last seen" (codex MAJOR 7). A clone
+        // that has only ever been pushed from has no `FETCH_HEAD`, and that is not an error.
+        let fetchHeadPath = (commonDirectory as NSString).appendingPathComponent("FETCH_HEAD")
+        let fetchHeadObservedAt = try? fileSystem.modificationDate(atPath: fetchHeadPath)
 
         // Stage 6 — one reflog file per upstream branch, isolated per branch. An absent file is
         // nil and not an error (a branch that was never pushed has no reflog); a file that exists
         // and cannot be read is reported by name, because swallowing it would render "Last push
         // unknown" for a branch that really was pushed.
+        //
+        // A branch with no upstream is read too, against the candidate ref `origin/<branch>`, but
+        // only when `for-each-ref -- refs/remotes/` actually listed that ref: `git push origin
+        // <branch>` without `-u` leaves a real push record and no tracking configuration, and
+        // calling that "never pushed" was a claim the data never supported (codex MAJOR 6).
+        let remoteShortNames = Set(remoteRefs.map(\.shortName))
         var observations: [String: ReflogObservation] = [:]
         for row in branchRefs where row.refName.hasPrefix("refs/heads/") {
-            guard let upstream = ForEachRefParser.upstream(from: row) else { continue }
+            let remote: String
+            let remoteBranch: String
+            if let upstream = ForEachRefParser.upstream(from: row) {
+                remote = upstream.remote
+                remoteBranch = upstream.branchName
+            } else if remoteShortNames.contains("origin/\(row.branchName)") {
+                remote = "origin"
+                remoteBranch = row.branchName
+            } else {
+                continue
+            }
+
             do {
                 if let observation = try reflog.observation(
                     commonDirectory: commonDirectory,
-                    remote: upstream.remote,
-                    branch: upstream.branchName) {
+                    remote: remote,
+                    branch: remoteBranch) {
                     observations[row.branchName] = observation
                 }
             } catch {
                 let file = ReflogFileReader.reflogPath(
-                    commonDirectory: commonDirectory, remote: upstream.remote, branch: upstream.branchName)
+                    commonDirectory: commonDirectory, remote: remote, branch: remoteBranch)
                 errors.append(RepoError(stage: .reflog, message: "\(file): \(Self.describe(error))"))
             }
         }
@@ -207,6 +250,8 @@ public struct RepoLoader: Sendable {
             branchRefs: branchRefs,
             remoteRefs: remoteRefs,
             worktrees: worktrees,
+            worktreesEnumerated: worktreesEnumerated,
+            fetchHeadObservedAt: fetchHeadObservedAt,
             pushObservations: observations,
             pullRequests: pr.pullRequests,
             authoredOpenPullRequests: pr.authored,
@@ -338,6 +383,9 @@ public struct RepoLoader: Sendable {
                 return line.isEmpty ? "exit \(code)" : "exit \(code): \(line)"
             case .timedOut(let after): return "timed out after \(Int(after))s"
             case .cancelled: return "cancelled"
+            // Packet F3 / codex MAJOR 15: the one line this file needs for the new seam case.
+            case .outputTooLarge(let stream, let limit):
+                return "\(stream.rawValue) exceeded \(limit / (1024 * 1024)) MB and the child was terminated"
             }
         default:
             return "\(error)"

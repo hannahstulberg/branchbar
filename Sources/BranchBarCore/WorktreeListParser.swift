@@ -1,11 +1,13 @@
 import Foundation
 
-/// Pure parser over `git worktree list --porcelain` stdout.
+/// Pure parser over `git worktree list --porcelain -z` stdout.
 ///
-/// Records are separated by blank lines; each line is `key` or `key value`. Keys seen in the
+/// Fields are NUL-terminated and a record ends with an empty field, so the input is
+/// `line \0 line \0 … \0` per record. Each field is `key` or `key value`. Keys seen in the
 /// wild: `worktree`, `HEAD`, `branch`, `bare`, `detached`, `locked` (optionally with a reason),
 /// `prunable` (optionally with a reason). Paths can contain spaces, so only the first space
-/// separates key from value.
+/// separates key from value — and they can contain newlines and tabs, which is why the input is
+/// `Data` split on NUL rather than a `String` split on "\n" (codex MAJOR 12).
 public enum WorktreeListParser {
 
     /// A record the porcelain cannot have produced. Recoverable, like the for-each-ref errors:
@@ -24,7 +26,11 @@ public enum WorktreeListParser {
     /// Parse the porcelain into one `Worktree` per record. The first record git prints is the
     /// primary worktree; `detached` and `bare` records carry no branch, so the join rules
     /// (PLAN.md §5) can never attach them to a branch row.
-    public static func parse(_ output: String) throws -> [Worktree] {
+    ///
+    /// The split is on the NUL byte and nothing else: a field's own bytes — a newline in a path, a
+    /// tab in a branch name — cannot end it, which is the whole reason the invocation carries
+    /// `-z`. Each field is decoded as UTF-8 afterwards, so a path git wrote is reproduced verbatim.
+    public static func parse(_ output: Data) throws -> [Worktree] {
         var worktrees: [Worktree] = []
         var record: [String] = []
 
@@ -34,8 +40,10 @@ public enum WorktreeListParser {
             worktrees.append(try worktree(from: record, isPrimary: worktrees.isEmpty))
         }
 
-        for raw in output.components(separatedBy: "\n") {
-            let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+        // `split(separator:omittingEmptySubsequences: false)` keeps the empty field that ends a
+        // record, which is the only record boundary `-z` prints.
+        for field in output.split(separator: 0, omittingEmptySubsequences: false) {
+            let line = String(decoding: field, as: UTF8.self)
             if line.isEmpty {
                 try flush()
             } else {

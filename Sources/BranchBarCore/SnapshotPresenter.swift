@@ -84,7 +84,9 @@ public struct SnapshotPresenter: Sendable {
                 appVersion: appVersion,
                 now: now
             ),
-            emptyState: snapshot.repos.isEmpty ? emptyState(refreshState: refreshState) : nil
+            emptyState: snapshot.repos.isEmpty
+                ? emptyState(refreshState: refreshState, scanResult: scanResult)
+                : nil
         )
     }
 
@@ -118,7 +120,8 @@ public struct SnapshotPresenter: Sendable {
                 now: now
             ),
             prNotice: prNotice(for: repo, isCollapsed: isCollapsed),
-            notScannedNotice: notScannedNotice(scanResult)
+            notScannedNotice: notScannedNotice(scanResult),
+            host: repo.githubSlug?.host
         )
     }
 
@@ -211,11 +214,21 @@ public struct SnapshotPresenter: Sendable {
             )
             tooltip = Strings.pushedTooltip
         case .tipCommitDate:
-            label = Strings.pushUnknown(tipCommitDate: branch.committerDate, now: now)
+            // The **remote** tip's commit date, which is what `.tipCommitDate` was selected on.
+            // The local tip can sit many commits ahead of what origin holds, so reading
+            // `branch.committerDate` here dated a fallback against a commit origin never saw
+            // (codex MAJOR 7). The `??` is unreachable from `PushInfoDeriver`, which only chooses
+            // this source when the date exists.
+            label = Strings.pushUnknown(
+                tipCommitDate: push.remoteTipCommitDate ?? branch.committerDate, now: now)
             tooltip = Strings.pushUnknownTooltip
         case .none:
-            label = Strings.neverPushed
-            tooltip = Strings.neverPushedTooltip
+            // Not "Never pushed": no tracking configuration is not evidence that nothing left
+            // this Mac, and the reflog for `origin/<branch>` was either absent or never read
+            // (codex MAJOR 6). A gone upstream that was never fetched lands here too, and the
+            // tertiary line says so beside this one.
+            label = Strings.noTrackedRemoteBranch
+            tooltip = Strings.noTrackedRemoteBranchTooltip
         }
 
         // §5a item 3 hangs both the push tooltip and the ahead tooltip off the tertiary tier, and
@@ -228,6 +241,13 @@ public struct SnapshotPresenter: Sendable {
 
     private func aheadCount(for branch: Branch) -> Int {
         branch.push.aheadOfLastKnownRemote ?? branch.upstream?.ahead ?? 0
+    }
+
+    /// Never rendered as a number — PLAN.md §3 forbids that — but "In sync" is a claim about both
+    /// directions, so the count decides which of the two zero-ahead lines the row carries
+    /// (codex MAJOR 5).
+    private func behindCount(for branch: Branch) -> Int {
+        branch.upstream?.behind ?? 0
     }
 
     /// The tertiary line: where this branch stands against last-known origin, plus the group copy
@@ -244,6 +264,10 @@ public struct SnapshotPresenter: Sendable {
             parts.append(Strings.noUpstream)
         } else if aheadCount(for: branch) > 0 {
             parts.append(Strings.ahead(aheadCount(for: branch)))
+        } else if behindCount(for: branch) > 0 {
+            // Nothing local is ahead, but origin holds commits this clone does not, so "In sync"
+            // would be false. The count itself still never reaches the row.
+            parts.append(Strings.noLocalCommitsAhead)
         } else {
             parts.append(Strings.inSync)
         }
@@ -252,7 +276,7 @@ public struct SnapshotPresenter: Sendable {
         case .merged:
             // The copy names the base branch, so a merged branch with no PR row to name it gets
             // no claim made on its behalf.
-            if let pr = branch.pr { parts.append(Strings.mergedDetail(baseRefName: pr.baseRefName)) }
+            if let pr = branch.pr { parts.append(Strings.mergedGroupCopy(base: pr.baseRefName)) }
         case .closedUnmerged:
             parts.append(Strings.closedUnmergedDetail)
         case .active:
@@ -397,8 +421,14 @@ public struct SnapshotPresenter: Sendable {
 
     /// §5a item 1 has two ways to show no repos, and `RefreshState` is what tells them apart: a
     /// scan still running is "Looking for repos", a finished one is "No repos found".
-    private func emptyState(refreshState: RefreshState) -> EmptyStateVM {
+    ///
+    /// Either way it carries the not-scanned notice when the scan hit a folder macOS would not let
+    /// BranchBar read. With zero repos there is no first section for that notice to ride on, and
+    /// zero repos is exactly what a denied Documents folder produces — so the one state that most
+    /// needs "Allow access…" was the one state that never offered it (codex MAJOR 3).
+    private func emptyState(refreshState: RefreshState, scanResult: ScanResult?) -> EmptyStateVM {
         let addFolder = UserFacingFailure.Action(label: Strings.addFolderActionLabel, kind: .addFolder)
+        let notice = notScannedNotice(scanResult)
 
         if case .running = refreshState {
             // §5a offers no action while the first scan runs; `EmptyStateVM.action` is not
@@ -406,13 +436,15 @@ public struct SnapshotPresenter: Sendable {
             return EmptyStateVM(
                 title: Strings.firstRunTitle,
                 message: Strings.firstRunMessage,
-                action: addFolder
+                action: addFolder,
+                notice: notice
             )
         }
         return EmptyStateVM(
             title: Strings.emptyStateTitle,
             message: Strings.emptyStateMessage,
-            action: addFolder
+            action: addFolder,
+            notice: notice
         )
     }
 

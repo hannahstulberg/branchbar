@@ -9,10 +9,14 @@ public struct GitClient: Sendable {
     private let timeout: TimeInterval
 
     /// PLAN.md §5. `LC_ALL=C` keeps the output parseable; `GIT_OPTIONAL_LOCKS=0` stops a read
-    /// from taking `index.lock` while the user is mid-commit in another tool.
+    /// from taking `index.lock` while the user is mid-commit in another tool;
+    /// `GIT_NO_LAZY_FETCH=1` stops a partial clone from reaching the network behind a read that
+    /// is contracted never to fetch, and stops the fetch helper that read would spawn from
+    /// outliving cancellation (codex MAJOR 13, the git half).
     public static let frozenEnvironment: [String: String] = [
         "LC_ALL": "C",
         "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
     ]
 
     /// The seven `for-each-ref` atoms of the refs/heads format, in the frozen order. `%1f` is the
@@ -48,6 +52,10 @@ public struct GitClient: Sendable {
 
     /// Run `git -C <path> config --get remote.origin.url`. An unset key is git exit 1 with empty
     /// stdout, which is `PRUnavailableReason.noRemote` — an answer, not a command failure.
+    ///
+    /// The URL is sanitized here, before it can reach `Repo.remoteURL`, `cache.json`, or a log
+    /// line: an HTTPS remote can carry a personal access token as its user info, and PLAN.md §6
+    /// promises BranchBar stores no secret (codex MAJOR 1).
     public func remoteOriginURL(at path: String) async throws -> String? {
         let command = Self.command(gitPath: gitPath, arguments: ["config", "--get", "remote.origin.url"],
                                    at: path, timeout: timeout)
@@ -61,7 +69,40 @@ public struct GitClient: Sendable {
             return nil
         }
         try Self.check(output)
-        return url
+        return Self.sanitize(remoteURL: url)
+    }
+
+    /// Strips user info, query, and fragment from a remote URL, leaving the part that identifies
+    /// the repository. Both remote shapes git writes are handled: `scheme://[user[:pass]@]host…`
+    /// and the scp-like `[user@]host:owner/name`.
+    ///
+    /// All user info goes, not only a `user:password` pair, because a GitHub token is written as
+    /// bare user info (`https://<token>@github.com/o/r.git`) and is indistinguishable from a
+    /// username by shape. Nothing renders `Repo.remoteURL`, so the loss is invisible to the user
+    /// and `GitHubSlug` parses the sanitized form identically.
+    static func sanitize(remoteURL: String) -> String {
+        var url = remoteURL
+        // A query or fragment is never part of a git remote's identity and is where a token
+        // arrives in `?access_token=…` style URLs.
+        if let cut = url.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+            url = String(url[url.startIndex..<cut])
+        }
+
+        if let schemeRange = url.range(of: "://") {
+            let head = String(url[url.startIndex..<schemeRange.upperBound])
+            let rest = String(url[schemeRange.upperBound...])
+            let authorityEnd = rest.firstIndex(of: "/") ?? rest.endIndex
+            let authority = String(rest[rest.startIndex..<authorityEnd])
+            guard let at = authority.lastIndex(of: "@") else { return url }
+            let stripped = String(authority[authority.index(after: at)...])
+            return head + stripped + String(rest[authorityEnd...])
+        }
+
+        // scp-like: everything before the first colon is `[user@]host`.
+        guard !url.hasPrefix("/"), let colon = url.firstIndex(of: ":") else { return url }
+        let authority = String(url[url.startIndex..<colon])
+        guard let at = authority.lastIndex(of: "@") else { return url }
+        return String(authority[authority.index(after: at)...]) + String(url[colon...])
     }
 
     /// The frozen `for-each-ref … -- refs/heads` invocation. `--` is used here because git was
@@ -78,10 +119,15 @@ public struct GitClient: Sendable {
         return try ForEachRefParser.parseRemoteRefs(output.standardOutputText)
     }
 
-    /// `git -C <path> worktree list --porcelain` — newline-delimited, no `-z`, no separator.
+    /// `git -C <path> worktree list --porcelain -z` — NUL-delimited, no separator.
+    ///
+    /// `-z` is not a preference. Without it git 2.39.5 prints a worktree path containing a newline
+    /// raw, so one record splits into several, the whole stage throws, and the repo loses every
+    /// worktree it has — which quietly moves a checked-out merged branch into the Merged group
+    /// (codex MAJOR 12). The stdout goes to the parser as bytes, because a path is bytes.
     public func worktrees(at path: String) async throws -> [Worktree] {
-        let output = try await run(["worktree", "list", "--porcelain"], at: path)
-        return try WorktreeListParser.parse(output.standardOutputText)
+        let output = try await run(["worktree", "list", "--porcelain", "-z"], at: path)
+        return try WorktreeListParser.parse(output.standardOutput)
     }
 
     /// `git -C <path> reflog show --date=unix --format=%gd%x1f%gs%x1f%H <ref>` with **no** `--`

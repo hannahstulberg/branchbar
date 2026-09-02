@@ -321,9 +321,14 @@ public enum Strings {
     public static let closedUnmergedGroupHeading = "Closed without merging"
 
     /// State: `merged-group` — names the base branch and makes no deletion claim (PLAN.md §3).
-    /// Literal: `PR merged into main. No later local commits found.`
-    public static func mergedDetail(baseRefName: String) -> String {
-        "PR merged into \(baseRefName). No later local commits found."
+    /// The second sentence says exactly what the comparison proves and nothing more: `headRefOid`
+    /// is GitHub's **current** head of the PR, not an immutable snapshot of what was merged, so
+    /// "No later local commits found" was a claim the data could not support (codex MAJOR 8).
+    /// "PR head" is the one piece of GitHub's own vocabulary the copy borrows, and it is the
+    /// second locked exception to the banned-word sweep.
+    /// Literal: `PR merged into main. Local tip matches GitHub's current PR head.`
+    public static func mergedGroupCopy(base: String) -> String {
+        "PR merged into \(base). Local tip matches GitHub's current PR head."
     }
 
     /// State: `closed-unmerged-group` — PLAN.md §3 locks this wording. The app deletes nothing.
@@ -355,9 +360,12 @@ public enum Strings {
     }
 
     /// State: `single-branch-no-pr-never-pushed` — the modal NYT case: a branch with no matching
-    /// branch on origin. Never "0 commits ahead" (`noUpstreamRendersNeverPushedNotZeroCommits`).
-    /// Literal: `Never pushed`
-    public static let neverPushed = "Never pushed"
+    /// branch on origin. It replaced `Never pushed`, which "no upstream" never proved: a
+    /// `git push origin <branch>` without `-u`, or an upstream removed after a push, leaves no
+    /// tracking configuration behind a branch that really did go out (codex MAJOR 6). Never
+    /// "0 commits ahead" (`noUpstreamRendersNeverPushedNotZeroCommits`).
+    /// Literal: `No tracked remote branch · push history not checked`
+    public static let noTrackedRemoteBranch = "No tracked remote branch · push history not checked"
 
     /// State: `single-branch-no-pr-never-pushed` — secondary line for a branch that tracks nothing.
     /// Literal: `No matching branch on last-known origin`
@@ -377,10 +385,17 @@ public enum Strings {
         "\(n) ahead of last-known origin"
     }
 
-    /// State: `in-sync` — tracked, with nothing local that origin has not seen. Distinguished from
-    /// "no upstream" by `%(upstream:short)`, never by the track field (PLAN.md §3).
+    /// State: `in-sync` — tracked, with nothing local that origin has not seen **and** nothing on
+    /// origin this clone has not seen. Distinguished from "no upstream" by `%(upstream:short)`,
+    /// never by the track field (PLAN.md §3).
     /// Literal: `In sync with last-known origin`
     public static let inSync = "In sync with last-known origin"
+
+    /// State: `behind-only` — nothing local is ahead, but last-known origin carries commits this
+    /// clone does not. PLAN.md §3 still forbids showing the behind count, so the line states only
+    /// the half BranchBar is willing to say; "In sync" there would be false (codex MAJOR 5).
+    /// Literal: `No local commits ahead of last-known origin`
+    public static let noLocalCommitsAhead = "No local commits ahead of last-known origin"
 
     /// State: `origin-moved-since` — tooltip on an observed push.
     /// Literal: `BranchBar saw this push leave this Mac. It cannot see pushes made from your other computers.`
@@ -393,17 +408,31 @@ public enum Strings {
         "BranchBar has no record of this branch going out from this Mac. The date shown is when the "
         + "newest commit was made, not when it left."
 
-    /// State: `single-branch-no-pr-never-pushed` — tooltip on a branch that tracks nothing.
-    /// Literal: `This branch has no matching branch on last-known origin, so nothing has gone out from this Mac.`
-    public static let neverPushedTooltip =
-        "This branch has no matching branch on last-known origin, so nothing has gone out from this Mac."
+    /// State: `single-branch-no-pr-never-pushed` — tooltip on a branch that tracks nothing. It
+    /// says what BranchBar did rather than what the branch did, because the old wording ("nothing
+    /// has gone out from this Mac") asserted something the absence of tracking cannot show
+    /// (codex MAJOR 6).
+    /// Literal: `BranchBar only reads push history for a branch that tracks one on origin, so it has not checked this one.`
+    public static let noTrackedRemoteBranchTooltip =
+        "BranchBar only reads push history for a branch that tracks one on origin, so it has not "
+        + "checked this one."
 
-    /// State: `ahead-of-last-known-origin` — tooltip carrying when origin was last seen.
+    /// State: `ahead-of-last-known-origin` — tooltip carrying when this clone last heard from
+    /// origin. `remoteObservedAt` is the `FETCH_HEAD` modification date, which is a local
+    /// observation; it used to be the remote tip's committer date, so fetching a two-year-old
+    /// commit today read as "last seen 2 years ago" (codex MAJOR 7).
     /// Literal: `Counted against last-known origin, last seen 3 hours ago. BranchBar never fetches, so origin may have moved.`
     public static func aheadTooltip(remoteObservedAt: Date?, now: Date) -> String {
-        let anchor = remoteObservedAt.map { ", last seen \(relative($0, now: now))" } ?? ""
+        let anchor = remoteObservedAt.map { ", last seen \(relative($0, now: now))" }
+            ?? ", \(originNotFetchedYet)"
         return "Counted against last-known origin\(anchor). BranchBar never fetches, so origin may have moved."
     }
+
+    /// State: `origin-not-fetched` — the anchor clause when there is no `FETCH_HEAD` to date. A
+    /// clone that has only ever been pushed from has never fetched, and saying so is honest where
+    /// a silent omission read as "we know when, we just did not say".
+    /// Literal: `origin not fetched by this clone yet`
+    public static let originNotFetchedYet = "origin not fetched by this clone yet"
 
     // MARK: - Worktree markers
 

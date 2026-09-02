@@ -17,6 +17,12 @@ public enum RepoAssembler {
         public var branchRefs: [ParsedBranchRef]
         public var remoteRefs: [ParsedRemoteRef]
         public var worktrees: [Worktree]
+        /// False when `git worktree list` failed, so `worktrees` is "unknown" rather than "none".
+        /// The Merged group is suppressed in that case (codex MAJOR 12).
+        public var worktreesEnumerated: Bool
+        /// `FETCH_HEAD`'s modification date: when this clone last heard from origin. Nil when the
+        /// clone has never fetched (codex MAJOR 7).
+        public var fetchHeadObservedAt: Date?
         /// Keyed by local branch name.
         public var pushObservations: [String: ReflogObservation]
         /// The recent-100 list plus anything the per-head fallback returned.
@@ -39,6 +45,8 @@ public enum RepoAssembler {
             branchRefs: [ParsedBranchRef] = [],
             remoteRefs: [ParsedRemoteRef] = [],
             worktrees: [Worktree] = [],
+            worktreesEnumerated: Bool = true,
+            fetchHeadObservedAt: Date? = nil,
             pushObservations: [String: ReflogObservation] = [:],
             pullRequests: [PRInfo] = [],
             authoredOpenPullRequests: [PRInfo] = [],
@@ -56,6 +64,8 @@ public enum RepoAssembler {
             self.branchRefs = branchRefs
             self.remoteRefs = remoteRefs
             self.worktrees = worktrees
+            self.worktreesEnumerated = worktreesEnumerated
+            self.fetchHeadObservedAt = fetchHeadObservedAt
             self.pushObservations = pushObservations
             self.pullRequests = pullRequests
             self.authoredOpenPullRequests = authoredOpenPullRequests
@@ -92,6 +102,7 @@ public enum RepoAssembler {
 
         var branches: [Branch] = []
         var localHeads: Set<PRStatusMapper.LocalHead> = []
+        var localBranchNames: Set<String> = []
 
         // `-- refs/heads` is the frozen pattern, but a row that is not a branch must never become
         // one: `refs/tags/main` and `refs/heads/main` are different objects with the same name.
@@ -101,13 +112,18 @@ public enum RepoAssembler {
             let tip = upstream.flatMap { remoteTips[$0.ref] }
             let owner = upstreamOwnerLogin(upstream: upstream, slug: slug)
 
+            localBranchNames.insert(name)
             if let owner {
                 localHeads.insert(PRStatusMapper.LocalHead(ownerLogin: owner, branchName: name))
             }
 
             let matched = (isUnavailable || isNotLoaded)
                 ? nil
-                : PRStatusMapper.match(branchName: name, upstreamOwnerLogin: owner, in: inputs.pullRequests)
+                : PRStatusMapper.match(
+                    branchName: name,
+                    upstreamOwnerLogin: owner,
+                    repoOwnerLogin: slug?.owner,
+                    in: inputs.pullRequests)
 
             let status: PRStatus
             if isUnavailable {
@@ -136,9 +152,15 @@ public enum RepoAssembler {
                 push: PushInfoDeriver.derive(
                     observation: inputs.pushObservations[name],
                     upstream: upstream,
-                    remoteTipOID: tip?.objectName,
-                    remoteTipCommitDate: tip?.committerDate),
-                group: group(status: status, tipSHA: row.objectName, pr: matched, worktreePath: worktreePath)))
+                    remoteTipOID: tip?.objectName ?? remoteTips["origin/\(name)"]?.objectName,
+                    remoteTipCommitDate: tip?.committerDate ?? remoteTips["origin/\(name)"]?.committerDate,
+                    fetchHeadObservedAt: inputs.fetchHeadObservedAt),
+                group: group(
+                    status: status,
+                    tipSHA: row.objectName,
+                    pr: matched,
+                    worktreePath: worktreePath,
+                    worktreesEnumerated: inputs.worktreesEnumerated)))
         }
 
         branches.sort { $0.name < $1.name }
@@ -147,7 +169,8 @@ public enum RepoAssembler {
             ? []
             : PRStatusMapper.openPRsNotOnThisMac(
                 authoredOpenPRs: inputs.authoredOpenPullRequests,
-                localHeads: localHeads)
+                localHeads: localHeads,
+                localBranchNames: localBranchNames)
 
         return Repo(
             id: inputs.id,
@@ -200,9 +223,21 @@ public enum RepoAssembler {
     /// is work that did not ship (`branchWithCommitsAfterItsMergeIsNotInMergedGroup`), and a
     /// branch checked out in a worktree cannot be deleted without removing the worktree first
     /// (`mergedBranchWithWorktreeStaysActive`).
-    static func group(status: PRStatus, tipSHA: String, pr: PRInfo?, worktreePath: String?) -> BranchGroup {
+    ///
+    /// `worktreesEnumerated` is the fourth clause and the one that came from the codex review
+    /// (MAJOR 12): when `git worktree list` failed, `worktreePath == nil` means "not known",
+    /// not "no worktree holds it", and reading the first as the second put a checked-out branch
+    /// under Merged. Unknown suppresses the group instead.
+    static func group(
+        status: PRStatus,
+        tipSHA: String,
+        pr: PRInfo?,
+        worktreePath: String?,
+        worktreesEnumerated: Bool = true
+    ) -> BranchGroup {
         switch status {
         case .merged:
+            guard worktreesEnumerated else { return .active }
             guard let pr, tipSHA == pr.headRefOid, worktreePath == nil else { return .active }
             return .merged
         case .closed:

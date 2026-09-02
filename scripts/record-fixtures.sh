@@ -118,8 +118,11 @@ for pair in "hannah-personal-agent:$REPO_A" "branchbar:$REPO_B"; do
     --format='%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(upstream:short)%1f%(upstream:remotename)%1f%(upstream:track,nobracket)%1f%(HEAD)' \
     -- refs/heads
 
+  # `-z`, frozen after the codex pre-ship review (MAJOR 12): the newline-delimited porcelain
+  # prints a path containing a newline raw on 2.39.5, which splits one record into several and
+  # fails the whole worktree stage. NUL-delimited records cannot be split by their own content.
   record "recorded-$label-worktree-list.txt" rows \
-    "$GIT" -C "$repo" worktree list --porcelain
+    "$GIT" -C "$repo" worktree list --porcelain -z
 
   record "recorded-$label-for-each-ref-remotes.txt" rows \
     "$GIT" -C "$repo" for-each-ref \

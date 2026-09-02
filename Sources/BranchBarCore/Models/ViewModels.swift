@@ -35,6 +35,11 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
     public var prNotice: NoticeVM?
     /// TCC-denied folders plus the skipped-categories summary.
     public var notScannedNotice: NoticeVM?
+    /// The repo's validated GitHub host, from `Repo.githubSlug?.host`, so `Actions.openPR` can
+    /// refuse a link that points anywhere else (codex MINOR 3). Optional and defaulted so a
+    /// `RepoSectionVM` recorded before the field existed still decodes, and nil for a repo with no
+    /// GitHub remote — which is also a repo with no PR link to open.
+    public var host: String?
 
     public init(
         id: RepoID,
@@ -46,7 +51,8 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
         merged: [BranchRowVM] = [],
         closedUnmerged: [BranchRowVM] = [],
         prNotice: NoticeVM? = nil,
-        notScannedNotice: NoticeVM? = nil
+        notScannedNotice: NoticeVM? = nil,
+        host: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -58,6 +64,7 @@ public struct RepoSectionVM: Hashable, Codable, Sendable {
         self.closedUnmerged = closedUnmerged
         self.prNotice = prNotice
         self.notScannedNotice = notScannedNotice
+        self.host = host
     }
 }
 
@@ -163,10 +170,23 @@ public struct EmptyStateVM: Hashable, Codable, Sendable {
     public var title: String
     public var message: String
     public var action: UserFacingFailure.Action
+    /// The TCC-denied folders and the skipped-categories summary, when the scan hit one and found
+    /// no repo at all. `RepoSectionVM.notScannedNotice` was the only slot that notice had, and with
+    /// zero repos there is no section to hang it on — which is exactly the case where every repo
+    /// sits in a denied folder, so the user saw the generic "No repos found" and no way to fix it
+    /// (codex MAJOR 3). Optional and defaulted so an `EmptyStateVM` recorded before the field
+    /// existed still decodes.
+    public var notice: NoticeVM?
 
-    public init(title: String, message: String, action: UserFacingFailure.Action) {
+    public init(
+        title: String,
+        message: String,
+        action: UserFacingFailure.Action,
+        notice: NoticeVM? = nil
+    ) {
         self.title = title
         self.message = message
         self.action = action
+        self.notice = notice
     }
 }

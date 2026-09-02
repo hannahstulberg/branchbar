@@ -20,8 +20,16 @@ public struct PushInfo: Hashable, Codable, Sendable {
     public var upstreamGone: Bool
     /// Ahead count relative to the last-known remote-tracking ref, nil when there is no upstream.
     public var aheadOfLastKnownRemote: Int?
-    /// Committer date of the remote-tracking tip; the tooltip's "last-known origin" anchor.
+    /// When this clone last heard from origin: the `FETCH_HEAD` modification date, which is a
+    /// local observation. It carried the remote tip's **committer date** until codex MAJOR 7,
+    /// which meant fetching a two-year-old commit today reported origin as "last seen 2 years
+    /// ago". Nil when the clone has no `FETCH_HEAD` — it has never fetched.
     public var remoteRefObservedAt: Date?
+    /// Committer date of the remote-tracking tip. A fact about the commit, not about when it was
+    /// seen, and the date the "Last push unknown · newest commit dated …" fallback reads: the
+    /// local tip can sit far ahead of what origin holds, so `Branch.committerDate` was the wrong
+    /// number there (codex MAJOR 7).
+    public var remoteTipCommitDate: Date?
 
     /// Where `observedPushAt` (or the fallback date) came from. PLAN.md §3.
     public enum Source: String, Hashable, Codable, Sendable, CaseIterable {
@@ -41,7 +49,8 @@ public struct PushInfo: Hashable, Codable, Sendable {
         hasUpstream: Bool = false,
         upstreamGone: Bool = false,
         aheadOfLastKnownRemote: Int? = nil,
-        remoteRefObservedAt: Date? = nil
+        remoteRefObservedAt: Date? = nil,
+        remoteTipCommitDate: Date? = nil
     ) {
         self.observedPushAt = observedPushAt
         self.observedPushOID = observedPushOID
@@ -51,6 +60,7 @@ public struct PushInfo: Hashable, Codable, Sendable {
         self.upstreamGone = upstreamGone
         self.aheadOfLastKnownRemote = aheadOfLastKnownRemote
         self.remoteRefObservedAt = remoteRefObservedAt
+        self.remoteTipCommitDate = remoteTipCommitDate
     }
 }
 
