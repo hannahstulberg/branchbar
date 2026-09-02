@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-01 — Packet 0.3: spike zip published as v0.0.1-spike; Gatekeeper dialog observed; keyring gh works from a GUI process
+
+- **What:** `dist/BranchBar-spike-mac.zip` (415 KB, arm64, ad-hoc signed) attached to pre-release `v0.0.1-spike`. The app carries Check GitHub CLI, Add folder…, and Copy report buttons plus a `BRANCHBAR_SPIKE_AUTORUN=1` hook. `docs/runbooks/gate-0b-nyt-spike-test.md` is the tester's 14-step checklist. `ToolLocator` is real (4 tests) and found `/opt/homebrew/bin/gh` from a process launched with the stock launchd PATH (`env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin open …`); `gh auth status` returned exit 0 with the keyring token.
+- **Why:** Gate 0b needs an artifact that answers distribution, GUI auth, and TCC on an NYT-managed Mac before real code is written.
+- **Limits:** Launching a freshly signed bundle reproduced the macOS 15.5 dialog: `"BranchBar" Not Opened … Apple could not verify …` with **Move to Trash as the default button**; pressing Return deletes the app. While the dialog is up the process is app-translocated and `applicationDidFinishLaunching` never fires, so an empty log means the tester is stuck at Gatekeeper, not at a later step. `spctl -a -t exec` reports `rejected` regardless of the quarantine attribute (the ad-hoc signature is the cause). `listGitDirs` has no test inside 0.3's boundary; packet 2.4's scanner replaces it.
+- **Cost accepted:** The spike zip is named `BranchBar-spike-mac.zip` (not versioned) so the runbook link is stable across rebuilds; `VERSION` stays 0.1.0.
+- **Deliberately not changed:** No attempt at `SMAppService`, the real scanner, or `NSOpenPanel` recursion semantics; those are packets 4.2 and 2.4 and the Gate 5 checklist.
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-01 — Codex Challenge (cross-vendor) folded in; Gate 0b moved to Sept 4 with the spike zip
 
 - **What:** codex-cli 0.152.1 (gpt-5.6-sol, high) reviewed PLAN.md and returned KILL. Adopted after firsthand verification: the managed-Mac distribution, GUI `gh` auth, and TCC test moves to **Gate 0b on Sept 4** using a spike zip (packet 0.3) instead of Sept 12 with the release; `PRStatus.notChecked` so an unqueried branch never renders as "no PR"; open-elsewhere keyed by owner + branch; "Pushed from this Mac" wording, a delete-then-recreate boundary, and a lineage check against the remote tip; product promise changed to "repos found under home or folders you added", Add folder… as recursive scan roots, skipped-categories summary; `GitClient` owned by 2.1 and a `branchbar-cli` target owned by 3.2 (also the fallback if Gate 0b fails); arm64-only until an Intel test exists; "Merged into `<base>`, no later local commits" replaces "safe to delete"; "Upstream missing from last-known origin"; separate test-author and implementer agents for push, PR matching, discovery, and deadlines; gh env frozen (`GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER`, `GH_PAGER=cat`, `NO_COLOR`); research ledger corrected (`SwiftUI.tbd` lists arm64; reflog expiry 90/30 days).

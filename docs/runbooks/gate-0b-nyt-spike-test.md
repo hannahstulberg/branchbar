@@ -10,7 +10,7 @@ person has to try it.
 You do not need an admin password or anything else installed. The app only reads: it changes no
 files and sends nothing anywhere. It will ask macOS for permission to read a folder you choose.
 
-**Download:** `<RELEASE_URL_PLACEHOLDER>`
+**Download:** `https://github.com/hannahstulberg/branchbar/releases/download/v0.0.1-spike/BranchBar-spike-mac.zip`
 
 Your Mac will probably warn you that the app is from an unidentified developer. That is expected;
 the steps below get past it. If your Mac blocks it with no way through, stop and tell me exactly
