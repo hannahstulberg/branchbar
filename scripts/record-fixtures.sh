@@ -5,6 +5,12 @@
 # Run it with `make record-fixtures`. It rewrites Tests/BranchBarCoreTests/Fixtures/recorded-*
 # and nothing else; `synthetic-*` files are hand-written and are never touched here.
 #
+# One §5 invocation is deliberately absent: `branchbar-cli scan --policy-json … --deadline …`,
+# the discovery helper the app spawns. It is BranchBar's own binary rather than a tool whose
+# behaviour this project has to discover, its output is a walk of whoever's home folder ran it,
+# and its argument array and NDJSON protocol are pinned by `ScanRunnerTests.swift` against a real
+# spawned process instead. Every *external* invocation belongs here.
+#
 # It exits non-zero when an invocation that must produce rows produces empty stdout, printing
 # the offending command — that is Gate 1.1's criterion, and it is why a frozen command that
 # silently stopped returning rows (as `git reflog show --` does) cannot survive a re-record.
@@ -25,6 +31,11 @@ REPO_A="${BRANCHBAR_RECORD_REPO_A:-$HOME/hannah-personal-agent}"
 REPO_B="${BRANCHBAR_RECORD_REPO_B:-$ROOT}"
 GH_SLUG="${BRANCHBAR_RECORD_SLUG:-github.com/hannahstulberg/hannah-personal-agent}"
 GH_HOST="${BRANCHBAR_RECORD_HOST:-github.com}"
+# A remote name that is not `origin`, for the per-remote lookup packet F7 added. Neither fixture
+# repo configures one, and that is the point: the recording pins what git does with an unset key,
+# which is the branch `RepoLoader.configuredRemoteURL` reads as "this remote has no URL" rather
+# than as a failure. Point it at a name that does exist and the same invocation records a URL.
+GIT_OTHER_REMOTE="${BRANCHBAR_RECORD_REMOTE:-upstream}"
 # A head that is known to have a PR, so the per-head fallback fixture has rows.
 GH_HEAD="${BRANCHBAR_RECORD_HEAD:-allison-bachelorette-itinerary-pdf}"
 
@@ -145,6 +156,13 @@ for pair in "hannah-personal-agent:$REPO_A" "branchbar:$REPO_B"; do
   record "recorded-$label-config-remote-origin-url.txt" rows \
     "$GIT" -C "$repo" config --get remote.origin.url
 
+  # The per-remote form, added in packet F7 (codex round 2, MAJOR 4): a branch that tracks a fork
+  # is counted and matched against that fork's owner, so every upstream remote name costs one of
+  # these. `may-be-empty` because an unset key is git exit 1 with empty stdout, which is an answer
+  # and not a failure — the same reading `remote.origin.url` gets when a repo has no origin.
+  record "recorded-$label-config-remote-$GIT_OTHER_REMOTE-url.txt" may-be-empty \
+    "$GIT" -C "$repo" config --get "remote.$GIT_OTHER_REMOTE.url"
+
   # The secondary fallback. NO `--` separator: with one, 2.39.5 and 2.52 both return zero rows
   # and exit 0 (CLAUDE.md "Rules that came from real bugs"). An empty result here would mean the
   # separator crept back in.
@@ -172,6 +190,15 @@ else
   record "recorded-gh-auth-status-$GH_HOST.txt" rows \
     "$GH" auth status --hostname "$GH_HOST"
 
+  # The same command with **no** `--hostname`, added in packet F7 (codex round 2, MAJOR 6): its
+  # `Logged in to <host>` lines are the whole list of hosts BranchBar will treat as GitHub, and
+  # everything else is "not on GitHub" and never a sign-in target. `may-be-empty` here because gh
+  # exits non-zero when *any* configured host is logged out while still listing the ones that are
+  # logged in, which is why `GHClient.loggedInHosts` judges it by its output; the merged re-record
+  # below is what requires the file to be non-empty.
+  record "recorded-gh-auth-status.txt" may-be-empty \
+    "$GH" auth status
+
   record "recorded-gh-pr-list-hannah-personal-agent.json" rows \
     "$GH" pr list --repo "$GH_SLUG" --state all --limit 100 --json "$JSON_FIELDS"
 
@@ -190,6 +217,14 @@ if [ -n "$GH" ]; then
   "$GH" auth status --hostname "$GH_HOST" > "$FIXTURES/recorded-gh-auth-status-$GH_HOST.txt" 2>&1
   if [ ! -s "$FIXTURES/recorded-gh-auth-status-$GH_HOST.txt" ]; then
     fail "empty output: gh auth status --hostname $GH_HOST"
+  fi
+
+  "$GH" auth status > "$FIXTURES/recorded-gh-auth-status.txt" 2>&1
+  if [ ! -s "$FIXTURES/recorded-gh-auth-status.txt" ]; then
+    fail "empty output: gh auth status"
+  fi
+  if ! grep -q 'Logged in to ' "$FIXTURES/recorded-gh-auth-status.txt"; then
+    fail "no 'Logged in to <host>' line: gh auth status — GHClient.isGitHubHost reads that line"
   fi
 fi
 

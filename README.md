@@ -6,7 +6,7 @@ A small macOS menu bar app that shows every repo on your Mac, the branches and w
 
 BranchBar was written by Hannah Stulberg for the Claude Code workshop, and all of its source code is public at [github.com/hannahstulberg/branchbar](https://github.com/hannahstulberg/branchbar). It stores no passwords and no tokens: everything it knows about GitHub comes from the GitHub CLI you already signed in to, and it only reads what that tool prints back. It never changes anything in your repos, and it makes no connections of its own to anywhere, so the only traffic it causes is the GitHub CLI answering its own questions.
 
-**Every program it runs.** `git` and `gh`, to read your repos and look up your pull requests. `xcode-select`, once, to check whether Apple's copy of git is really installed before it tries to use it. macOS's own `open`, to hand a folder to your editor, a pull request to your browser, or a folder to the Finder. Two more run only when you ask for the thing that needs them: `launchctl`, when you turn on **Open BranchBar at login**, and `zsh`, when you click **Open Terminal** to sign in to the GitHub CLI, which runs a short script BranchBar writes for that one purpose and nothing else.
+**Every program it runs.** `git` and `gh`, to read your repos and look up your pull requests. A small helper program called `branchbar-cli`, which is BranchBar's own code: it ships inside the app, it is signed along with it, and it is the part that goes looking for repos in your folders. It is a separate program for one reason. A search that is waiting on a folder macOS has not let it into yet cannot be stopped from the inside, so BranchBar runs the search as its own program, which it can stop, and shows you the repos the search had already found. `xcode-select`, once, to check whether Apple's copy of git is really installed before it tries to use it. macOS's own `open`, to hand a folder to your editor, a pull request to your browser, or a folder to the Finder. Two more run only when you ask for the thing that needs them: `launchctl`, when you turn on **Open BranchBar at login**, and `zsh`, when you click **Open Terminal** to sign in to the GitHub CLI, which runs a short script BranchBar writes for that one purpose and nothing else.
 
 **Everything it leaves on your Mac.** A list of the repos it found and the last thing it showed you, in `~/Library/Application Support/BranchBar/`, and a log of what it did, in `~/Library/Logs/BranchBar/`. Turning on **Open BranchBar at login** adds a login item, which appears in System Settings under General, then Login Items, and can also write a file called `~/Library/LaunchAgents/com.hannahstulberg.branchbar.plist`. Using **Open Terminal** to sign in leaves the sign-in script in your temporary folder. The Uninstall section below removes all of it.
 
@@ -16,8 +16,8 @@ Takes about five minutes. You do not need an admin password.
 
 1. Download `BranchBar-<version>-mac.zip` from the [latest release](https://github.com/hannahstulberg/branchbar/releases/latest).
 2. Double-click the zip. A file called **BranchBar** appears.
-3. Drag **BranchBar** into your **Applications** folder.
-4. Double-click **BranchBar** in Applications.
+3. Drag **BranchBar** into your **Applications** folder, or into the Applications folder inside your home folder if your Mac does not let you change the main one. Both work, including **Open BranchBar at login** later on.
+4. Double-click **BranchBar** in whichever Applications folder you put it in.
 5. A box appears saying macOS could not verify BranchBar. Click **Done** with the mouse.
    **Do not press Return.** The highlighted button is **Move to Trash**, so Return deletes the app.
 
@@ -73,7 +73,7 @@ The answer should end in `OK`. Anything else means the download is not the file 
 ## Uninstall
 
 1. If you turned on **Open BranchBar at login**, turn it back off first. A login item that points at an app in the Trash keeps trying to start it at every login.
-2. Drag **BranchBar** from Applications to the Trash.
+2. Drag **BranchBar** from whichever Applications folder you put it in to the Trash. The helper program lives inside the app, so it goes with it.
 3. Remove what it kept:
 
    ```bash
@@ -95,4 +95,4 @@ After that nothing of BranchBar's is left, nothing in your repos is touched, and
 
 ---
 
-<sup>If step 5 or 6 gives you no way through and the app still refuses to open, `xattr -d com.apple.quarantine /Applications/BranchBar.app` in Terminal clears the download marker macOS attached. Try the normal steps first, and tell Hannah what you saw, since a Mac managed by IT that blocks step 6 is worth knowing about.</sup>
+<sup>If step 5 or 6 gives you no way through and the app still refuses to open, `xattr -d com.apple.quarantine /Applications/BranchBar.app` in Terminal clears the download marker macOS attached, or `xattr -d com.apple.quarantine ~/Applications/BranchBar.app` if that is where you put it. Try the normal steps first, and tell Hannah what you saw, since a Mac managed by IT that blocks step 6 is worth knowing about.</sup>
