@@ -65,6 +65,7 @@
     "skippedWorktreeCheckouts" : [
 
     ],
+    "truncatedByDeadline" : false,
     "unreadableDirectories" : [
       "/Users/tester/Documents",
       "/Users/tester/Desktop"

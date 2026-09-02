@@ -987,3 +987,142 @@ struct RefreshCoordinatorIsolationTests {
         #expect(snapshot.tools == noTools)
     }
 }
+
+// MARK: - Packet 3.3 — the scan runs inside the deadline
+
+/// Blocks inside `contentsOfDirectory` for any path at or under `gate` until the walking task is
+/// cancelled — the shape a pending TCC consent dialog gives a listing that never returns. The
+/// hard stop keeps a regression from hanging the suite: a coordinator that scans outside the
+/// deadline fails on the assertions instead of timing out.
+private final class DeadlineGateFileSystem: FileSystem, @unchecked Sendable {
+    let base: InMemoryFileSystem
+    let gate: String
+    private let lock = NSLock()
+    private var _listings = 0
+
+    init(_ base: InMemoryFileSystem, gate: String) {
+        self.base = base
+        self.gate = gate
+    }
+
+    /// How many directories the scanner has asked for, across every scan.
+    var listings: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _listings
+    }
+
+    func contentsOfDirectory(atPath path: String) throws -> [DirectoryEntry] {
+        lock.lock(); _listings += 1; lock.unlock()
+        if path == gate || path.hasPrefix(gate + "/") {
+            let hardStop = Date().addingTimeInterval(10)
+            while !Task.isCancelled && Date() < hardStop {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+        }
+        return try base.contentsOfDirectory(atPath: path)
+    }
+
+    func fileExists(atPath path: String) -> Bool { base.fileExists(atPath: path) }
+    func isExecutableFile(atPath path: String) -> Bool { base.isExecutableFile(atPath: path) }
+    func readFile(atPath path: String) throws -> Data { try base.readFile(atPath: path) }
+    func modificationDate(atPath path: String) throws -> Date { try base.modificationDate(atPath: path) }
+    func homeDirectory() -> String { base.homeDirectory() }
+    func pathEnvironment() -> String { base.pathEnvironment() }
+}
+
+/// Packet 4.1's first launch hung at 0% CPU in the scan, before the deadline-bearing task group
+/// could see it, so nothing in the refresh could end it. These tests put the scan **inside** a
+/// bound and pin what a scan that runs out of time hands back.
+@Suite("A scan that outlives its deadline yields the repos it already found", .serialized)
+struct RefreshCoordinatorScanDeadlineTests {
+
+    /// The three repos are found before the walk reaches `~/Documents`, which never returns. The
+    /// refresh proceeds on those repos, records the truncation so the next refresh rescans, and
+    /// names the folder it could not finish through the snapshot path the presenter already
+    /// renders.
+    @Test("scanThatExceedsTheDeadlineYieldsPartialReposAndMarksScanStale")
+    func scanThatExceedsTheDeadlineYieldsPartialReposAndMarksScanStale() async throws {
+        let inMemory = InMemoryFileSystem(home: RepoStub.home)
+        for repo in RepoStub.all { inMemory.addRepository(at: repo.path) }
+        inMemory.addDirectory(RepoStub.home + "/Documents/deep")
+
+        let fileSystem = DeadlineGateFileSystem(inMemory, gate: RepoStub.home + "/Documents")
+        let runner = RecordedCommandRunner()
+        for repo in RepoStub.all {
+            stubGit(repo, into: runner, delay: 0, failing: [])
+            stubGH(repo, into: runner)
+        }
+
+        // No cached scan at all, so the refresh has to walk the tree itself — the first-launch case.
+        let policy = RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0, scanDeadline: 0.3)
+        let cache = InMemoryCacheStore(initial: CacheFile())
+        let coordinator = RefreshCoordinator(
+            scanner: RepoScanner(fileSystem: fileSystem),
+            loader: RepoLoader(
+                git: GitClient(runner: runner, gitPath: gitPath),
+                gh: GHClient(runner: runner, ghPath: ghPath, policy: policy),
+                reflog: ReflogFileReader(fileSystem: inMemory),
+                policy: policy),
+            cache: cache,
+            policy: policy,
+            scanPolicy: ScanPolicy(homeRoot: RepoStub.home))
+
+        let started = Date()
+        let snapshot = await coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+        let elapsed = Date().timeIntervalSince(started)
+
+        // The scan was bounded, not waited out: the gate holds for 10 s if nobody cancels it.
+        #expect(elapsed < 5, "the refresh took \(elapsed) s, so the scan ran outside the deadline")
+        // Every repo discovered before the blocked folder is in the answer, fully loaded.
+        #expect(Set(snapshot.repos.map(\.path)) == Set(RepoStub.all.map(\.path)))
+        #expect(snapshot.repos.allSatisfy { !$0.branches.isEmpty })
+
+        let scan = try #require(cache.current?.scan)
+        #expect(scan.truncatedByDeadline)
+        #expect(scan.unreadableDirectories.contains(RepoStub.home + "/Documents"))
+
+        // The notice rides the snapshot path that already exists: the presenter turns the
+        // not-scanned folder into a notice with an action, no new string and no new field.
+        let viewModel = SnapshotPresenter().present(
+            snapshot,
+            refreshState: .idle(lastRefreshedAt: snapshot.refreshedAt),
+            collapsedRepoIDs: [],
+            scanResult: scan,
+            appVersion: "test",
+            now: Date())
+        let notice = try #require(viewModel.sections.first?.notScannedNotice)
+        #expect(notice.text.contains("Documents"))
+        #expect(notice.action != nil)
+
+        // A truncated scan is not a usable scan, so the next refresh walks the tree again rather
+        // than trusting a list that was cut short.
+        let listingsAfterFirst = fileSystem.listings
+        _ = await coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+        #expect(
+            fileSystem.listings > listingsAfterFirst,
+            "the second refresh reused a scan that never finished")
+    }
+
+    /// The bound is a bound, not a delay: a scan that finishes returns immediately and the refresh
+    /// does not wait out `scanDeadline`, and nothing is marked truncated.
+    @Test("aScanThatFinishesInsideTheDeadlineIsNotDelayedOrMarkedStale")
+    func aScanThatFinishesInsideTheDeadlineIsNotDelayedOrMarkedStale() async throws {
+        // An empty cached scan is "the cache has none" (reading 7): the policy names the in-memory
+        // home root, and the refresh has to walk it.
+        let harness = makeHarness(
+            policy: RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0, scanDeadline: 30),
+            cacheFile: CacheFile(scan: scanResult([], scannedAt: Date(timeIntervalSince1970: 1_788_399_000))))
+
+        let started = Date()
+        let snapshot = await harness.coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in },
+            rescan: true)
+        let elapsed = Date().timeIntervalSince(started)
+
+        #expect(elapsed < 5, "the refresh waited out the scan deadline: \(elapsed) s")
+        #expect(Set(snapshot.repos.map(\.path)) == Set(RepoStub.all.map(\.path)))
+        #expect(harness.cache.current?.scan?.truncatedByDeadline == false)
+    }
+}
