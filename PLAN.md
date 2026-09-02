@@ -149,7 +149,7 @@ git reflog show --date=unix --format='%gd%x1f%gs%x1f%H' refs/remotes/<upstream> 
 gh auth status --hostname <host>
 gh auth status                                                                      # amended 2026-09-02: the host list
 gh pr list --repo <host>/<owner>/<name> --state all --limit 100 --json number,url,state,isDraft,reviewDecision,mergedAt,updatedAt,baseRefName,headRefName,headRefOid,headRepositoryOwner,mergeCommit
-gh pr list --repo <host>/<owner>/<name> --state all --head <branch> --limit 5 --json <same>     # per unmatched local branch, cap 20/repo
+gh pr list --repo <host>/<owner>/<name> --state all --head <branch> --limit 20 --json <same>     # per unmatched local branch, cap 20/repo
 gh pr list --repo <host>/<owner>/<name> --state open --author @me --limit 100 --json <same>
 branchbar-cli scan --policy-json <tmpfile> --deadline <soft seconds> [--git <path>]  # amended 2026-09-02: the bundled discovery helper
 ```

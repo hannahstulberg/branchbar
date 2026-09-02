@@ -203,7 +203,7 @@ else
     "$GH" pr list --repo "$GH_SLUG" --state all --limit 100 --json "$JSON_FIELDS"
 
   record "recorded-gh-pr-list-head-hannah-personal-agent.json" rows \
-    "$GH" pr list --repo "$GH_SLUG" --state all --head "$GH_HEAD" --limit 5 --json "$JSON_FIELDS"
+    "$GH" pr list --repo "$GH_SLUG" --state all --head "$GH_HEAD" --limit 20 --json "$JSON_FIELDS"
 
   # Gate 1.1 allows `[]` here: an author with no open PRs is a real, honest answer.
   record "recorded-gh-pr-list-author-me-hannah-personal-agent.json" may-be-empty \

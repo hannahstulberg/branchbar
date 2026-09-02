@@ -369,7 +369,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | The git version gate behind the "works best with 2.39" notice | `GitVersion` | `Sources/BranchBarCore/GitVersion.swift:11` | Parsed from `git --version`, Apple's build suffix included |
 | **Core: GitHub** | | | |
 | Every `gh` invocation, per-host auth memoized, per-head cap, list caches | `GHClient` | `Sources/BranchBarCore/GHClient.swift:8` | An actor: the auth answer and the list caches are shared across repos on a host |
-| The `--json` field list shared by all three `gh pr list` invocations | `jsonFields` | `Sources/BranchBarCore/GHClient.swift:63` | Changing it means re-recording the fixtures |
+| The `--json` field list shared by all three `gh pr list` invocations | `jsonFields` | `Sources/BranchBarCore/GHClient.swift:72` | Changing it means re-recording the fixtures |
 | PR JSON decode, including `headRepositoryOwner` as an object | `PRListDecoder` | `Sources/BranchBarCore/PRListDecoder.swift:8` | Sorted by `updatedAt` descending whatever order `gh` returned |
 | PR to pill, branch to PR, and the "not on this Mac" key | `PRStatusMapper` | `Sources/BranchBarCore/PRStatusMapper.swift:14` | Head first, owner required not preferred, keyed by owner and branch |
 | Which heads a refresh actually asked GitHub about, as (owner, head) pairs | `PRQueryCoverage` | `Sources/BranchBarCore/Models/PRStatus.swift:128` | An unresolved owner is covered by nothing, so the row reads `notChecked` |
@@ -391,11 +391,11 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | **Core: seams** | | | |
 | The process seam every git and gh call passes through | `CommandRunner` | `Sources/BranchBarCore/Seams/CommandRunner.swift:90` | Argument arrays only, never a shell string |
 | The real process implementation: concurrent draining, timeout, cancellation | `ProcessCommandRunner` | `Sources/BranchBarCore/ProcessCommandRunner.swift:5` | Both pipes drain on dedicated threads, then SIGTERM and SIGKILL |
-| Termination that reaches the child's helpers, not just the child | `signalGroup` | `Sources/BranchBarCore/ProcessCommandRunner.swift:281` | pgid captured at spawn and signalled whichever process leads it |
+| Termination that reaches the child's helpers, not just the child | `signalGroup` | `Sources/BranchBarCore/ProcessCommandRunner.swift:404` | pgid captured at spawn and signalled whichever process leads it |
 | A killed child's output kept beside the reason it stopped | `PartialOutputCommandRunning` | `Sources/BranchBarCore/ScanRunner.swift:75` | Only for a stream of independent lines; a truncated document is a lie |
-| The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:38` | Synchronous by contract; the scan's bound lives one level up |
+| The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:53` | Synchronous by contract; the scan's bound lives one level up |
 | The real filesystem, listing once with resource values | `RealFileSystem` | `Sources/BranchBarCore/RealFileSystem.swift:16` | No per-entry `attributesOfItem`: that call blocks behind folder-access dialogs |
-| The only way anything repository-owned is read | `readBoundedRegularFile` | `Sources/BranchBarCore/RealFileSystem.swift:222` | `O_NOFOLLOW`, `O_NONBLOCK`, an `S_IFREG` check, then `pread`: a FIFO cannot block it |
+| The only way anything repository-owned is read | `readBoundedRegularFile` | `Sources/BranchBarCore/RealFileSystem.swift:275` | `O_NOFOLLOW`, `O_NONBLOCK`, an `S_IFREG` check, then `pread`: a FIFO cannot block it |
 | Control scalars escaped before anything reaches CLI output or the log | `SafeText` | `Sources/BranchBarCore/BranchBarCore.swift:21` | A branch or folder name cannot forge a log entry or retitle a terminal |
 | The cache seam | `CacheStore` | `Sources/BranchBarCore/Seams/CacheStore.swift:6` | Two methods, both replaced in tests |
 | The cache file on disk, written through a temp file | `FileCacheStore` | `Sources/BranchBarCore/FileCacheStore.swift:7` | `replaceItemAt`, so an interrupted save leaves the previous file intact |
@@ -416,12 +416,12 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | The failure a user reads, with one action | `UserFacingFailure` | `Sources/BranchBarCore/Models/Failure.swift:6` | `diagnostic` is logged and never rendered |
 | The row view models the SwiftUI layer is allowed to see | `SnapshotVM` | `Sources/BranchBarCore/Models/ViewModels.swift:7` | Views hold no copy and compute no sentence |
 | **Shell** | | | |
-| The menu bar entry point | `BranchBarApp` | `Sources/BranchBar/BranchBarApp.swift:457` | `MenuBarExtra` in `.window` style, which re-runs `onAppear` per open |
+| The menu bar entry point | `BranchBarApp` | `Sources/BranchBar/BranchBarApp.swift:585` | `MenuBarExtra` in `.window` style, which re-runs `onAppear` per open |
 | Accessory activation, logging, and the state-fixture harness | `AppDelegate` | `Sources/BranchBar/BranchBarApp.swift:11` | `LSUIElement`, so there is no Dock icon and no menu bar menu |
 | Published view models, the refresh trigger, collapse, hide, roots | `AppModel` | `Sources/BranchBar/AppModel.swift:29` | The only shell type that talks to Core |
 | Row actions: editor chain, PR, Finder, clipboard | `Actions` | `Sources/BranchBar/Actions.swift:12` | Cursor, then VS Code, then Terminal; `https` PR links only |
 | Launch at login | `LaunchAtLogin` | `Sources/BranchBar/LaunchAtLogin.swift:19` | `SMAppService` verified after bootstrap with `launchctl print`; refuses a translocated bundle |
-| The guard that stops the toggle registering a copy the login item does not name | `isRunningFromApplications` | `Sources/BranchBar/LaunchAtLogin.swift:99` | Both mechanisms refuse outside `/Applications` and `~/Applications`, so they cannot name two bundles (REVIEW WR-05, codex round 2 MAJOR 10) |
+| The guard that stops the toggle registering a copy the login item does not name | `isRunningFromApplications` | `Sources/BranchBar/LaunchAtLogin.swift:187` | Both mechanisms refuse outside `/Applications` and `~/Applications`, so they cannot name two bundles (REVIEW WR-05, codex round 2 MAJOR 10) |
 | The popover body and keyboard traversal | `RootView` | `Sources/BranchBar/Views/RootView.swift:22` | Arrow keys traverse, Return runs the primary action, Escape dismisses |
 | One repo section with its four groups | `RepoSectionView` | `Sources/BranchBar/Views/RepoSectionView.swift:7` | Collapse state is persisted per repo |
 | One branch row | `BranchRowView` | `Sources/BranchBar/Views/BranchRowView.swift:7` | Worktree marker, name, pill, push line, ahead count |
