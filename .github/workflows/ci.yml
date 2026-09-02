@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+      - name: Give tag checkouts a local branch (live-repo tests read refs/heads)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: git switch -c release-build
       - run: swift --version && xcode-select -p
       - run: make test
       - run: make zip BUILD_NUMBER=${{ github.run_number }}
@@ -35,6 +38,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Give tag checkouts a local branch (live-repo tests read refs/heads)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: git switch -c release-build
       - run: sudo xcode-select -s /Library/Developer/CommandLineTools
       - run: swift --version && xcode-select -p
       - run: make test
