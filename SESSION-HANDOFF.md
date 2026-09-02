@@ -1,20 +1,20 @@
 # SESSION HANDOFF — BranchBar
 
-**Last updated:** 2026-09-02 19:30 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+**Last updated:** 2026-09-03 00:30 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
 
 ## Current state
 
-- **Phase / packet:** Waves F1–F14 and docs F9 accepted and pushed (f922f83 code, 29a841f docs). codex round 4 running on HEAD (scratchpad/review/codex-ship4.md). Stop rule: ship v0.9.1 on no BLOCKER; majors triaged into DECISION-LOG (fix if they falsify a user-facing claim, else v1.0 backlog).
-- **Suite:** 416 passing; `make doc-refs` 72 rows green; bundle verify passes with the helper
-- **In-flight agents:** none (codex round 4 is a background shell task).
+- **Phase / packet:** v0.9.1 tagged at 1038a4c after five codex rounds and waves F1–F18. CI release job attaches the zip. Next: release notes, send to the NYT tester (Gate 5 by 09-12), Gate 4/4.0 reviews with Hannah.
+- **Suite:** 444 passing; `make doc-refs` 72/72; bundle verify passes with the helper
+- **In-flight agents:** none.
 - **Blocked on:** nothing. Hannah's own packet 0.0 items are open: ask Andrew Lisy whether JobRunner opened on NYT-managed Macs; name the NYT tester and their macOS version.
 
 ## Next steps (in order)
 
-1. Read codex round 4; verify any blocker firsthand; small fixes → F15; log every finding.
-2. Cut v0.9.1: VERSION 0.9.1 + `BranchBarCore.version`, commit, tag, push; CI release job attaches the zip; edit release notes (install steps, both Applications folders, folder-access prompt); send URL + README to the NYT tester (Gate 5 by 09-12).
-3. Update PLAN.md §8 status rows and the review log; refresh this file.
-4. Hannah: Gate 0b spike result, Gate 4 screenshot feedback, Gate 4.0 string table, Andrew Lisy question.
+1. Confirm the v0.9.1 CI run created the release; `gh release edit v0.9.1 --notes-file <scratch release-notes-0.9.1.md>`; keep v0.9.0 as a superseded pre-release (or delete it).
+2. Send Hannah the release URL + the README install section for the NYT tester (Gate 5 checklist in PLAN.md §8).
+3. Hannah: Gate 0b spike result, Gate 4 screenshots (dist/screens/), Gate 4.0 string table (docs/UI-CONTRACT.md), Andrew Lisy question, Cursor push check.
+4. v1.0 backlog (DECISION-LOG round-4 entry): whole-repo-load helper for dead filesystems; component-wise openat; posix_spawn; recent-100 count-equals-limit caveat; open-elsewhere suppression rule revisit.
 
 ## Re-read order for a fresh session
 

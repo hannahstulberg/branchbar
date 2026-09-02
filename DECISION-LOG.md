@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-02 — F18 accepted (444 tests); v0.9.1 cut at 1038a4c
+
+- **What:** F18: `PRCacheEntry` bound to `(repoID, slug)` and pre-F18 entries discarded; upstreamless branches matched by head name plus `headRefOid == tipSHA`, ambiguity → notChecked; `PushInfo.Source` gains `checkedNoObservation` and `unavailable` with `HistoryRead` per branch and new copy "No push from this Mac recorded for origin/<name>"; `FetchHeadState` tri-state ("Fetch time not checked" when refused); a detached primary checkout is a row; `--deadline` validated; unreadable `.git` markers reported; cache entries claiming an observation without a date downgraded on load. Version constants bumped to 0.9.1 (`VERSION`, `BranchBarCore.version`, smoke test). Tag `v0.9.1` at 1038a4c; CI builds and attaches the zip.
+- **Why:** Round-5 majors all falsified user-facing claims; the stop rule allows the cut once no blocker remains.
+- **Limits:** Deferred to v1.0 with reasons (see the round-4 entry): whole-repo-load isolation for dead filesystems, component-wise `openat` walks, `posix_spawn`. The MAJOR-10 name-based open-elsewhere suppression stays as pinned by three earlier tests.
+- **Cost accepted:** The orchestrator edited one test constant (the smoke test's version literal) as a release chore.
+- **Deliberately not changed:** No further codex round before the cut; Gate 5 (NYT managed Mac) is the next external check.
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-02 — Codex round 5: no blocker; five truthfulness majors go into F18 before the cut
 
 - **What:** codex-cli 0.152.1, fifth pass on c7a71bb: "No new direct code-execution BLOCKER under the documented threat model and accepted deferrals." Majors, all of which falsify a user-facing claim and therefore fix before shipping (stop rule): PR cache keyed by `RepoID` only, so an origin change or a recreated checkout can show another repo's PRs; a branch without an upstream is assumed to belong to the base owner, so a normal fork PR vanishes as "No PR"; "push history not checked" shown after `origin/<name>` was in fact checked; a refused FETCH_HEAD read shown as "This repo has not fetched yet"; a detached primary checkout has no row in the popover. Minors adopted: `--deadline inf` trap, silent `.git` marker read failures, cache entries claiming an observation without a date.
