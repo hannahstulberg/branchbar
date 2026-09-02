@@ -14,6 +14,10 @@ public struct FileCacheStore: CacheStore {
             .appendingPathComponent("cache.json", isDirectory: false)
     }
 
+    /// Past this size the file loads as "no cache" (codex MAJOR 2). The load is synchronous and
+    /// on the launch path; a real cache for 30 repos is well under a megabyte.
+    public static let maximumFileBytes = 16 * 1024 * 1024
+
     public init(fileURL: URL) {
         self.fileURL = fileURL
     }
@@ -38,11 +42,45 @@ public struct FileCacheStore: CacheStore {
     /// (`unknownSchemaVersionLoadsNil`) — a cache written by a newer BranchBar is discarded and
     /// rebuilt on the next refresh, which costs a scan and never shows wrong rows.
     public func load() throws -> CacheFile? {
+        // Size before contents (codex MAJOR 2): the load is synchronous and on the launch path,
+        // so an unbounded file is an unbounded launch, and the decode is the expensive half.
+        let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+        if let size = (attributes?[.size] as? NSNumber)?.intValue, size > Self.maximumFileBytes {
+            return nil
+        }
         guard let data = FileManager.default.contents(atPath: fileURL.path) else { return nil }
+        guard data.count <= Self.maximumFileBytes else { return nil }
         guard let cache = try? Self.makeDecoder().decode(CacheFile.self, from: data) else { return nil }
         guard cache.schemaVersion == CacheFile.currentSchemaVersion else { return nil }
+        return Self.withoutFutureDates(cache)
+    }
+
+    /// Drops every part of the cache whose timestamp has not happened yet (codex MAJOR 2).
+    ///
+    /// Each of the three is an age the app measures against: `scan.scannedAt` decides whether to
+    /// rescan, `lastSnapshot.refreshedAt` is what the footer reports, and `PRCacheEntry.fetchedAt`
+    /// decides whether to re-ask GitHub. A date in the future makes all three subtractions
+    /// negative, so the scan never expires, the rows never look stale, and the PR list is never
+    /// refetched. Each part is dropped on its own, so the parts of the file that are still
+    /// credible — the roots the user picked, the repos they hid — survive and the missing parts
+    /// are simply rebuilt.
+    ///
+    /// The tolerance is for clock skew, not for a hostile file: a cache written seconds ago on a
+    /// machine whose clock has just stepped backwards is still a real cache.
+    static func withoutFutureDates(_ cache: CacheFile, now: Date = Date()) -> CacheFile {
+        let horizon = now.addingTimeInterval(futureTolerance)
+        var cache = cache
+        if let scan = cache.scan, scan.scannedAt > horizon { cache.scan = nil }
+        if let snapshot = cache.lastSnapshot, let refreshedAt = snapshot.refreshedAt,
+           refreshedAt > horizon {
+            cache.lastSnapshot = nil
+        }
+        cache.prCache = cache.prCache.filter { $0.value.fetchedAt <= horizon }
         return cache
     }
+
+    /// How far ahead of now a timestamp may be and still be believed.
+    static let futureTolerance: TimeInterval = 60
 
     /// Encodes to a scratch file in the same directory and lands it with `replaceItemAt`, so a
     /// save that dies partway leaves the previous `cache.json` intact

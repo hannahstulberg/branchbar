@@ -4,6 +4,21 @@ import Foundation
 /// hidden directory and the literal skip list; "Add folder…" roots are walked **recursively with
 /// no depth limit** so a deep repo, a `~/Library/CloudStorage` folder, or a nested repo inside a
 /// monorepo is reachable by adding it. Symlinks are not followed and bare repos are out of scope.
+///
+/// **What the scan deadline can and cannot stop** (codex BLOCKER 2). The walk checks
+/// `Task.isCancelled` once per directory, *before* the listing that can block, so a cancelled
+/// scan stops at a directory boundary and hands back the repos it already found. It cannot stop
+/// a listing that is already inside `open()`/`readdir()`: those are synchronous kernel calls,
+/// and a task blocked in one never reaches a cancellation check, so `RefreshCoordinator`'s
+/// `scanDeadline` bounds *when the refresh continues*, not when that call returns. The
+/// mitigation is ordering, not cancellation: `tccGatedFolderNames` are enumerated after every
+/// other directory the walk will ever open (`tccGatedFoldersAreEnumeratedLast`), so a pending
+/// consent dialog — the one blocking listing this app actually meets — can only ever hold the
+/// tail of the scan, with every repo outside those three folders already found and already in
+/// the result. `RealFileSystem` no longer stats symlink targets for the same reason: that was
+/// the other call an unreachable mount could block, and it answered a question the walk does not
+/// ask. A hard bound on an arbitrary blocking listing needs a killable helper process, which is
+/// out of scope here.
 public struct RepoScanner: Sendable {
     private let fileSystem: FileSystem
     /// Optional on purpose: the dedupe key is `git rev-parse --path-format=absolute
@@ -39,9 +54,16 @@ public struct RepoScanner: Sendable {
             maxDepth: policy.maxDepth,
             policy: policy,
             deferTCCGatedFolders: true,
+            descendIntoRootRepo: true,
             into: &accumulator)
         for root in policy.extraRoots where !accumulator.truncated {
-            walk(root: root, maxDepth: nil, policy: policy, deferTCCGatedFolders: false, into: &accumulator)
+            walk(
+                root: root,
+                maxDepth: nil,
+                policy: policy,
+                deferTCCGatedFolders: false,
+                descendIntoRootRepo: false,
+                into: &accumulator)
         }
 
         let repos = await resolve(accumulator.candidates)
@@ -94,6 +116,10 @@ public struct RepoScanner: Sendable {
         }
         return .unrecognized
     }
+
+    /// A `.git` file holds one short `gitdir:` line. Only this many bytes are read (codex
+    /// MAJOR 15), so a repo carrying a gigabyte marker cannot be read into memory by the scan.
+    public static let maximumGitFileBytes = 4096
 
     private static let gitdirPrefix = "gitdir:"
     private static let worktreesMarker = "/.git/worktrees/"
@@ -155,6 +181,7 @@ public struct RepoScanner: Sendable {
         maxDepth: Int?,
         policy: ScanPolicy,
         deferTCCGatedFolders: Bool,
+        descendIntoRootRepo: Bool,
         into accumulator: inout Walk
     ) {
         let rootPath = Self.normalized(root)
@@ -195,30 +222,47 @@ public struct RepoScanner: Sendable {
             }
             accumulator.candidatesExamined += 1
 
+            // A repo found inside a walk stops the descent — `descendIntoRepos` is a constant
+            // false (PLAN.md §5), and a repo inside a monorepo is reached by adding it as a root.
+            //
+            // The **home root** is the one exception (REVIEW WR-08). `git init` in `$HOME` with a
+            // `*` gitignore is the dotfiles pattern, and the `.git` check runs before a
+            // directory's children are enqueued, so `~/.git` used to make `~` the one and only
+            // candidate and end the walk there: every real repo under the home folder invisible,
+            // the empty state suppressed because one repo was listed, and no message saying why.
+            // The home root is therefore listed as a repo *and* walked. An "Add folder…" root
+            // that is a repo keeps the plain rule (`extraRootThatIsARepoYieldsItself`): it is the
+            // folder the user pointed at, they get the repo they picked, and a nested one is
+            // another "Add folder…" away.
+            let isWalkRoot = depth == 0 && descendIntoRootRepo
             if let marker = entries.first(where: { $0.name == ".git" }) {
                 if marker.isDirectory {
                     accumulator.candidates.append(
                         Candidate(path: path, commonDirectoryHint: path + "/.git", gitIsDirectory: true)
                     )
-                    continue
-                }
-                let contents = (try? fileSystem.readFile(atPath: marker.path))
-                    .map { String(decoding: $0, as: UTF8.self) } ?? ""
-                switch Self.classifyGitFile(contents: contents) {
-                case .worktreeCheckout:
-                    accumulator.skippedWorktreeCheckouts.append(path)
-                    continue
-                case .submodule:
-                    accumulator.skippedSubmodules.append(path)
-                    continue
-                case .candidate(let gitDirectory):
-                    accumulator.candidates.append(
-                        Candidate(path: path, commonDirectoryHint: gitDirectory, gitIsDirectory: false)
-                    )
-                    continue
-                case .unrecognized:
-                    // Not a repo marker we can vouch for; keep walking rather than inventing a row.
-                    break
+                    if !isWalkRoot { continue }
+                } else {
+                    // Bounded: a `.git` file holds one short `gitdir:` line, and the file is
+                    // repository-controlled (codex MAJOR 15).
+                    let contents = (try? fileSystem.readFile(
+                        atPath: marker.path, maximumBytes: Self.maximumGitFileBytes))
+                        .map { String(decoding: $0, as: UTF8.self) } ?? ""
+                    switch Self.classifyGitFile(contents: contents) {
+                    case .worktreeCheckout:
+                        accumulator.skippedWorktreeCheckouts.append(path)
+                        if !isWalkRoot { continue }
+                    case .submodule:
+                        accumulator.skippedSubmodules.append(path)
+                        if !isWalkRoot { continue }
+                    case .candidate(let gitDirectory):
+                        accumulator.candidates.append(
+                            Candidate(path: path, commonDirectoryHint: gitDirectory, gitIsDirectory: false)
+                        )
+                        if !isWalkRoot { continue }
+                    case .unrecognized:
+                        // Not a repo marker we can vouch for; keep walking rather than inventing a row.
+                        break
+                    }
                 }
             }
 

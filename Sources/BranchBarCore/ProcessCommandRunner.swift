@@ -3,6 +3,11 @@ import Foundation
 /// The real `CommandRunner`. PLAN.md §9: stdout and stderr are drained **concurrently**, or a
 /// repo with more than 64 KB of refs deadlocks the pipe and surfaces as a 25 s timeout.
 public struct ProcessCommandRunner: CommandRunner {
+    /// Per-stream byte cap (codex MAJOR 15). 8 MB is far above anything the frozen invocations
+    /// produce — the largest recorded `for-each-ref` on this machine is under 200 KB — and far
+    /// below what would end a menu-bar app that holds two of them per repo in memory.
+    public static let maximumOutputBytes = 8 * 1024 * 1024
+
     public init() {}
 
     /// Launches `command` with an argument array — never a shell string, so a branch named
@@ -70,6 +75,8 @@ private final class RunningCommand: @unchecked Sendable {
     private var didFinish = false
     private var didCancel = false
     private var didTimeOut = false
+    /// Set by whichever reader passed the byte cap first (codex MAJOR 15).
+    private var overflowedStream: CommandError.OutputStream?
     private var timeoutItem: DispatchWorkItem?
 
     init(command: Command) {
@@ -138,14 +145,12 @@ private final class RunningCommand: @unchecked Sendable {
         let readers = DispatchGroup()
         readers.enter()
         queue.async { [self] in
-            let data = self.outputPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
-            self.store(standardOutput: data)
+            self.drain(self.outputPipe?.fileHandleForReading, stream: .standardOutput)
             readers.leave()
         }
         readers.enter()
         queue.async { [self] in
-            let data = self.errorPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
-            self.store(standardError: data)
+            self.drain(self.errorPipe?.fileHandleForReading, stream: .standardError)
             readers.leave()
         }
 
@@ -174,23 +179,28 @@ private final class RunningCommand: @unchecked Sendable {
         terminateChild()
     }
 
-    /// SIGTERM, then SIGKILL after a grace period, then resume the caller regardless.
+    /// SIGTERM to the child's **process group**, then SIGKILL to the group after a grace period,
+    /// then resume the caller regardless.
+    ///
+    /// The group, not the pid (codex MAJOR 13). `git` forks helpers — a credential helper, a
+    /// `git-remote-*`, a lazy fetch — and `gh` forks a browser opener; a helper that outlives the
+    /// signal holds the pipe write ends open after the app has reported the command finished, and
+    /// keeps doing whatever it was doing. Every child leads its own process group
+    /// (`childRunsInItsOwnProcessGroup`), so the negative pid reaches the child and everything it
+    /// started, and `cancellationKillsAGrandchildThatDidNotExec` is the parent that ignores
+    /// SIGTERM and leaves a background child behind.
     private func terminateChild() {
         lock.lock()
         let child = process
         lock.unlock()
 
-        if let child, child.isRunning {
-            child.terminate()
-        }
+        signalGroup(child, SIGTERM)
 
         queue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
             self.lock.lock()
             let stillRunning = self.process
             self.lock.unlock()
-            if let stillRunning, stillRunning.isRunning {
-                kill(stillRunning.processIdentifier, SIGKILL)
-            }
+            self.signalGroup(stillRunning, SIGKILL)
         }
 
         queue.asyncAfter(deadline: .now() + Self.forceFinishGrace) { [self] in
@@ -198,18 +208,56 @@ private final class RunningCommand: @unchecked Sendable {
         }
     }
 
-    private func store(standardOutput data: Data) {
-        lock.lock(); defer { lock.unlock() }
-        standardOutput = data
+    /// Signals the child's process group when the child leads one, and the child alone when it
+    /// does not — which would mean Foundation had stopped calling `posix_spawn` with
+    /// `POSIX_SPAWN_SETPGROUP`, and a negative pid would then reach BranchBar's own group.
+    private func signalGroup(_ child: Process?, _ signalNumber: Int32) {
+        guard let child, child.isRunning else { return }
+        let pid = child.processIdentifier
+        guard pid > 0 else { return }
+
+        let group = getpgid(pid)
+        if group == pid, group != getpgrp() {
+            kill(-group, signalNumber)
+        } else {
+            kill(pid, signalNumber)
+        }
     }
 
-    private func store(standardError data: Data) {
-        lock.lock(); defer { lock.unlock() }
-        standardError = data
+    /// Reads one pipe in bounded chunks, so the size of what a child decides to print is never
+    /// the size of an allocation here (codex MAJOR 15). Past the cap the partial output is
+    /// dropped — a truncated `for-each-ref` would read as a short branch list, which is a lie —
+    /// the child is terminated, and the caller gets `CommandError.outputTooLarge`.
+    private func drain(_ handle: FileHandle?, stream: CommandError.OutputStream) {
+        guard let handle else { return }
+        var buffer = Data()
+
+        while true {
+            guard let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty else { break }
+            buffer.append(chunk)
+            guard buffer.count <= ProcessCommandRunner.maximumOutputBytes else {
+                lock.lock()
+                if overflowedStream == nil { overflowedStream = stream }
+                lock.unlock()
+                terminateChild()
+                return
+            }
+        }
+
+        store(buffer, as: stream)
     }
 
-    /// Resumes the continuation exactly once. Cancellation outranks a timeout, and both outrank
-    /// whatever exit code the terminated child ended up with.
+    private func store(_ data: Data, as stream: CommandError.OutputStream) {
+        lock.lock(); defer { lock.unlock() }
+        switch stream {
+        case .standardOutput: standardOutput = data
+        case .standardError: standardError = data
+        }
+    }
+
+    /// Resumes the continuation exactly once. Cancellation outranks a timeout, both outrank a
+    /// blown output cap, and all three outrank whatever exit code the terminated child ended up
+    /// with.
     private func finish(exitCode: Int32) {
         lock.lock()
         guard !didFinish else { lock.unlock(); return }
@@ -220,6 +268,7 @@ private final class RunningCommand: @unchecked Sendable {
         self.continuation = nil
         let cancelled = didCancel
         let timedOut = didTimeOut
+        let overflowed = overflowedStream
         let output = CommandOutput(
             exitCode: exitCode,
             standardOutput: standardOutput,
@@ -232,6 +281,9 @@ private final class RunningCommand: @unchecked Sendable {
             continuation.resume(throwing: CommandError.cancelled)
         } else if timedOut {
             continuation.resume(throwing: CommandError.timedOut(after: command.timeout))
+        } else if let overflowed {
+            continuation.resume(throwing: CommandError.outputTooLarge(
+                stream: overflowed, limit: ProcessCommandRunner.maximumOutputBytes))
         } else {
             continuation.resume(returning: output)
         }

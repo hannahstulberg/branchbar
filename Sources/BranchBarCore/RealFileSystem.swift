@@ -22,11 +22,14 @@ public struct RealFileSystem: FileSystem {
     /// macOS held TCC consent dialogs open. That lookup is gone from this file, and
     /// `realFileSystemNeverCallsAttributesOfItem` keeps it gone.
     ///
-    /// `isDirectory` follows the link (can this be descended into?) while `isSymbolicLink` looks
-    /// at the entry itself (should it be?) — a symlinked repo is both, and PLAN.md §5's scan
-    /// rules need to tell them apart. The prefetched `.isDirectoryKey` describes the **entry**,
-    /// not its target, so the following answer costs one `stat` per symlink and nothing at all
-    /// for the ordinary entries that make up a home folder.
+    /// Both facts describe the **entry**, never its target (codex BLOCKER 2). The scanner does
+    /// not follow symlinks under any circumstances, so following one here to find out whether it
+    /// leads to a directory answered a question nobody asks, and paid for the answer with a
+    /// `stat` that a stalled automount, an unreachable network volume, or a `~/Library/
+    /// CloudStorage` mount can block forever — inside a synchronous call that the scan deadline
+    /// cannot cancel, because a task blocked in `open()` never reaches a cancellation check. A
+    /// symlink is therefore reported `isDirectory: false, isSymbolicLink: true` whatever it
+    /// points at, and the listing costs one `readdir` and no `stat` at all.
     ///
     /// Throws when the directory is unreadable, which is what a TCC denial on `~/Documents` looks
     /// like (`unreadableDirectoryIsReportedNotSilentlySkipped`); an empty listing would read as
@@ -47,16 +50,8 @@ public struct RealFileSystem: FileSystem {
 
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             let isSymbolicLink = values?.isSymbolicLink ?? false
-
-            let isDirectory: Bool
-            if isSymbolicLink {
-                // One `stat` for the rare entry that needs it; a dangling link answers false.
-                var resolved: ObjCBool = false
-                isDirectory = manager.fileExists(atPath: entryPath, isDirectory: &resolved)
-                    && resolved.boolValue
-            } else {
-                isDirectory = values?.isDirectory ?? false
-            }
+            // A link is never a directory to descend into, so the target is never touched.
+            let isDirectory = isSymbolicLink ? false : (values?.isDirectory ?? false)
 
             return DirectoryEntry(
                 name: name,
@@ -100,5 +95,58 @@ public struct RealFileSystem: FileSystem {
     public func pathEnvironment() -> String {
         let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
         return path.isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : path
+    }
+}
+
+/// A `FileSystem` that can read a bounded slice of a file without reading it whole.
+///
+/// codex MAJOR 15: `.git` markers, reflogs, and command output are all repository-controlled and
+/// were all read to EOF into memory. The `FileSystem` seam is frozen (PLAN.md §5), so the bound
+/// is a refinement rather than a new requirement on it: `RealFileSystem` reads exactly the bytes
+/// asked for, and the in-memory double a unit test uses falls through to the default below, which
+/// slices what it already holds. The dispatch is a one-line downcast in that default, which is
+/// what a protocol extension needs to reach an implementation that is not a requirement.
+public protocol BoundedFileReading: FileSystem {
+    /// At most `maximumBytes` from the start of the file. Throws for an unreadable file, exactly
+    /// as `readFile` does.
+    func readFile(atPath path: String, maximumBytes: Int) throws -> Data
+    /// At most `maximumBytes` from the **end** of the file, for a log whose newest lines are last.
+    func readFileTail(atPath path: String, maximumBytes: Int) throws -> Data
+}
+
+extension FileSystem {
+    public func readFile(atPath path: String, maximumBytes: Int) throws -> Data {
+        if let bounded = self as? any BoundedFileReading {
+            return try bounded.readFile(atPath: path, maximumBytes: maximumBytes)
+        }
+        return Data(try readFile(atPath: path).prefix(maximumBytes))
+    }
+
+    public func readFileTail(atPath path: String, maximumBytes: Int) throws -> Data {
+        if let bounded = self as? any BoundedFileReading {
+            return try bounded.readFileTail(atPath: path, maximumBytes: maximumBytes)
+        }
+        return Data(try readFile(atPath: path).suffix(maximumBytes))
+    }
+}
+
+extension RealFileSystem: BoundedFileReading {
+    /// One `open` and one `read` of at most `maximumBytes`, so the size of the file on disk never
+    /// becomes the size of an allocation here.
+    public func readFile(atPath path: String, maximumBytes: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        return try handle.read(upToCount: max(0, maximumBytes)) ?? Data()
+    }
+
+    /// Seeks to `size - maximumBytes` and reads forward, so a reflog of any size costs one seek
+    /// and one bounded read.
+    public func readFileTail(atPath path: String, maximumBytes: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        let size = try handle.seekToEnd()
+        let bound = UInt64(max(0, maximumBytes))
+        try handle.seek(toOffset: size > bound ? size - bound : 0)
+        return try handle.readToEnd() ?? Data()
     }
 }

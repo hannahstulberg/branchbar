@@ -165,11 +165,7 @@ public actor RefreshCoordinator {
         // the walk while macOS held TCC consent dialogs open, and a truncated list persisted as
         // if it were complete would keep a repo missing until the 7-day age check expired.
         let cachedScan = cacheFile.scan
-        let scanIsUsable = cachedScan.map {
-            !$0.repos.isEmpty
-                && !$0.truncatedByDeadline
-                && startedAt.timeIntervalSince($0.scannedAt) <= Self.scanMaxAge
-        } ?? false
+        let scanIsUsable = cachedScan.map { Self.isUsable($0, at: startedAt) } ?? false
         if rescan || !scanIsUsable {
             if let fresh = await scanWithinDeadline(resolvedScanPolicy(from: cacheFile)) {
                 cacheFile.scan = fresh
@@ -305,12 +301,31 @@ public actor RefreshCoordinator {
         }
 
         let snapshot = Snapshot(repos: rows, refreshedAt: startedAt, tools: tools)
-        cacheFile.lastSnapshot = snapshot
         // The scan is the only source of truth for which repos exist, so a PR entry for a repo it
         // no longer lists is dead weight that would outlive the repo.
         let live = Set(ordered.map(\.id))
-        cacheFile.prCache = cacheFile.prCache.filter { live.contains($0.key) }
-        try? cache.save(cacheFile)
+
+        // Re-read before writing (REVIEW CR-03). `cacheFile` was loaded when this refresh
+        // started, and a first refresh on a big home folder runs for the better part of a minute.
+        // Writing the whole struct back reverted anything the shell persisted in between — the
+        // root the user just picked in "Add folder…" (which is the TCC rescue the whole plan
+        // leans on, and which then coalesces into this very refresh), a repo they hid, a section
+        // they collapsed. The refresh owns `scan`, `prCache` and `lastSnapshot`; everything else
+        // belongs to the user and comes from the file as it stands now.
+        var merged = (try? cache.load()).flatMap { $0 } ?? cacheFile
+        merged.schemaVersion = CacheFile.currentSchemaVersion
+        merged.scan = cacheFile.scan
+        merged.lastSnapshot = snapshot
+        merged.prCache = cacheFile.prCache.filter { live.contains($0.key) }
+        // A root added mid-refresh was not scanned by this refresh, so it rides into the policy
+        // here and the next rescan walks it.
+        if var scan = merged.scan {
+            var roots = scan.policy.extraRoots
+            for root in merged.manuallyAddedRepos where !roots.contains(root) { roots.append(root) }
+            scan.policy.extraRoots = roots
+            merged.scan = scan
+        }
+        try? cache.save(merged)
 
         finish(persisted: snapshot)
         return snapshot
@@ -447,13 +462,40 @@ public actor RefreshCoordinator {
         (repo.path as NSString).lastPathComponent
     }
 
-    /// The scan's policy is the one the cache recorded, so a rescan walks the roots the user
-    /// actually has; `manuallyAddedRepos` are folded in as extra roots (PLAN.md §3), and the
-    /// injected default is reached only on a machine that has never scanned.
+    /// Whether a cached scan can stand in for walking the tree again.
+    ///
+    /// Three ways it cannot, and one that used to be a fourth by mistake:
+    ///
+    /// - It was cut short (`truncatedByDeadline`), so the list it holds is not the whole truth.
+    /// - It is older than `scanMaxAge`.
+    /// - It is dated **in the future** (codex MAJOR 2). The age check is a subtraction, so a
+    ///   `scannedAt` a year ahead made every age check pass and froze the repo list forever. A
+    ///   timestamp that has not happened is not evidence of anything.
+    ///
+    /// An **empty** scan is not one of them (codex MINOR 5). A machine with no repos, or one
+    /// whose repos are all inside a folder macOS denied, was walking its whole home folder — and
+    /// re-triggering that TCC exposure — on every refresh, forever. What separates "the walk ran
+    /// and found nothing" from the placeholder a machine that has never scanned leaves behind is
+    /// `candidatesExamined`: a finished walk opened directories even when none held a repo.
+    static func isUsable(_ scan: ScanResult, at now: Date) -> Bool {
+        guard !scan.truncatedByDeadline else { return false }
+        let age = now.timeIntervalSince(scan.scannedAt)
+        guard age >= 0, age <= scanMaxAge else { return false }
+        return !scan.repos.isEmpty || scan.candidatesExamined > 0
+    }
+
+    /// The policy a scan runs under, rebuilt from what this process trusts.
+    ///
+    /// It used to be `CacheFile.scan?.policy` — the policy the last scan recorded, read back out
+    /// of a JSON file in Application Support that any process running as the user can write
+    /// (codex MAJOR 2). That policy decides which folders BranchBar opens: a `homeRoot` of `/`
+    /// with an empty `skipDirectoryNames` and a `maxDepth` of 99 turns a refresh into a full-disk
+    /// walk, TCC prompts and all. So the shape comes from the injected default (the app's own
+    /// `ScanPolicy`, or this machine's home folder), and the only thing the cache contributes is
+    /// `manuallyAddedRepos` — the roots the folder picker wrote, each of which the user chose in
+    /// a macOS panel (PLAN.md §3).
     private func resolvedScanPolicy(from cacheFile: CacheFile) -> ScanPolicy {
-        var policy = cacheFile.scan?.policy
-            ?? self.scanPolicy
-            ?? ScanPolicy(homeRoot: fileSystem.homeDirectory())
+        var policy = self.scanPolicy ?? ScanPolicy(homeRoot: fileSystem.homeDirectory())
         var roots = policy.extraRoots
         for root in cacheFile.manuallyAddedRepos where !roots.contains(root) {
             roots.append(root)

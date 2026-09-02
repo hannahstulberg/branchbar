@@ -63,6 +63,18 @@ public enum CommandError: Error, Hashable, Codable, Sendable {
     case timedOut(after: TimeInterval)
     /// The enclosing task was cancelled; the child was terminated.
     case cancelled
+    /// The child wrote more than `ProcessCommandRunner.maximumOutputBytes` to stdout or stderr
+    /// and was terminated with its output discarded (codex MAJOR 15). A repository with an
+    /// enormous ref list, or a `git` that has started printing a loop, would otherwise be read
+    /// to EOF into memory and can end the app before any timeout helps. `stream` names which
+    /// pipe blew the cap so the log says which command to look at.
+    case outputTooLarge(stream: OutputStream, limit: Int)
+
+    /// Which of the two captured pipes exceeded the cap.
+    public enum OutputStream: String, Hashable, Codable, Sendable {
+        case standardOutput
+        case standardError
+    }
 }
 
 /// The process seam. `RecordedCommandRunner` replaces it in every unit test, so `swift test`

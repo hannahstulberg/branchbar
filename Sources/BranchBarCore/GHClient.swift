@@ -11,10 +11,22 @@ public actor GHClient {
     private let policy: RefreshPolicy
 
     /// One `gh auth status --hostname <host>` per distinct host, for the life of this instance —
-    /// which is one refresh. A failure is memoized exactly like a success, so it short-circuits
-    /// `gh pr list` for every repo on that host
-    /// (`authStatusFailureShortCircuitsPRListForAllReposOnThatHost`).
-    private var authByHost: [String: PRAvailability] = [:]
+    /// which is one refresh, and which `resetForNewRefresh()` is how the app makes true. A
+    /// failure is memoized exactly like a success, so it short-circuits `gh pr list` for every
+    /// repo on that host (`authStatusFailureShortCircuitsPRListForAllReposOnThatHost`).
+    ///
+    /// The value is the in-flight `Task`, not its result (codex MINOR 2). Four repo tasks reach
+    /// this at once; with a result-only memo all four saw an empty dictionary, suspended inside
+    /// `runner.run`, and started four `gh auth status` processes before the first one wrote
+    /// anything back (`concurrentReposIssueOneAuthStatusPerHost`).
+    private var authByHost: [String: Task<AuthAnswer, Never>] = [:]
+
+    /// A preflight result plus whether it is an answer about the account at all.
+    private struct AuthAnswer: Sendable {
+        var availability: PRAvailability
+        /// False for a cancelled or timed-out check: the command never produced a verdict.
+        var isVerdict: Bool
+    }
 
     /// PR results cached per repo, TTL `policy.prCacheTTL` — "for latency, not quota"
     /// (`prCacheWithinTTLIssuesNoGhCalls`). Keyed by `slug.ghRepoArgument`, and by the head as
@@ -55,7 +67,7 @@ public actor GHClient {
     /// `.unavailable(.ghNotAuthenticated(host:), detail:)` carrying the stderr on failure, so one
     /// failure short-circuits `gh pr list` for every repo on that host.
     public func authStatus(host: String) async -> PRAvailability {
-        if let memoized = authByHost[host] { return memoized }
+        if let inFlight = authByHost[host] { return await inFlight.value.availability }
 
         let command = Command(
             executable: ghPath,
@@ -64,28 +76,57 @@ public actor GHClient {
             timeout: policy.ghAuthTimeout
         )
 
-        let availability: PRAvailability
-        do {
-            let output = try await runner.run(command)
-            if output.exitCode == 0 {
-                availability = .available
-            } else {
+        let task = Task<AuthAnswer, Never> { [runner] in
+            do {
+                let output = try await runner.run(command)
+                if output.exitCode == 0 { return AuthAnswer(availability: .available, isVerdict: true) }
                 // Every non-zero exit of the preflight means the same thing to the UI: this host
                 // needs `gh auth login`. The stderr rides along as the diagnostic.
-                availability = .unavailable(
-                    .ghNotAuthenticated(host: host),
-                    detail: Self.diagnostic(output.standardErrorText)
-                )
+                return AuthAnswer(
+                    availability: .unavailable(
+                        .ghNotAuthenticated(host: host),
+                        detail: Self.diagnostic(output.standardErrorText)),
+                    isVerdict: true)
+            } catch let error as CommandError {
+                // A cancelled or timed-out check says nothing about the account: the refresh
+                // deadline arrived, or the keychain was slow.
+                let isVerdict: Bool
+                switch error {
+                case .cancelled, .timedOut, .outputTooLarge: isVerdict = false
+                case .launchFailed, .nonZeroExit: isVerdict = true
+                }
+                return AuthAnswer(
+                    availability: Self.availability(forFailedCommand: error, host: host),
+                    isVerdict: isVerdict)
+            } catch {
+                return AuthAnswer(
+                    availability: .unavailable(.commandFailed, detail: Self.diagnostic("\(error)")),
+                    isVerdict: false)
             }
-        } catch let error as CommandError {
-            availability = Self.availability(forFailedCommand: error, host: host)
-        } catch {
-            availability = .unavailable(.commandFailed, detail: Self.diagnostic("\(error)"))
         }
+        authByHost[host] = task
 
-        authByHost[host] = availability
-        return availability
+        let answer = await task.value
+        // Keeping a non-verdict makes one slow first refresh report "PR status did not load" for
+        // the rest of the session (REVIEW CR-02, `cancelledAuthCheckIsNotMemoized`). Drop it so
+        // the next repo — or the next refresh — asks again.
+        if !answer.isVerdict, authByHost[host] == task {
+            authByHost[host] = nil
+        }
+        return answer.availability
     }
+
+    /// Everything memoized in this actor belongs to one refresh; the app keeps one client for the
+    /// life of the process, so this is how the next refresh gets a clean one (REVIEW CR-02).
+    /// Without it a `gh auth login` the user just ran in Terminal stays invisible until relaunch,
+    /// and "Refresh PRs now" serves the same ten-minute-old list it was told to bypass.
+    public func resetForNewRefresh() {
+        authByHost.removeAll()
+        recentCache.removeAll()
+        authorCache.removeAll()
+        headCache.removeAll()
+    }
+
 
     // MARK: - The three frozen list invocations
 
@@ -93,9 +134,9 @@ public actor GHClient {
     /// PRs, mapping a rate-limit stderr to `.rateLimited` and any other non-zero exit to
     /// `.commandFailed` rather than throwing
     /// (`rateLimitResponseMapsToRateLimitedNotCommandFailed`).
-    public func recentPullRequests(slug: GitHubSlug) async -> Result<[PRInfo], PRAvailability> {
+    public func recentPullRequests(slug: GitHubSlug, bypass: Bool = false) async -> Result<[PRInfo], PRAvailability> {
         let key = slug.ghRepoArgument
-        if let cached = cachedPRs(recentCache[key]) { return .success(cached) }
+        if !bypass, let cached = cachedPRs(recentCache[key]) { return .success(cached) }
 
         let result = await list(
             slug: slug,
@@ -117,9 +158,9 @@ public actor GHClient {
     /// branch that the recent-100 list did not match, with the same failure mapping; the per-repo
     /// cap of 20 is enforced by the caller, and every branch past it renders `notChecked`, never
     /// `none`.
-    public func pullRequests(slug: GitHubSlug, head: String) async -> Result<[PRInfo], PRAvailability> {
+    public func pullRequests(slug: GitHubSlug, head: String, bypass: Bool = false) async -> Result<[PRInfo], PRAvailability> {
         let key = "\(slug.ghRepoArgument)#\(head)"
-        if let cached = cachedPRs(headCache[key]) { return .success(cached) }
+        if !bypass, let cached = cachedPRs(headCache[key]) { return .success(cached) }
 
         let result = await list(
             slug: slug,
@@ -143,14 +184,14 @@ public actor GHClient {
     /// it actually queried. A head that was queried and found no PR maps to an empty array; a
     /// head past the cap is absent, which is the `none` versus `notChecked` distinction
     /// `RepoAssembler` renders (`unqueriedBranchIsNotCheckedNeverNone`).
-    public func pullRequests(slug: GitHubSlug, unmatchedHeads: [String]) async -> [String: [PRInfo]] {
+    public func pullRequests(slug: GitHubSlug, unmatchedHeads: [String], bypass: Bool = false) async -> [String: [PRInfo]] {
         var seen: Set<String> = []
         let heads = unmatchedHeads.filter { seen.insert($0).inserted }.prefix(policy.perHeadFallbackCap)
 
         var queried: [String: [PRInfo]] = [:]
         for head in heads {
             // A failed query is not an answer: the head stays absent rather than claiming `none`.
-            if case .success(let prs) = await pullRequests(slug: slug, head: head) {
+            if case .success(let prs) = await pullRequests(slug: slug, head: head, bypass: bypass) {
                 queried[head] = prs
             }
         }
@@ -159,9 +200,9 @@ public actor GHClient {
 
     /// Runs the frozen `gh pr list --state open --author @me --limit 100` invocation and returns
     /// the decoded PRs; an empty array is a valid answer, not a failure.
-    public func openAuthoredPullRequests(slug: GitHubSlug) async -> Result<[PRInfo], PRAvailability> {
+    public func openAuthoredPullRequests(slug: GitHubSlug, bypass: Bool = false) async -> Result<[PRInfo], PRAvailability> {
         let key = slug.ghRepoArgument
-        if let cached = cachedPRs(authorCache[key]) { return .success(cached) }
+        if !bypass, let cached = cachedPRs(authorCache[key]) { return .success(cached) }
 
         let result = await list(
             slug: slug,
@@ -183,9 +224,22 @@ public actor GHClient {
     // MARK: - Failure classification
 
     /// Classifies a failed `gh` invocation from its exit code and stderr into the
-    /// `PRUnavailableReason` whose copy names the one action that fixes it: a 401 or "Bad
-    /// credentials" is `ghNotAuthenticated`, a 403 naming the rate limit is `rateLimited`, and
-    /// anything else is `commandFailed` carrying the stderr as the diagnostic.
+    /// `PRUnavailableReason` whose copy names the one action that fixes it.
+    ///
+    /// The order matters, and it is the order of how specific the evidence is (codex MAJOR 11,
+    /// REVIEW WR-02):
+    ///
+    /// 1. A 401 or "Bad credentials" is `ghNotAuthenticated`: the token is wrong.
+    /// 2. A 404 or "Could not resolve to a Repository" is `commandFailed`: the repo is renamed,
+    ///    deleted, or not visible to this account. Neither waiting nor signing in fixes it, so it
+    ///    keeps the neutral reason and carries the line that says what happened.
+    /// 3. Only an explicit rate-limit message or a 429 is `rateLimited`, whose copy promises that
+    ///    waiting a few minutes fixes it.
+    /// 4. Any **other** 403 is `ghNotAuthenticated`: SAML enforcement, a missing `repo` scope, an
+    ///    IP allow-list, an organization policy. All of them are answered by signing in again
+    ///    with the right grant, and none of them by waiting — which is what the old blanket
+    ///    "403 means rate limited" told a managed NYT account.
+    /// 5. Everything else is `commandFailed` carrying the first stderr line.
     public nonisolated static func availability(forFailedCommand error: CommandError, host: String) -> PRAvailability {
         switch error {
         case .launchFailed(_, let message):
@@ -198,10 +252,15 @@ public actor GHClient {
             if lowercased.contains("bad credentials") || standardError.contains("HTTP 401") {
                 return .unavailable(.ghNotAuthenticated(host: host), detail: diagnostic(standardError))
             }
-            if lowercased.contains("rate limit")
-                || standardError.contains("HTTP 429")
-                || standardError.contains("HTTP 403") {
+            if lowercased.contains("could not resolve to a repository")
+                || standardError.contains("HTTP 404") {
+                return .unavailable(.commandFailed, detail: firstLine(standardError))
+            }
+            if lowercased.contains("rate limit") || standardError.contains("HTTP 429") {
                 return .unavailable(.rateLimited, detail: diagnostic(standardError))
+            }
+            if standardError.contains("HTTP 403") {
+                return .unavailable(.ghNotAuthenticated(host: host), detail: firstLine(standardError))
             }
             // Everything the reason list does not name: the first stderr line is the diagnostic,
             // so the log says what happened and the row still renders.
@@ -212,6 +271,9 @@ public actor GHClient {
 
         case .cancelled:
             return .unavailable(.commandFailed, detail: "gh was cancelled")
+
+        case .outputTooLarge(let stream, let limit):
+            return .unavailable(.commandFailed, detail: "gh wrote more than \(limit) bytes to \(stream.rawValue)")
         }
     }
 
