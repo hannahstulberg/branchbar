@@ -353,8 +353,8 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 |---|---|---|---|
 | **Core: the refresh** | | | |
 | One refresh end to end: coalescing, cap 4, 45 s deadline, progressive emit, atomic persist | `RefreshCoordinator` | `Sources/BranchBarCore/RefreshCoordinator.swift:16` | An actor, so a second popover open coalesces instead of starting a parallel walk |
-| Discovery run inside a bound so a pending folder-access dialog cannot hang a refresh | `scanWithinDeadline` | `Sources/BranchBarCore/RefreshCoordinator.swift:390` | Takes the scanner's partial result when the 20 s bound wins, and rescans next time |
-| Repo order computed once per refresh and never recomputed mid-flight | `stableOrder` | `Sources/BranchBarCore/RefreshCoordinator.swift:477` | Previous snapshot's activity first, then new repos alphabetically |
+| Discovery run inside a bound so a pending folder-access dialog cannot hang a refresh | `scanWithinDeadline` | `Sources/BranchBarCore/RefreshCoordinator.swift:394` | Takes the scanner's partial result when the 20 s bound wins, and rescans next time |
+| Repo order computed once per refresh and never recomputed mid-flight | `stableOrder` | `Sources/BranchBarCore/RefreshCoordinator.swift:481` | Previous snapshot's activity first, then new repos alphabetically |
 | How the last refresh ended, so a cancel is not reported as a completed update | `RefreshOutcome` | `Sources/BranchBarCore/RefreshCoordinator.swift:5` | A cancelled refresh keeps the previous `refreshedAt` and suppresses follow-ups |
 | One repo end to end: seven stages, each failure isolated into a `RepoError` | `RepoLoader` | `Sources/BranchBarCore/RepoLoader.swift:8` | Never throws, so one broken repo leaves the others populated |
 | Pure join of git and GitHub facts into a `Repo`, and the three groups | `RepoAssembler` | `Sources/BranchBarCore/RepoAssembler.swift:9` | Grouping is decided here and only rendered by the presenter |
@@ -363,7 +363,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | Branch and remote-ref rows split on U+001F | `ForEachRefParser` | `Sources/BranchBarCore/ForEachRefParser.swift:65` | "No upstream" is decided from `upstream:short`, never from the track field |
 | Worktree records, including the ones with no branch | `WorktreeListParser` | `Sources/BranchBarCore/WorktreeListParser.swift:11` | Primary, linked, detached, locked, prunable, bare |
 | The reflog file read, the deletion boundary, and the usable-line predicate | `ReflogFileReader` | `Sources/BranchBarCore/ReflogFileReader.swift:8` | Walks newest first and stops at the first all-zero new OID |
-| One reflog line, with fields counted from the end of the header | `Entry` | `Sources/BranchBarCore/ReflogFileReader.swift:73` | Author names carry spaces, so field 5 cannot be counted from the front |
+| One reflog line, with fields counted from the end of the header | `Entry` | `Sources/BranchBarCore/ReflogFileReader.swift:96` | Author names carry spaces, so field 5 cannot be counted from the front |
 | The `git reflog show` fallback parser: implemented, unused in production | `ReflogParser` | `Sources/BranchBarCore/ReflogParser.swift:25` | Kept for the `--` footgun: a live-repo test and `make record-fixtures` both pin the invocation |
 | Push facts, and the rule that a commit date is never presented as a push | `PushInfoDeriver` | `Sources/BranchBarCore/PushInfoDeriver.swift:8` | No upstream yields a nil ahead count, never zero |
 | The git version gate behind the "works best with 2.39" notice | `GitVersion` | `Sources/BranchBarCore/GitVersion.swift:11` | Parsed from `git --version`, Apple's build suffix included |
@@ -382,8 +382,8 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | One line of the helper's NDJSON stream | `ScanStreamLine` | `Sources/BranchBarCore/ScanRunner.swift:85` | A line that will not decode is skipped and costs that line only |
 | One walk event, published the moment it happens rather than at the end | `ScanEvent` | `Sources/BranchBarCore/RepoScanner.swift:40` | `repo` fires when the dedupe claims it, `entering` before each gated listing |
 | The home walk to depth 6 and the unlimited walk of added roots | `RepoScanner` | `Sources/BranchBarCore/RepoScanner.swift:80` | Breadth-first, no symlinks, never descends into a repo it found |
-| The three folders macOS gates, enumerated after everything else | `tccGatedFolderNames` | `Sources/BranchBarCore/RepoScanner.swift:159` | Desktop, Documents, and Downloads as children of the home root only |
-| `.git` file classification into worktree checkout, submodule, or candidate | `classifyGitFile` | `Sources/BranchBarCore/RepoScanner.swift:165` | A checkout's common directory is everything before `/worktrees/` |
+| The three folders macOS gates, enumerated after everything else | `tccGatedFolderNames` | `Sources/BranchBarCore/RepoScanner.swift:176` | Desktop, Documents, and Downloads as children of the home root only |
+| `.git` file classification into worktree checkout, submodule, or candidate | `classifyGitFile` | `Sources/BranchBarCore/RepoScanner.swift:182` | A checkout's common directory is everything before `/worktrees/` |
 | Tool discovery for a GUI process whose PATH has no Homebrew | `ToolLocator` | `Sources/BranchBarCore/ToolLocator.swift:54` | Env override, then four install locations, then PATH, then Apple git |
 | **Core: presentation** | | | |
 | `Snapshot` to view models, the only place a user-facing sentence is built | `SnapshotPresenter` | `Sources/BranchBarCore/SnapshotPresenter.swift:49` | Six frozen arguments; `EditorAvailability` is an initializer property |
@@ -393,9 +393,9 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | The real process implementation: concurrent draining, timeout, cancellation | `ProcessCommandRunner` | `Sources/BranchBarCore/ProcessCommandRunner.swift:5` | Both pipes drain on dedicated threads, then SIGTERM and SIGKILL |
 | Termination that reaches the child's helpers, not just the child | `signalGroup` | `Sources/BranchBarCore/ProcessCommandRunner.swift:281` | pgid captured at spawn and signalled whichever process leads it |
 | A killed child's output kept beside the reason it stopped | `PartialOutputCommandRunning` | `Sources/BranchBarCore/ScanRunner.swift:75` | Only for a stream of independent lines; a truncated document is a lie |
-| The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:25` | Synchronous by contract; the scan's bound lives one level up |
+| The filesystem seam for the scan, the reflog files, and the cache | `FileSystem` | `Sources/BranchBarCore/Seams/FileSystem.swift:38` | Synchronous by contract; the scan's bound lives one level up |
 | The real filesystem, listing once with resource values | `RealFileSystem` | `Sources/BranchBarCore/RealFileSystem.swift:16` | No per-entry `attributesOfItem`: that call blocks behind folder-access dialogs |
-| The only way anything repository-owned is read | `readBoundedRegularFile` | `Sources/BranchBarCore/RealFileSystem.swift:164` | `O_NOFOLLOW`, `O_NONBLOCK`, an `S_IFREG` check, then `pread`: a FIFO cannot block it |
+| The only way anything repository-owned is read | `readBoundedRegularFile` | `Sources/BranchBarCore/RealFileSystem.swift:222` | `O_NOFOLLOW`, `O_NONBLOCK`, an `S_IFREG` check, then `pread`: a FIFO cannot block it |
 | Control scalars escaped before anything reaches CLI output or the log | `SafeText` | `Sources/BranchBarCore/BranchBarCore.swift:21` | A branch or folder name cannot forge a log entry or retitle a terminal |
 | The cache seam | `CacheStore` | `Sources/BranchBarCore/Seams/CacheStore.swift:6` | Two methods, both replaced in tests |
 | The cache file on disk, written through a temp file | `FileCacheStore` | `Sources/BranchBarCore/FileCacheStore.swift:7` | `replaceItemAt`, so an interrupted save leaves the previous file intact |
@@ -416,7 +416,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | The failure a user reads, with one action | `UserFacingFailure` | `Sources/BranchBarCore/Models/Failure.swift:6` | `diagnostic` is logged and never rendered |
 | The row view models the SwiftUI layer is allowed to see | `SnapshotVM` | `Sources/BranchBarCore/Models/ViewModels.swift:7` | Views hold no copy and compute no sentence |
 | **Shell** | | | |
-| The menu bar entry point | `BranchBarApp` | `Sources/BranchBar/BranchBarApp.swift:347` | `MenuBarExtra` in `.window` style, which re-runs `onAppear` per open |
+| The menu bar entry point | `BranchBarApp` | `Sources/BranchBar/BranchBarApp.swift:457` | `MenuBarExtra` in `.window` style, which re-runs `onAppear` per open |
 | Accessory activation, logging, and the state-fixture harness | `AppDelegate` | `Sources/BranchBar/BranchBarApp.swift:11` | `LSUIElement`, so there is no Dock icon and no menu bar menu |
 | Published view models, the refresh trigger, collapse, hide, roots | `AppModel` | `Sources/BranchBar/AppModel.swift:29` | The only shell type that talks to Core |
 | Row actions: editor chain, PR, Finder, clipboard | `Actions` | `Sources/BranchBar/Actions.swift:12` | Cursor, then VS Code, then Terminal; `https` PR links only |
@@ -431,7 +431,7 @@ One row per concern, each pointing at the line that declares it. `make doc-refs`
 | **CLI** | | | |
 | The two subcommands: the harness and the app's discovery helper | `Subcommand` | `Sources/branchbar-cli/main.swift:29` | `scan` is what `Contents/MacOS/branchbar-cli` is spawned for |
 | `branchbar-cli snapshot` argument parsing | `Options` | `Sources/branchbar-cli/main.swift:34` | The Gate 3 harness and the Gate 0b fallback |
-| The runner the CLI hands its cache-only bootstrap | `NoCommandsRunner` | `Sources/branchbar-cli/main.swift:297` | Keeps the harness from writing over the app's own cached snapshot |
+| The runner the CLI hands its cache-only bootstrap | `NoCommandsRunner` | `Sources/branchbar-cli/main.swift:350` | Keeps the harness from writing over the app's own cached snapshot |
 
 ## §4 Data model
 
