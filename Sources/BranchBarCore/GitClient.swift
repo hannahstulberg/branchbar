@@ -162,13 +162,20 @@ public struct GitClient: Sendable {
 
     // MARK: The frozen shape
 
-    /// `-C <repo>` leads every invocation, the repo is the working directory, the environment is
-    /// exactly the frozen two, and the timeout is PLAN.md §5's 10 s for git.
+    /// `-C <repo>` leads every invocation, the environment is exactly the frozen three, and the
+    /// timeout is PLAN.md §5's 10 s for git.
+    ///
+    /// **No working directory** (codex round 4, BLOCKER 2). Every command already carries
+    /// `-C <repo>`, which is git's own answer to "which repository", so setting the same path as
+    /// `currentDirectoryURL` bought nothing — and it moved a resolution of a repository-owned
+    /// pathname *inside* `Process.run()`, which is where a `chdir` into a disconnected `/Volumes`
+    /// mount blocks. At that point there is no child pid to signal, and the launch is the one
+    /// stretch of a command's life a deadline could not previously reach. The runner still honours
+    /// `Command.workingDirectory` for a caller that genuinely needs one; git is not that caller.
     static func command(gitPath: String, arguments: [String], at path: String, timeout: TimeInterval) -> Command {
         Command(
             executable: gitPath,
             arguments: ["-C", path] + arguments,
-            workingDirectory: path,
             environment: frozenEnvironment,
             timeout: timeout
         )

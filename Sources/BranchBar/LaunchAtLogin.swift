@@ -50,12 +50,100 @@ enum LaunchAtLogin {
         bundlePath + "/Contents/MacOS/BranchBar"
     }
 
-    /// Which candidate the running process *is*, or nil when it is neither. This is the one place a
-    /// path is chosen, and it chooses between two literals rather than trusting `Bundle.main`'s own
-    /// path: a translocated copy matches neither and is refused ahead of this by `isTranslocated`.
+    /// What the running bundle's path is, as far as the login item is concerned.
+    ///
+    /// codex round 4, MAJOR 5: the three answers used to be two, and the missing one is the
+    /// dangerous one. A path that *resolves* to an install candidate is not the same thing as an
+    /// install candidate, and the LaunchAgent stores a path rather than an inode.
+    enum InstallPathVerdict: Equatable {
+        /// The running bundle is a candidate, and no component of that path is a symlink. This is
+        /// the only verdict anything is registered under, and the path is the one that was walked.
+        case canonical(String)
+        /// The running bundle names a candidate whose path this app will not register, with the
+        /// component that decided it.
+        case refused(path: String, reason: String)
+        /// The app is running from somewhere else entirely — a `swift run` build, a copy in
+        /// Downloads — which `unavailableReason` refuses ahead of every mechanism.
+        case elsewhere(String)
+    }
+
+    /// Read once. The bundle a process is running from cannot change while it runs, and the walk
+    /// below is `lstat` per component, so memoizing costs nothing but keeps the refusal to one
+    /// line in the log rather than one per property read.
+    private static var cachedInstallVerdict: InstallPathVerdict?
+
+    static var installPathVerdict: InstallPathVerdict {
+        if let cachedInstallVerdict { return cachedInstallVerdict }
+        let verdict = deriveInstallPathVerdict()
+        cachedInstallVerdict = verdict
+        if case .refused(let path, let reason) = verdict {
+            Log.info("launch at login: refusing \(path) as an install location, \(reason)")
+        }
+        return verdict
+    }
+
+    private static func deriveInstallPathVerdict() -> InstallPathVerdict {
+        let running = Bundle.main.bundlePath
+        // Textual equality, deliberately: `resolvingSymlinksInPath` on both sides is exactly what
+        // made `~/Applications/BranchBar.app -> ~/Downloads/BranchBar.app` read as "installed in
+        // Applications" while the plist stored the link (codex round 4, MAJOR 5).
+        guard let candidate = installCandidateBundlePaths.first(where: { $0 == running }) else {
+            return .elsewhere(running)
+        }
+        if let reason = symlinkComponentReason(candidate) {
+            return .refused(path: candidate, reason: reason)
+        }
+        return .canonical(candidate)
+    }
+
+    /// Why a path is not one this app will register, or nil when every component of it is a real
+    /// directory it looked at with `lstat` (codex round 4, MAJOR 5).
+    ///
+    /// The walk is per component from the root down, because `O_NOFOLLOW`'s lesson one level up
+    /// holds here too: a check on the final component says nothing about the six lookups the
+    /// kernel did to reach it. `~/Applications/BranchBar.app` pointing at `~/Downloads` is the
+    /// obvious case, and `~/Applications` itself being a link is the one that hides: every
+    /// component under it then names a folder someone else can retarget, and retargeting it
+    /// changes what runs at the next login.
+    ///
+    /// `lstat` neither follows a link nor blocks — the two reasons it is the call used here rather
+    /// than `FileManager` (ARCHITECTURE.md §8). The last component only has to exist and not be a
+    /// link; whether it is the bundle directory or the executable inside it is the caller's
+    /// question.
+    static func symlinkComponentReason(_ path: String) -> String? {
+        guard path.hasPrefix("/") else { return "\(path) is not an absolute path" }
+        let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard !components.isEmpty else { return "\(path) is the root folder" }
+
+        var walked = ""
+        for (index, component) in components.enumerated() {
+            guard component != ".", component != ".." else {
+                return "\(path) is not a plain path (it contains \(component))"
+            }
+            walked += "/" + component
+            var status = stat()
+            guard lstat(walked, &status) == 0 else {
+                return "\(walked) could not be read (\(String(cString: strerror(errno))))"
+            }
+            if status.st_mode & S_IFMT == S_IFLNK {
+                return "\(walked) is a symbolic link"
+            }
+            let isLast = index == components.count - 1
+            if !isLast, status.st_mode & S_IFMT != S_IFDIR {
+                return "\(walked) is not a folder"
+            }
+        }
+        return nil
+    }
+
+    /// Which candidate the running process *is*, or nil when it is neither — or when it names one
+    /// through a symlink, which is not the same thing (codex round 4, MAJOR 5). This is the one
+    /// place a path is chosen, and it chooses between two literals rather than trusting
+    /// `Bundle.main`'s own path: a translocated copy matches neither and is refused ahead of this
+    /// by `isTranslocated`.
     static var runningInstallBundlePath: String? {
-        let running = resolved(Bundle.main.bundlePath)
-        return installCandidateBundlePaths.first { resolved($0) == running }
+        guard case .canonical(let path) = installPathVerdict else { return nil }
+        return path
     }
 
     /// The path the LaunchAgent names: the candidate this process is running from, and the shared
@@ -94,13 +182,9 @@ enum LaunchAtLogin {
         Bundle.main.bundlePath.contains("/AppTranslocation/")
     }
 
-    /// Whether the running bundle *is* one of the two install candidates, symlinks and `/private`
-    /// prefixes resolved on both sides so `/tmp/…` and `/private/tmp/…` are not two answers.
+    /// Whether the running bundle *is* one of the two install candidates, by the path it was
+    /// launched from and with no component of that path a symlink.
     static var isRunningFromApplications: Bool { runningInstallBundlePath != nil }
-
-    private static func resolved(_ path: String) -> String {
-        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
-    }
 
     // MARK: - Current state
 
@@ -474,6 +558,13 @@ enum LaunchAtLogin {
     /// the one this process resolved itself to, so a Mac holding a copy in both Applications
     /// folders validates the copy the toggle was clicked in.
     static var isInstalledBundleValid: Bool {
+        // codex round 4, MAJOR 5: the plist names `installedExecutablePath`, so that whole path —
+        // not just the bundle root — is what has to be free of links before it is written down.
+        if let reason = symlinkComponentReason(installedExecutablePath) {
+            Log.info(
+                "launch at login: refusing to register \(installedExecutablePath), \(reason)")
+            return false
+        }
         guard FileManager.default.isExecutableFile(atPath: installedExecutablePath) else {
             return false
         }
@@ -614,6 +705,16 @@ enum LaunchAtLogin {
 
     // MARK: - Logging
 
+    /// One log-sized phrase per verdict, the refusal's reason included: "refused" without the
+    /// component that decided it is a line a tester cannot act on.
+    static func describe(_ verdict: InstallPathVerdict) -> String {
+        switch verdict {
+        case .canonical(let path): return "canonical(\(path))"
+        case .refused(let path, let reason): return "refused(\(path): \(reason))"
+        case .elsewhere(let path): return "elsewhere(\(path))"
+        }
+    }
+
     static func statusDescription(_ status: SMAppService.Status?) -> String {
         switch status {
         case .none: return "unavailable"
@@ -640,6 +741,7 @@ enum LaunchAtLogin {
                 + "mechanism=\(mechanism.rawValue) SMAppService status=\(statusDescription(serviceStatus)) "
                 + "translocated=\(isTranslocated) inApplications=\(isRunningFromApplications) "
                 + "installPath=\(runningInstallBundlePath ?? "—") "
+                + "installVerdict=\(describe(installPathVerdict)) "
                 + "ownPlist=\(live.isOwnPlist) plistFile=\(live.fileType) "
                 + "plistProgram=\(live.plistProgram ?? "—") "
                 + "agentLoaded=\(live.isLoaded) liveProgram=\(live.loadedProgram ?? "—") "

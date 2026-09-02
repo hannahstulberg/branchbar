@@ -153,6 +153,59 @@ public struct RealFileSystem: FileSystem {
                     + TimeInterval(status.st_mtimespec.tv_nsec) / 1_000_000_000))
     }
 
+    /// One `openat(… O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)` per path component, each from the
+    /// descriptor the previous one produced (codex round 4, MAJOR 3).
+    ///
+    /// `isDirectoryNoFollow` refuses a symlink at the **last** component and says nothing about the
+    /// ones in front of it, so `/Users/name/link/System` — where `link` is a symlink the user's own
+    /// account may replace at any moment — passed a check whose whole purpose was to bound where an
+    /// unbounded-depth scan may go. Walking descriptors rather than re-resolving the pathname also
+    /// closes the gap between the answer and its use: each `openat` starts from a directory this
+    /// process is already holding open, so a component renamed mid-walk cannot redirect the rest.
+    ///
+    /// `O_NONBLOCK` for the same reason every other open in this file carries it: a component that
+    /// is an automount or a dead network mount must fail rather than park the caller in the kernel.
+    public func isDirectoryPathWithoutSymlinks(atPath path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard !components.isEmpty else { return false }
+        guard components.allSatisfy({ $0 != "." && $0 != ".." }) else { return false }
+
+        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { return false }
+        for component in components {
+            let next = openat(
+                descriptor, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            close(descriptor)
+            guard next >= 0 else { return false }
+            descriptor = next
+        }
+        close(descriptor)
+        return true
+    }
+
+    /// `statfs` on the volume root a path sits under, or `.local` for a path that is not under a
+    /// mount point at all (codex round 4, BLOCKER 3).
+    ///
+    /// The filesystem type is the fact worth having: `nfs`, `smbfs`, `afpfs`, and `webdav` mounts
+    /// are served by another machine, and when that machine goes away every `open()` against the
+    /// mount blocks uninterruptibly. `statfs` failing is the same answer arrived at sooner — a
+    /// stale mount point already refuses to describe itself.
+    public func volumeKind(for path: String) -> VolumeKind {
+        var buffer = statfs()
+        guard statfs(path, &buffer) == 0 else { return .unreachable(code: errno) }
+        let type = withUnsafeBytes(of: buffer.f_fstypename) { raw -> String in
+            guard let base = raw.baseAddress else { return "" }
+            return String(cString: base.assumingMemoryBound(to: CChar.self))
+        }
+        return Self.networkFilesystemTypes.contains(type.lowercased())
+            ? .network(type: type)
+            : .local
+    }
+
+    /// The `f_fstypename` values that mean "another machine answers every read".
+    public static let networkFilesystemTypes: Set<String> = ["nfs", "smbfs", "afpfs", "webdav", "ftp"]
+
     public func homeDirectory() -> String {
         manager.homeDirectoryForCurrentUser.path
     }

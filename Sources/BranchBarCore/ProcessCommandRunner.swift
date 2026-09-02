@@ -8,7 +8,48 @@ public struct ProcessCommandRunner: CommandRunner {
     /// below what would end a menu-bar app that holds two of them per repo in memory.
     public static let maximumOutputBytes = 8 * 1024 * 1024
 
-    public init() {}
+    /// The four calls this runner makes that a test cannot provoke from outside it (codex round 4,
+    /// BLOCKER 2 and MAJOR 2).
+    ///
+    /// A launch that blocks needs a filesystem that blocks; a process group whose leader has
+    /// already exited needs a race to be won. Both are real, both are what the findings are about,
+    /// and neither can be staged from a unit test. They are one injectable value instead, with the
+    /// production defaults spelled out here, so the behaviour under test is the runner's own
+    /// sequencing rather than a mock of it.
+    struct SystemHooks: Sendable {
+        /// Replaces `try process.run()`.
+        var launch: (@Sendable () throws -> Void)?
+        /// `getpgid`, which returns -1 for a leader that has already been reaped.
+        var processGroup: @Sendable (pid_t) -> pid_t = { getpgid($0) }
+        /// `kill`, so a test can see which pid and which signal actually went out.
+        var sendSignal: @Sendable (pid_t, Int32) -> Void = { pid, signalNumber in
+            kill(pid, signalNumber)
+        }
+        /// Where the process-group guard writes when the kernel disagrees with the assumption.
+        var note: @Sendable (String) -> Void = { Log.info($0) }
+
+        init(
+            launch: (@Sendable () throws -> Void)? = nil,
+            processGroup: @escaping @Sendable (pid_t) -> pid_t = { getpgid($0) },
+            sendSignal: @escaping @Sendable (pid_t, Int32) -> Void = { kill($0, $1) },
+            note: @escaping @Sendable (String) -> Void = { Log.info($0) }
+        ) {
+            self.launch = launch
+            self.processGroup = processGroup
+            self.sendSignal = sendSignal
+            self.note = note
+        }
+    }
+
+    private let hooks: SystemHooks
+
+    public init() {
+        self.hooks = SystemHooks()
+    }
+
+    init(hooks: SystemHooks) {
+        self.hooks = hooks
+    }
 
     /// Launches `command` with an argument array — never a shell string, so a branch named
     /// `-my-branch` arrives as an operand (`branchNameBeginningWithDashIsPassedAsOperandNotFlag`)
@@ -56,7 +97,7 @@ public struct ProcessCommandRunner: CommandRunner {
                 message: "no executable file at \(command.executable)"))
         }
 
-        let running = RunningCommand(command: command)
+        let running = RunningCommand(command: command, hooks: hooks)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 running.start(continuation)
@@ -111,6 +152,7 @@ private final class RunningCommand: @unchecked Sendable {
     private static let forceFinishGrace: TimeInterval = 3
 
     private let command: Command
+    private let hooks: ProcessCommandRunner.SystemHooks
     private let lock = NSLock()
     private let queue = DispatchQueue(
         label: "com.branchbar.process-command-runner",
@@ -126,17 +168,30 @@ private final class RunningCommand: @unchecked Sendable {
     private var didFinish = false
     private var didCancel = false
     private var didTimeOut = false
-    /// Captured immediately after `Process.run()` (codex round 2, MAJOR 2). Signalling asks this
-    /// value, never the live process, because the leader can be gone while its group is not.
+    /// The child's process group, which is its own pid: Foundation spawns with
+    /// `POSIX_SPAWN_SETPGROUP` and pgroup 0, so the pid the spawn returns **is** the group id
+    /// (codex round 2, MAJOR 2; round 4, MAJOR 2 stopped discovering it with `getpgid`).
+    /// Signalling asks this value, never the live process, because the leader can be gone while
+    /// its group is not.
     private var savedProcessGroup: pid_t?
+    /// Set when the launch itself threw. Carried rather than resumed on the spot, so `finish` is
+    /// still the single place the continuation is answered (codex round 4, BLOCKER 2).
+    private var launchFailure: CommandError?
+    /// True once a child really exists. Until then there is nothing to signal and nothing to wait
+    /// for, which is what lets a blocked launch answer its caller immediately.
+    private var didLaunchChild = false
+    /// The pid `getpgid` reported for the child at spawn, or nil when the lookup failed. Read only
+    /// by `signalGroup`, and only to decide whether the pid needs a signal of its own.
+    private var observedProcessGroup: pid_t?
     /// Set by whichever reader failed (codex round 2, MINOR 2); outranks the exit code.
     private var readFailure: (stream: CommandError.OutputStream, message: String)?
     /// Set by whichever reader passed the byte cap first (codex MAJOR 15).
     private var overflowedStream: CommandError.OutputStream?
     private var timeoutItem: DispatchWorkItem?
 
-    init(command: Command) {
+    init(command: Command, hooks: ProcessCommandRunner.SystemHooks) {
         self.command = command
+        self.hooks = hooks
     }
 
     func start(_ continuation: CheckedContinuation<PartialCommandOutput, Never>) {
@@ -176,34 +231,88 @@ private final class RunningCommand: @unchecked Sendable {
         self.outputPipe = outputPipe
         self.errorPipe = errorPipe
 
-        do {
-            try process.run()
-        } catch {
-            self.process = nil
-            self.continuation = nil
-            lock.unlock()
-            continuation.resume(returning: PartialCommandOutput(
-                failure: .launchFailed(
-                    executable: command.executable,
-                    message: String(describing: error))))
-            return
-        }
-
-        // codex round 2, MAJOR 2. The group id is read here, once, while the leader is certainly
-        // alive — not at signal time, when it may already have exited and taken `getpgid` and
-        // `Process.isRunning` with it. Foundation spawns each child with `POSIX_SPAWN_SETPGROUP`
-        // and pgroup 0, so the child leads its own group; the guard is what stops a negative pid
-        // reaching BranchBar's own group if that ever stops being true
-        // (`childRunsInItsOwnProcessGroup`).
-        let pid = process.processIdentifier
-        let group = getpgid(pid)
-        savedProcessGroup = (pid > 0 && group == pid && group != getpgrp()) ? group : nil
-
         let timeoutItem = DispatchWorkItem { [self] in self.timeOut() }
         self.timeoutItem = timeoutItem
         lock.unlock()
 
+        // The deadline is armed **before** the launch, and the lock is not held across it (codex
+        // round 4, BLOCKER 2). `Process.run()` is synchronous and does real work with the
+        // pathnames it was handed — resolving `currentDirectoryURL`, opening the executable — and
+        // on a disconnected mount that work blocks in the kernel. Arming afterwards meant the one
+        // stretch of a command's life with no child process to kill was also the one stretch no
+        // deadline covered, and holding the lock across it meant the cancellation handler blocked
+        // behind the same call it was trying to end.
         queue.asyncAfter(deadline: .now() + max(0, command.timeout), execute: timeoutItem)
+
+        // A dedicated thread, not a queue work item: if the launch never returns, the thread it
+        // owns is lost and nothing else is. The caller is resumed by the deadline that is already
+        // running, and never waits on this.
+        let launcher = Thread { [self] in self.launchAndSupervise() }
+        launcher.name = "com.branchbar.process-launch"
+        launcher.stackSize = 512 * 1024
+        launcher.start()
+    }
+
+    /// Runs the launch, then — only if the launch actually produced a child — records its group
+    /// and starts the readers and the waiter.
+    private func launchAndSupervise() {
+        lock.lock()
+        let process = self.process
+        lock.unlock()
+        guard let process else { finish(exitCode: -1); return }
+
+        do {
+            // `hooks.launch` stands in for `process.run()` so a test can hold the launch open past
+            // the deadline, which is what a dead mount does and what nothing else can stage.
+            if let launch = hooks.launch { try launch() } else { try process.run() }
+        } catch {
+            lock.lock()
+            launchFailure = .launchFailed(
+                executable: command.executable, message: String(describing: error))
+            lock.unlock()
+            finish(exitCode: -1)
+            return
+        }
+
+        // codex round 4, MAJOR 2: the group **is** the pid, recorded here rather than discovered.
+        // Foundation spawns with `POSIX_SPAWN_SETPGROUP` and pgroup 0, so the child is the leader
+        // of a group whose id is its own pid — that is true the instant `posix_spawn` returns,
+        // while `getpgid` is a question asked afterwards that a child which forked a descendant
+        // and exited first answers with -1. Answering -1 used to leave `savedProcessGroup` nil,
+        // so the escalation signalled a dead pid and the descendant kept the pipes open.
+        //
+        // `kill(-pid, …)` can only ever reach a group whose leader is this child, because a group
+        // id is the pid of its leader; a child that is somehow not a leader simply has no such
+        // group and the signal costs an ESRCH. The old `getpgid == pid` guard is kept as exactly
+        // that — a guard that says so rather than one that silently disarms the escalation.
+        let pid = process.processIdentifier
+        lock.lock()
+        savedProcessGroup = pid > 0 ? pid : nil
+        didLaunchChild = pid > 0
+        let alreadyOver = didFinish || didCancel || didTimeOut
+        lock.unlock()
+
+        if pid > 0 {
+            let observed = hooks.processGroup(pid)
+            lock.lock()
+            observedProcessGroup = observed > 0 ? observed : nil
+            lock.unlock()
+            if observed != pid {
+                hooks.note(
+                    "process group disagreement: child pid \(pid) reports group \(observed); "
+                        + "signalling group \(pid) anyway")
+            }
+        }
+
+        // The deadline or a cancellation arrived while the launch was still in flight. The child
+        // exists now and nobody is waiting for it, so it is signalled rather than left running.
+        guard !alreadyOver else {
+            signalGroup(SIGTERM)
+            queue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
+                self.signalGroup(SIGKILL)
+            }
+            return
+        }
 
         // Two readers, running at the same time, each blocking on its own pipe.
         let readers = DispatchGroup()
@@ -254,6 +363,20 @@ private final class RunningCommand: @unchecked Sendable {
     /// started, and `cancellationKillsAGrandchildThatDidNotExec` is the parent that ignores
     /// SIGTERM and leaves a background child behind.
     private func terminateChild() {
+        lock.lock()
+        let launched = didLaunchChild
+        lock.unlock()
+
+        // codex round 4, BLOCKER 2: the launch has not produced a child yet, so there is no group
+        // to signal and no output that could still arrive. Waiting out the kill grace here would
+        // make a blocked launch cost the caller the deadline *plus* three seconds, on a call that
+        // will never come back. The launch thread is left to whatever it is stuck in;
+        // `launchAndSupervise` signals the child if one ever appears.
+        guard launched else {
+            finish(exitCode: -1)
+            return
+        }
+
         signalGroup(SIGTERM)
 
         queue.asyncAfter(deadline: .now() + Self.killGrace) { [self] in
@@ -281,15 +404,28 @@ private final class RunningCommand: @unchecked Sendable {
     private func signalGroup(_ signalNumber: Int32) {
         lock.lock()
         let group = savedProcessGroup
+        let observed = observedProcessGroup
         let pid = process?.processIdentifier ?? -1
         lock.unlock()
 
-        if let group, group > 0 {
-            kill(-group, signalNumber)
+        guard let group, group > 0 else {
+            // No child was ever spawned, so there is nothing addressable at all.
+            guard pid > 0 else { return }
+            hooks.sendSignal(pid, signalNumber)
             return
         }
-        guard pid > 0 else { return }
-        kill(pid, signalNumber)
+
+        hooks.sendSignal(-group, signalNumber)
+
+        // The only case where the group signal reaches nothing: the kernel says this child is a
+        // member of somebody else's group, so no group with id `pid` exists. `-observed` is not
+        // the answer — it could be BranchBar's own group — so the child itself is signalled
+        // directly, and its descendants are beyond reach. A lookup that merely *failed* is the
+        // opposite case: the leader is gone, its group is not, and a bare pid could by then belong
+        // to somebody else entirely.
+        if let observed, observed != group, pid > 0 {
+            hooks.sendSignal(pid, signalNumber)
+        }
     }
 
     /// Reads one pipe in bounded chunks, so the size of what a child decides to print is never
@@ -342,6 +478,7 @@ private final class RunningCommand: @unchecked Sendable {
         let timedOut = didTimeOut
         let overflowed = overflowedStream
         let readError = readFailure
+        let launchError = launchFailure
         let bufferedOutput = standardOutput
         let bufferedError = standardError
         lock.unlock()
@@ -353,6 +490,9 @@ private final class RunningCommand: @unchecked Sendable {
             failure = .cancelled
         } else if timedOut {
             failure = .timedOut(after: command.timeout)
+        } else if let launchError {
+            // A launch that threw produced no child and no bytes; it outranks everything below.
+            failure = launchError
         } else if let overflowed {
             failure = .outputTooLarge(
                 stream: overflowed, limit: ProcessCommandRunner.maximumOutputBytes)

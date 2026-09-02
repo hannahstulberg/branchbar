@@ -41,6 +41,7 @@ struct RootView: View {
                     ForEach(model.vm.sections, id: \.id) { section in
                         RepoSectionView(
                             section: section,
+                            verifiedPath: model.verifiedPath(of: section),
                             focus: focus,
                             isHidden: model.isHidden(section.id),
                             toggleCollapse: model.toggleCollapse,

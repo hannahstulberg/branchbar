@@ -162,12 +162,13 @@ struct FooterView: View {
                 .foregroundStyle(.secondary)
             ForEach(footer.scanRoots, id: \.self) { root in
                 HStack(spacing: 6) {
-                    Text(root)
+                    // A scan root is a folder path (codex round 4, MINOR 2).
+                    Text(RepositoryText.display(root))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.head)
-                        .help(root)
+                        .help(RepositoryText.spoken(root))
                     Spacer(minLength: 0)
                     Button {
                         removeRoot(root)
@@ -177,7 +178,8 @@ struct FooterView: View {
                     }
                     .font(.caption)
                     .buttonStyle(.link)
-                    .accessibilityLabel("\(Strings.removeScanRootActionLabel) \(root)")
+                    .accessibilityLabel(
+                        RepositoryText.spoken("\(Strings.removeScanRootActionLabel) \(root)"))
                 }
             }
         }

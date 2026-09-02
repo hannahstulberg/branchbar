@@ -13,7 +13,9 @@ struct PRRowView: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 DecorativeIcon(name: Glyph.openPR)
                     .frame(width: Metrics.glyphColumn, alignment: .leading)
-                Text(row.title)
+                // "#12 branch-name", where the branch name is GitHub's copy of a name someone
+                // else chose (codex round 4, MINOR 2).
+                Text(RepositoryText.display(row.title))
                     .font(.body)
                     .foregroundStyle(Color(nsColor: .labelColor))
                     .lineLimit(1)
@@ -28,7 +30,7 @@ struct PRRowView: View {
         }
         .buttonStyle(.plain)
         .background(focusBackground)
-        .help(row.url)
+        .help(RepositoryText.spoken(row.url))
         .contextMenu {
             Button {
                 openPR(row.url)
@@ -37,7 +39,7 @@ struct PRRowView: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(row.accessibilityLabel)
+        .accessibilityLabel(RepositoryText.spoken(row.accessibilityLabel))
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: Strings.openPRActionLabel) { openPR(row.url) }
     }

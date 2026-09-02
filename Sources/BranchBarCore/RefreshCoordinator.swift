@@ -575,10 +575,15 @@ public actor RefreshCoordinator {
     ///   picker produced, and `/System` or `/private/var` is not a place repos live.
     /// - At most `maximumRootPathBytes`, so a megabyte-long string cannot ride in the policy.
     /// - Never a filesystem or mount root: `/`, one of the prefixes themselves, or a bare
-    ///   `/Volumes/<name>`'s parent. A root with fewer than two components below `/` is the whole
-    ///   of somebody's disk.
-    /// - An existing directory, checked with `open(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)`, so an
-    ///   unmounted volume or a deleted folder costs nothing rather than 20 seconds a refresh.
+    ///   `/Volumes/<name>`. A root with fewer than two components below `/` is the whole of
+    ///   somebody's disk, and under `/Volumes` the mount point itself is one component deeper —
+    ///   `/Volumes/Disk` had two components and was accepted by a rule whose own text said mount
+    ///   roots are refused (codex round 4, MAJOR 3).
+    /// - An existing directory **at every component**, each opened with
+    ///   `openat(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)` from the one before it, so an unmounted
+    ///   volume or a deleted folder costs nothing rather than 20 seconds a refresh — and so an
+    ///   intermediate symlink cannot redirect a walk that has no depth limit. Checking only the
+    ///   last component let `/Users/name/link/System` through.
     /// - At most `maximumCachedRoots` of them, in the order the file lists them.
     static func acceptableExtraRoots(_ roots: [String], fileSystem: FileSystem) -> [String] {
         var accepted: [String] = []
@@ -599,6 +604,9 @@ public actor RefreshCoordinator {
         guard components.count >= 2 else { return false }
         guard components.allSatisfy({ $0 != "." && $0 != ".." }) else { return false }
         guard allowedRootPrefixes.contains("/" + components[0]) else { return false }
-        return fileSystem.isDirectoryNoFollow(atPath: root)
+        // `/Volumes` holds mount points, not folders: `/Volumes/<name>` is one whole disk, which
+        // is the shape this rule exists to refuse. A folder *on* that volume needs three.
+        if components[0] == "Volumes" { guard components.count >= 3 else { return false } }
+        return fileSystem.isDirectoryPathWithoutSymlinks(atPath: root)
     }
 }

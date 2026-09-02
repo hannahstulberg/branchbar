@@ -535,10 +535,13 @@ public struct RepoScanner: Sendable {
     private func path(
         for option: String, at path: String, using commandRunner: CommandRunner
     ) async -> String? {
+        // No working directory, for the reason `GitClient.command` gives: `-C` already names the
+        // repository, and a second resolution of the same repository-owned path happens inside
+        // `Process.run()`, where a dead mount blocks before there is a child to kill (codex
+        // round 4, BLOCKER 2).
         let command = Command(
             executable: gitExecutable,
-            arguments: ["-C", path, "rev-parse", "--path-format=absolute", option],
-            workingDirectory: path
+            arguments: ["-C", path, "rev-parse", "--path-format=absolute", option]
         )
         guard
             let output = try? await commandRunner.run(command),

@@ -10,10 +10,11 @@ struct EmptyStateView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(state.title)
+            Text(RepositoryText.display(state.title))
                 .font(.headline)
                 .foregroundStyle(Color(nsColor: .labelColor))
-            Text(state.message)
+            // Names the scan roots, which are folders on this Mac (codex round 4, MINOR 2).
+            Text(RepositoryText.display(state.message))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -31,6 +31,21 @@ public struct RegularFileStat: Hashable, Sendable {
     }
 }
 
+/// What kind of volume a path lives on (codex round 4, BLOCKER 3).
+///
+/// The distinction the repo loader needs is not "which filesystem" but "can a synchronous read of
+/// a file on it be trusted to return". A local volume can; a network volume whose server has gone
+/// away parks `open()` in the kernel for the life of the process, and a volume root that will not
+/// even answer `statfs` has already stopped answering.
+public enum VolumeKind: Hashable, Sendable {
+    /// A volume this process can read files from directly.
+    case local
+    /// `nfs`, `smbfs`, `afpfs`, `webdav` — a mount whose server is a different machine.
+    case network(type: String)
+    /// `statfs` failed: the mount point is stale, disconnected, or gone.
+    case unreachable(code: Int32)
+}
+
 /// The filesystem seam: the home scan, the reflog files, and the cache all go through it, so a
 /// unit test never touches the real home folder. Synchronous on purpose — the calls are
 /// `readdir` and `read`, and the concurrency that matters lives one level up in
@@ -71,6 +86,22 @@ public protocol FileSystem: Sendable {
     /// is not a regular file: a FIFO where a reflog belongs is a fact the caller reports, never an
     /// absence it reports as "never pushed".
     func statRegularFile(atPath path: String) throws -> RegularFileStat?
+
+    /// Is every component of this absolute path a real directory that is not a symlink?
+    ///
+    /// codex round 4, MAJOR 3: `isDirectoryNoFollow` answers about the **last** component only, so
+    /// `/Users/name/link/System` passed the check while `link` pointed anywhere at all. A cached
+    /// scan root is walked with no depth limit, so the escape is worth a descriptor walk:
+    /// `RealFileSystem` opens each component with `openat(… O_DIRECTORY | O_NOFOLLOW)` from the
+    /// previous descriptor, which no rename between two components can slip past.
+    func isDirectoryPathWithoutSymlinks(atPath path: String) -> Bool
+
+    /// Which kind of volume this path is mounted on (codex round 4, BLOCKER 3).
+    ///
+    /// Answers rather than throws: a volume that will not say what it is is `unreachable`, which
+    /// is the answer that matters. `RealFileSystem` asks `statfs`; a seam double answers from its
+    /// own table.
+    func volumeKind(for path: String) -> VolumeKind
 }
 
 extension FileSystem {
@@ -90,4 +121,23 @@ extension FileSystem {
         guard fileExists(atPath: path) else { return nil }
         return RegularFileStat(size: 0, modificationDate: try modificationDate(atPath: path))
     }
+
+    /// The fallback: the same walk one component at a time, asked through the no-follow directory
+    /// check the seam already has. `RealFileSystem` overrides it with the `openat` chain, which is
+    /// the version that cannot be raced; this one is what an in-memory double needs, and it honours
+    /// a symlink entry because `isDirectoryNoFollow` does.
+    public func isDirectoryPathWithoutSymlinks(atPath path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        var walked = ""
+        for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+            guard component != "." && component != ".." else { return false }
+            walked += "/" + component
+            guard isDirectoryNoFollow(atPath: walked) else { return false }
+        }
+        return !walked.isEmpty
+    }
+
+    /// The fallback for a seam with no volumes of its own: everything it holds is local. A double
+    /// that wants to model a network mount overrides this.
+    public func volumeKind(for path: String) -> VolumeKind { .local }
 }

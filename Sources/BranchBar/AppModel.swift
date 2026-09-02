@@ -63,6 +63,23 @@ final class AppModel: ObservableObject {
 
     private var snapshot = Snapshot()
     private var scanResult: ScanResult?
+
+    /// The repo folders that were real directories when the current snapshot arrived (codex round
+    /// 4, MINOR 3).
+    ///
+    /// `SnapshotPresenter` puts `repo.path` on every section whether or not the refresh could open
+    /// it, so a repo whose folder has been renamed or unmounted still drew a header menu offering
+    /// "Open in Cursor", "Show in Finder", and "Copy path" — three items that check the path at
+    /// click time, refuse, and log. A control that is always refused is worse than no control.
+    ///
+    /// The verdict is the shell's because the presenter is Core's and Core cannot touch the disk.
+    /// It is derived when a snapshot arrives rather than when a section renders: `present()` runs
+    /// on every progressive emit and on every collapse click, and one `open`/`close` per repo on
+    /// the main actor at that rate is the kind of thing ARCHITECTURE.md §8 is a list of.
+    private var verifiedSectionPaths: Set<String> = []
+    /// The paths `verifiedSectionPaths` was derived from, so a redraw whose repo list is unchanged
+    /// costs one set comparison and no syscall.
+    private var verifiedPathsDerivedFrom: Set<String>?
     /// Repos the cache has already seen. A repo absent from it is new, and a new repo starts
     /// collapsed unless it is the most recently active one (docs/UI-CONTRACT.md section 3).
     private var knownRepoIDs: Set<RepoID> = []
@@ -235,6 +252,7 @@ final class AppModel: ObservableObject {
             appVersion: fixture.appVersion,
             now: fixture.now)
 
+        verifySectionPaths(of: fixture.snapshot)
         Log.info("fixture: loaded state \(fixture.id) from \(fixturePath)")
     }
 
@@ -625,6 +643,7 @@ final class AppModel: ObservableObject {
     // MARK: - Presenting
 
     private func present() {
+        verifySectionPaths(of: snapshot)
         var visible = snapshot
         if !showsHiddenRepos {
             visible.repos = visible.repos.filter { !hiddenRepoIDs.contains($0.id) }
@@ -636,6 +655,23 @@ final class AppModel: ObservableObject {
             scanResult: scanResult,
             appVersion: appVersion,
             now: Date())
+    }
+
+    /// Re-derives `verifiedSectionPaths` when the repo list itself has changed, and does nothing
+    /// when it has not. `ActionPaths.isDirectory` is Core's `O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK`
+    /// open, which cannot follow a link out of the tree and cannot park in the kernel on a FIFO.
+    private func verifySectionPaths(of snapshot: Snapshot) {
+        let candidates = Set(snapshot.repos.map(\.path))
+        guard candidates != verifiedPathsDerivedFrom else { return }
+        verifiedPathsDerivedFrom = candidates
+        verifiedSectionPaths = candidates.filter(ActionPaths.isDirectory)
+    }
+
+    /// The folder a repo's header actions act on, or nil when this refresh could not open it as a
+    /// directory — in which case the header offers Hide alone (codex round 4, MINOR 3).
+    func verifiedPath(of section: RepoSectionVM) -> String? {
+        guard let path = section.path, verifiedSectionPaths.contains(path) else { return nil }
+        return path
     }
 
     /// What the popover is showing, in the words it is showing them in. A `MenuBarExtra` popover

@@ -6,6 +6,10 @@ import SwiftUI
 /// runs for it, so collapse is a cost control as well as a layout choice.
 struct RepoSectionView: View {
     let section: RepoSectionVM
+    /// The repo's own folder, but only when the refresh that produced this section could open it
+    /// as a directory (codex round 4, MINOR 3). Nil takes the folder items out of the header menu
+    /// rather than leaving three items that refuse when clicked.
+    let verifiedPath: String?
     let focus: RowFocus?
     /// True only while the footer's "Show hidden" is on: a hidden repo is normally filtered out
     /// before the presenter ever sees it.
@@ -78,7 +82,9 @@ struct RepoSectionView: View {
                     .foregroundStyle(.secondary)
                     .frame(width: Metrics.glyphColumn, alignment: .leading)
                     .accessibilityHidden(true)
-                Text(section.title)
+                // The repo's folder name, which the folder owns rather than this app (codex
+                // round 4, MINOR 2).
+                Text(RepositoryText.display(section.title))
                     .font(.headline)
                     .foregroundStyle(Color(nsColor: .labelColor))
                     .lineLimit(1)
@@ -99,7 +105,8 @@ struct RepoSectionView: View {
         .contextMenu { headerMenu }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            isHidden ? "\(section.title), \(Strings.hiddenRepoMarker)" : section.title)
+            RepositoryText.spoken(
+                isHidden ? "\(section.title), \(Strings.hiddenRepoMarker)" : section.title))
         .accessibilityValue(
             section.isCollapsed
                 ? Strings.expandSectionActionLabel
@@ -159,12 +166,13 @@ struct RepoSectionView: View {
         if isHidden { unhide(section.id) } else { hide(section.id) }
     }
 
-    /// The repo's own folder, straight off the view model (packet 4.3). It used to be read off the
-    /// first row's primary action, which is the folder *that row* opens — a linked worktree for a
-    /// branch checked out outside the repo — so a header menu could point somewhere the repo is
-    /// not. Still optional: a `RepoSectionVM` recorded before the field existed carries no path,
-    /// and the menu then offers Hide alone rather than a Finder item that would open nothing.
-    private var repoPath: String? { section.path }
+    /// The repo's own folder, from the view model (packet 4.3) by way of the shell's own check on
+    /// it (codex round 4, MINOR 3). It used to be read off the first row's primary action, which is
+    /// the folder *that row* opens — a linked worktree for a branch checked out outside the repo —
+    /// so a header menu could point somewhere the repo is not. Still optional, and now for two
+    /// reasons: a `RepoSectionVM` recorded before the field existed carries no path, and a path
+    /// this refresh could not open as a directory is not one the menu offers to open.
+    private var repoPath: String? { verifiedPath }
 
     @ViewBuilder private var headerBackground: some View {
         if focus == .section(section.id) {

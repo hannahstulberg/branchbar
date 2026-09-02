@@ -30,35 +30,59 @@ enum Actions {
 
     // MARK: - Opening a folder
 
-    /// PLAN.md §3's fallback chain: Cursor → VS Code → Terminal. Terminal is always present, which
-    /// is why the chain ends there and there is no fourth step.
+    /// PLAN.md §3's fallback chain, as codex round 4 BLOCKER 1 left it: Cursor → VS Code → Show in
+    /// Finder. Terminal used to be the third step, and it is not a step any more.
+    ///
+    /// Terminal was the one program in the chain that *executes* what it is handed: a `.command`
+    /// document is a script it runs. Every path in this chain came from a repository's
+    /// `.git/worktrees` records or from `cache.json`, so `/tmp/switch/payload.command` can be a
+    /// branch's worktree. `ActionPaths`'s click-time check closed the case where the path was
+    /// always a file; it cannot close the case where the path is a directory when it is checked
+    /// and a `.command` file a microsecond later, when `/usr/bin/open` resolves that same
+    /// pathname for itself. A check-then-reopen race is not fixable by checking harder, so the
+    /// step that could execute is gone. `NSWorkspace.activateFileViewerSelecting` *selects* a
+    /// document and never runs one, which makes the worst case of a swapped pathname a Finder
+    /// window on the wrong file.
+    ///
+    /// Terminal is still used for exactly one thing, `openTerminalForSignIn`, whose document is a
+    /// script this app wrote itself moments earlier into a 0700 directory of its own.
     ///
     /// Returns whether anything was launched, so the `BRANCHBAR_ACTION_CHECK` probe can assert the
     /// refusal a non-directory earns rather than infer it from the absence of a window.
+    ///
+    /// `editors` is a parameter because the last step of the chain is reached only on a Mac with
+    /// neither editor installed, and the probe has to be able to exercise it on a Mac with both.
     @discardableResult
-    static func openInAvailableEditor(path: String) -> Bool {
+    static func openInAvailableEditor(path: String, editors override: EditorAvailability? = nil) -> Bool {
+        let editors = override ?? Self.editors
         if editors.cursor {
             return openInCursor(path: path)
         } else if editors.vsCode {
             return openInVSCode(path: path)
         } else {
-            return openInTerminal(path: path)
+            return revealInFinder(path: path)
         }
     }
 
     /// What `openInAvailableEditor` will actually do, in the words §5a froze for it. The chain is
     /// resolved in Core, by the same member `SnapshotPresenter` puts on a branch row's primary
     /// action, so a repo-header menu offering the same thing cannot name it differently.
+    ///
+    /// codex round 4, BLOCKER 1: Core still spells the third step "Open in Terminal", because
+    /// `EditorAvailability` carries two flags and `Strings.openInAvailableEditorLabel` has nowhere
+    /// else to go when both are false. The shell maps that spelling onto the action it now
+    /// performs, so no label promises a Terminal window that never opens. Dropping the Terminal
+    /// case from `EditorAvailability`/`Strings`/`SnapshotPresenter` is a Core follow-up.
     static var openInAvailableEditorLabel: String {
-        Strings.openInAvailableEditorLabel(editors)
+        editors.cursor || editors.vsCode
+            ? Strings.openInAvailableEditorLabel(editors)
+            : Strings.revealInFinderActionLabel
     }
 
     @discardableResult
     static func openInCursor(path: String) -> Bool { open(application: "Cursor", path: path) }
     @discardableResult
     static func openInVSCode(path: String) -> Bool { open(application: "Visual Studio Code", path: path) }
-    @discardableResult
-    static func openInTerminal(path: String) -> Bool { open(application: "Terminal", path: path) }
 
     /// `open -a <App> <path>`, exactly as §3 froze it. `/usr/bin/open` is used rather than
     /// `NSWorkspace.open(_:withApplicationAt:…)` so the invocation in the log is the one a tester
@@ -66,11 +90,11 @@ enum Actions {
     ///
     /// codex round 3, BLOCKER 1: the path is checked here, at click time, and only a real
     /// directory is ever handed over. A row's payload is a worktree path a repository or
-    /// `cache.json` supplied, and the last step of the chain is Terminal, which *executes* a
-    /// `.command` document — so a payload of `/tmp/payload.command` used to be a click away from
-    /// running. The one `open -a Terminal` that is deliberately given a file is the sign-in
-    /// script, which this app wrote itself moments earlier into a 0700 directory of its own; it
-    /// calls `run` directly and never comes through here.
+    /// `cache.json` supplied, so a payload of `/tmp/payload.command` must never reach an
+    /// application that would run it. Since codex round 4 no application in this chain would —
+    /// the chain ends at Finder — and the check remains because an editor asked to open a FIFO or
+    /// a device is a hang or a nonsense window, and because a row that refuses to open a payload
+    /// while Finder still reveals it says the payload was fine.
     @discardableResult
     private static func open(application: String, path: String) -> Bool {
         guard ActionPaths.allows(path, action: "open -a \"\(application)\"") else { return false }
@@ -175,7 +199,7 @@ enum Actions {
     static func openTerminalForSignIn(command: String?) {
         guard let host = signInHostname(from: command) else {
             Log.info("action: sign-in refused, no valid hostname in the action payload")
-            openInTerminal(path: FileManager.default.homeDirectoryForCurrentUser.path)
+            openTerminal(document: nil)
             return
         }
 
@@ -184,19 +208,31 @@ enum Actions {
         pasteboard.setString(Strings.ghAuthLoginCommand(host: host), forType: .string)
 
         guard let script = writeSignInScript(host: host) else {
-            Log.info("action: sign-in script could not be written; opening Terminal at home instead")
-            openInTerminal(path: FileManager.default.homeDirectoryForCurrentUser.path)
+            Log.info(
+                "action: sign-in script could not be written; opening Terminal with the command "
+                    + "on the clipboard instead")
+            openTerminal(document: nil)
             return
         }
 
-        // The one path handed to Terminal that is deliberately a file rather than a folder, and
-        // the reason `open(application:path:)`'s directory check is on that member rather than on
-        // `run`: this `.command` was written by `writeSignInScript` moments ago, inside a 0700
-        // directory this app created under its own temporary folder, with fixed text
-        // (`SignInScript.render`) and a hostname that was validated twice. Nothing a repository or
-        // the cache owns can reach it.
-        Log.info("action: open -a Terminal \(script.path) (signs in to \(host))")
-        run("/usr/bin/open", ["-a", "Terminal", script.path])
+        Log.info("action: sign-in signs in to \(host) with \(script.path)")
+        openTerminal(document: script.path)
+    }
+
+    /// The only place in the shell that runs Terminal, and the only place its `open -a` argument
+    /// array is written — which is the merge check for codex round 4, BLOCKER 1.
+    ///
+    /// `document` is non-nil for exactly one caller: the `.command` file `writeSignInScript` just
+    /// wrote, inside a 0700 directory this app created under its own temporary folder, from fixed
+    /// text (`SignInScript.render`) and a hostname validated twice. Nothing a repository or the
+    /// cache owns can reach it. Every other caller passes nil, which opens Terminal on no document
+    /// at all: the command is on the clipboard, and a Terminal that runs nothing is the honest
+    /// answer for a sign-in whose script could not be written.
+    private static func openTerminal(document: String?) {
+        var arguments = ["-a", "Terminal"]
+        if let document { arguments.append(document) }
+        Log.info("action: open -a Terminal \(document ?? "(no document)")")
+        run("/usr/bin/open", arguments)
     }
 
     /// The hostname out of `gh auth login --hostname <host>`, and only when it really is one.

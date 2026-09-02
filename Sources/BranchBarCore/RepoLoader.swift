@@ -215,8 +215,25 @@ public struct RepoLoader: Sendable {
         // the killable helper, so a `FETCH_HEAD` that is a named pipe parked the refresh with
         // nothing above it able to end it. `statRegularFile` is the same `O_NOFOLLOW | O_NONBLOCK`
         // descriptor every bounded read opens, stopped at the `fstat`.
+        //
+        // codex round 4, BLOCKER 3: `O_NONBLOCK` makes the **open** return for a FIFO and does
+        // nothing at all for VFS pathname lookup, so both this stat and the reflog reads below
+        // block uninterruptibly when the repo lives on a network mount whose server has gone
+        // away — in the app's own process, where the scan helper's deadline cannot reach. A repo
+        // under `/Volumes` is therefore read through git's output alone unless its volume root
+        // answers `statfs` and answers with a local filesystem type. git runs in a child a
+        // deadline can kill; an `open()` in this process does not.
+        let directReadRefusal = Self.directFileReadRefusal(
+            paths: [path, commonDirectory], fileSystem: fileSystem)
+        if let directReadRefusal {
+            errors.append(RepoError(stage: .reflog, message: directReadRefusal))
+        }
+        let mayReadRepoFiles = directReadRefusal == nil
+
         let fetchHeadPath = (commonDirectory as NSString).appendingPathComponent("FETCH_HEAD")
-        let fetchHeadObservedAt = (try? fileSystem.statRegularFile(atPath: fetchHeadPath))??.modificationDate
+        let fetchHeadObservedAt = mayReadRepoFiles
+            ? (try? fileSystem.statRegularFile(atPath: fetchHeadPath))??.modificationDate
+            : nil
 
         // Stage 6 — one reflog file per upstream branch, isolated per branch. An absent file is
         // nil and not an error (a branch that was never pushed has no reflog); a file that exists
@@ -230,7 +247,7 @@ public struct RepoLoader: Sendable {
         let remoteShortNames = Set(remoteRefs.map(\.shortName))
         var observations: [String: ReflogObservation] = [:]
         var uncertainPushHistory: Set<String> = []
-        for row in branchRefs where row.refName.hasPrefix("refs/heads/") {
+        for row in branchRefs where mayReadRepoFiles && row.refName.hasPrefix("refs/heads/") {
             let remote: String
             let remoteBranch: String
             if let upstream = ForEachRefParser.upstream(from: row) {
@@ -421,11 +438,20 @@ public struct RepoLoader: Sendable {
             .map(\.branchName)
 
         if !unmatched.isEmpty {
-            for (head, prs) in await gh.pullRequests(slug: slug, unmatchedHeads: unmatched) {
-                // `--head <name>` filters on the head branch and not on its owner, so it answers
-                // for every owner of that head.
-                pr.coverage.recordAnyOwner(head: head)
-                pr.pullRequests.append(contentsOf: prs)
+            for (head, result) in await gh.pullRequests(slug: slug, unmatchedHeads: unmatched) {
+                pr.pullRequests.append(contentsOf: result.prs)
+                if result.isExhaustive {
+                    // `--head <name>` filters on the head branch and not on its owner, and this
+                    // page ended before its limit, so it answers for every owner of that head.
+                    pr.coverage.recordAnyOwner(head: head)
+                } else {
+                    // codex round 4, MAJOR 1: the page filled up, so the only owners it answers
+                    // for are the ones it named. Everybody else's (owner, head) pair renders
+                    // `notChecked` — "PR status not checked yet" — rather than "No PR", which is
+                    // the claim the old blanket coverage made on a page it had not seen the end
+                    // of.
+                    for entry in result.prs { pr.coverage.record(entry) }
+                }
             }
         }
 
@@ -437,6 +463,37 @@ public struct RepoLoader: Sendable {
         case .failure(let unavailable):
             errors.append(RepoError(stage: .github, message: "author PR list: \(Self.describe(unavailable))"))
         }
+    }
+
+    /// Why this repo's own files must not be opened, or nil when they may be (codex round 4,
+    /// BLOCKER 3).
+    ///
+    /// Only paths under `/Volumes` are asked about: everything else is the boot volume, which is
+    /// local by construction, and `statfs` on a path that is not a mount point costs a lookup this
+    /// loader has no reason to pay for on every repo in the home folder.
+    static func directFileReadRefusal(paths: [String], fileSystem: FileSystem) -> String? {
+        var seen: Set<String> = []
+        for path in paths {
+            guard let root = volumeRoot(of: path), seen.insert(root).inserted else { continue }
+            switch fileSystem.volumeKind(for: root) {
+            case .local:
+                continue
+            case .network(let type):
+                return "\(root) is a \(type) volume; reflog and FETCH_HEAD reads were skipped "
+                    + "because an open() against a network mount cannot be cancelled"
+            case .unreachable(let code):
+                return "\(root) did not answer statfs (errno \(code)); reflog and FETCH_HEAD "
+                    + "reads were skipped because an open() against it cannot be cancelled"
+            }
+        }
+        return nil
+    }
+
+    /// `/Volumes/<name>` for a path on a mounted volume, nil for anything else.
+    static func volumeRoot(of path: String) -> String? {
+        let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard components.count >= 2, components[0] == "Volumes" else { return nil }
+        return "/Volumes/" + components[1]
     }
 
     // MARK: - Failure paths

@@ -6,10 +6,17 @@ import Foundation
 /// codex round 3, BLOCKER 1. Every row action takes a path that came from a repository or from
 /// `cache.json`, and neither is trusted input: a crafted `.git/worktrees` record can report
 /// `/tmp/payload.command` as a branch's worktree, and a tampered cache can carry the same path
-/// straight into the row before any refresh has revalidated it. The editor chain's last step is
-/// `open -a Terminal <path>`, and Terminal *executes* a `.command` document — that behaviour is
-/// what the `gh` sign-in action deliberately relies on — so a row whose payload was a regular file
-/// used to be one click from running it.
+/// straight into the row before any refresh has revalidated it. The editor chain's last step used
+/// to be `open -a Terminal <path>`, and Terminal *executes* a `.command` document — that behaviour
+/// is what the `gh` sign-in action deliberately relies on — so a row whose payload was a regular
+/// file used to be one click from running it.
+///
+/// codex round 4, BLOCKER 1 removed that step: the chain now ends at Finder, which selects a
+/// document and never runs one, because this check answers about a *pathname* and `/usr/bin/open`
+/// resolves the same pathname again a moment later. What is left for this file to decide is
+/// smaller and still worth deciding — an editor asked to open a FIFO or a device is a hang or a
+/// nonsense window, and a path this app would refuse to open is not a path it reveals or hands to
+/// the clipboard either.
 ///
 /// The decision belongs to Core: `FileSystem.isDirectoryNoFollow` is the same check
 /// `SnapshotPresenter` uses to decide whether a row gets an action at all, and asking it here is

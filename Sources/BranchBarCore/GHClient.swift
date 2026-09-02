@@ -59,6 +59,15 @@ public actor GHClient {
         "CLICOLOR": "0",
     ]
 
+    /// The `--limit` the per-head fallback asks for, raised from five (codex round 4, MAJOR 1).
+    ///
+    /// Five was low enough that ordinary fork traffic filled the page: five newer PRs from other
+    /// owners on the same head name pushed the local owner's PR off it, the owner-aware match
+    /// correctly rejected the five strangers, and the branch rendered "No PR" beside an open one.
+    /// Twenty is not a proof either — nothing this side of paging is — which is why a result that
+    /// **equals** the limit is reported as non-exhaustive rather than believed.
+    public static let perHeadQueryLimit = 20
+
     /// The `--json` field list shared by all three `gh pr list` invocations.
     public static let jsonFields = "number,url,state,isDraft,reviewDecision,mergedAt,updatedAt,baseRefName,headRefName,headRefOid,headRepositoryOwner,mergeCommit"
 
@@ -229,10 +238,10 @@ public actor GHClient {
         return result
     }
 
-    /// Runs the frozen `gh pr list --state all --head <branch> --limit 5` invocation for one
-    /// branch that the recent-100 list did not match, with the same failure mapping; the per-repo
-    /// cap of 20 is enforced by the caller, and every branch past it renders `notChecked`, never
-    /// `none`.
+    /// Runs the frozen `gh pr list --state all --head <branch> --limit <perHeadQueryLimit>`
+    /// invocation for one branch that the recent-100 list did not match, with the same failure
+    /// mapping; the per-repo cap of 20 is enforced by the caller, and every branch past it renders
+    /// `notChecked`, never `none`.
     public func pullRequests(slug: GitHubSlug, head: String, bypass: Bool = false) async -> Result<[PRInfo], PRAvailability> {
         let key = "\(slug.ghRepoArgument)#\(head)"
         if !bypass, let cached = cachedPRs(headCache[key]) { return .success(cached) }
@@ -244,7 +253,7 @@ public actor GHClient {
                 "--repo", slug.ghRepoArgument,
                 "--state", "all",
                 "--head", head,
-                "--limit", "5",
+                "--limit", "\(Self.perHeadQueryLimit)",
                 "--json", Self.jsonFields,
             ]
         )
@@ -259,18 +268,41 @@ public actor GHClient {
     /// it actually queried. A head that was queried and found no PR maps to an empty array; a
     /// head past the cap is absent, which is the `none` versus `notChecked` distinction
     /// `RepoAssembler` renders (`unqueriedBranchIsNotCheckedNeverNone`).
-    public func pullRequests(slug: GitHubSlug, unmatchedHeads: [String], bypass: Bool = false) async -> [String: [PRInfo]] {
+    public func pullRequests(slug: GitHubSlug, unmatchedHeads: [String], bypass: Bool = false) async -> [String: PerHeadResult] {
         var seen: Set<String> = []
         let heads = unmatchedHeads.filter { seen.insert($0).inserted }.prefix(policy.perHeadFallbackCap)
 
-        var queried: [String: [PRInfo]] = [:]
+        var queried: [String: PerHeadResult] = [:]
         for head in heads {
             // A failed query is not an answer: the head stays absent rather than claiming `none`.
             if case .success(let prs) = await pullRequests(slug: slug, head: head, bypass: bypass) {
-                queried[head] = prs
+                // codex round 4, MAJOR 1: a page that came back **full** is not an absence proof.
+                // `--limit` is a cap, not a promise, and `gh` gives no "there is more" flag, so
+                // the count equalling the cap is the only signal there is — and it is the honest
+                // one to act on.
+                queried[head] = PerHeadResult(
+                    prs: prs, isExhaustive: prs.count < Self.perHeadQueryLimit)
             }
         }
         return queried
+    }
+
+    /// One head's answer, plus whether the answer is an answer about **every** owner of that head
+    /// (codex round 4, MAJOR 1).
+    ///
+    /// `gh pr list --head <name>` filters on the branch name and not on who owns it, so a result
+    /// that came back short covers every owner: nobody else has a PR with that head. A result that
+    /// filled the page covers only the owners it actually named — the rest may be on the page that
+    /// was never asked for — and the heads it did not name stay `notChecked`.
+    public struct PerHeadResult: Sendable, Hashable {
+        public var prs: [PRInfo]
+        /// False when the page came back full, which is not evidence of absence.
+        public var isExhaustive: Bool
+
+        public init(prs: [PRInfo], isExhaustive: Bool) {
+            self.prs = prs
+            self.isExhaustive = isExhaustive
+        }
     }
 
     /// Runs the frozen `gh pr list --state open --author @me --limit 100` invocation and returns

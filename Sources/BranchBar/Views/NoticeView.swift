@@ -20,7 +20,9 @@ struct NoticeView: View {
             .frame(width: Metrics.glyphColumn, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(notice.text)
+                // A notice joins Core's copy with the message a failure carried, and a git or
+                // `gh` failure quotes the repository back (codex round 4, MINOR 2).
+                Text(RepositoryText.display(notice.text))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

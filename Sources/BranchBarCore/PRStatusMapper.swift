@@ -13,18 +13,40 @@ import Foundation
 /// a PR whose head belongs to someone else.
 public enum PRStatusMapper {
 
-    /// Maps a PR to its pill state: merged `state` → `.merged`, closed and not merged →
-    /// `.closed`, open and `isDraft` → `.draft`, open with `reviewDecision` of
-    /// `CHANGES_REQUESTED` → `.changesRequested` and `APPROVED` → `.approved`, and any other open
-    /// PR (including `REVIEW_REQUIRED` and the empty string) → `.open`.
+    /// The three values `gh pr list --json state` can print, as a closed set (codex round 4,
+    /// MINOR 1).
+    ///
+    /// Case-insensitive because the mapper always was; a value outside the set is `nil`, which is
+    /// the whole point of naming the set.
+    public enum State: String, Hashable, Sendable, CaseIterable {
+        case open = "OPEN"
+        case merged = "MERGED"
+        case closed = "CLOSED"
+
+        public init?(apiValue: String) {
+            self.init(rawValue: apiValue.uppercased())
+        }
+    }
+
+    /// Maps a PR to its pill state: `MERGED` → `.merged`, `CLOSED` → `.closed`, `OPEN` and
+    /// `isDraft` → `.draft`, `OPEN` with `reviewDecision` of `CHANGES_REQUESTED` →
+    /// `.changesRequested` and `APPROVED` → `.approved`, and any other open PR (including
+    /// `REVIEW_REQUIRED` and the empty string) → `.open`.
+    ///
+    /// Anything that is not one of the three states is `.unavailable` (codex round 4, MINOR 1).
+    /// The default arm used to be the *open* arm, so a state GitHub adds later — and any
+    /// malformed cached or CLI JSON — rendered an "Open" pill and an open-PR link for a PR this
+    /// app can say nothing about. `.draft` and the two review pills are statements about an open
+    /// PR too, so an unknown state does not reach them either.
     public static func status(for pr: PRInfo) -> PRStatus {
-        switch pr.state.uppercased() {
-        case "MERGED":
+        guard let state = State(apiValue: pr.state) else { return .unavailable }
+        switch state {
+        case .merged:
             // `mergedBeatsDraftFlag`: the branch shipped, whatever the draft flag still says.
             return .merged
-        case "CLOSED":
+        case .closed:
             return .closed
-        default:
+        case .open:
             if pr.isDraft { return .draft }
             switch pr.reviewDecision.uppercased() {
             case "APPROVED":
@@ -78,7 +100,7 @@ public enum PRStatusMapper {
         guard candidates.count > 1 else { return candidates.first }
 
         func rank(_ pr: PRInfo) -> (Int, Date) {
-            let isOpen = pr.state.uppercased() == "OPEN" ? 1 : 0
+            let isOpen = State(apiValue: pr.state) == .open ? 1 : 0
             return (isOpen, pr.updatedAt)
         }
 

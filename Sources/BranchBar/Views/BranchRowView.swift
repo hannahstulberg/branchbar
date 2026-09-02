@@ -20,7 +20,10 @@ struct BranchRowView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(row.title)
+                        // Repository-owned, so escaped and isolated on its way in (codex
+                        // round 4, MINOR 2): a branch name may carry bidi controls, and this one
+                        // shares its line with the PR pill.
+                        Text(RepositoryText.display(row.title))
                             .font(.body)
                             .foregroundStyle(Color(nsColor: .labelColor))
                             .lineLimit(1)
@@ -30,7 +33,7 @@ struct BranchRowView: View {
                     }
 
                     if let marker = row.worktreeMarker, !marker.isEmpty {
-                        Text(marker)
+                        Text(RepositoryText.display(marker))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -39,7 +42,7 @@ struct BranchRowView: View {
                     if !row.pushLabel.isEmpty {
                         HStack(spacing: 4) {
                             DecorativeIcon(name: pushGlyph, font: .caption2)
-                            Text(row.pushLabel)
+                            Text(RepositoryText.display(row.pushLabel))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -49,7 +52,9 @@ struct BranchRowView: View {
                     if let ahead = row.aheadLabel, !ahead.isEmpty {
                         HStack(spacing: 4) {
                             if showsAheadGlyph { DecorativeIcon(name: Glyph.ahead, font: .caption2) }
-                            Text(ahead)
+                            // Core copy, but `Strings.ahead(_:remote:)` interpolates the
+                            // remote's own name into it.
+                            Text(RepositoryText.display(ahead))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -65,10 +70,10 @@ struct BranchRowView: View {
         }
         .buttonStyle(.plain)
         .background(focusBackground)
-        .help(row.pushTooltip)
+        .help(RepositoryText.spoken(row.pushTooltip))
         .contextMenu { menu }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(row.accessibilityLabel)
+        .accessibilityLabel(RepositoryText.spoken(row.accessibilityLabel))
         .accessibilityAddTraits(.isButton)
         // VoiceOver reaches a context menu through the rotor, so the item the mouse just gained is
         // an accessibility action too (§5a: a control the mouse has, the keyboard has). The

@@ -430,11 +430,43 @@ let coordinator = RefreshCoordinator(
     // killable process the discovery walk had.
     scanRunner: scanRunner)
 
-let snapshot = await coordinator.refresh(
+// One CLI run is one whole answer, so every repo the refresh actually walked is treated as
+// expanded and its PRs are fetched.
+//
+// codex round 4, MAJOR 4: the set used to be the discovery pass's own repo list, and a discovery
+// walk cut short by `scanDeadline` comes back truncated — which is precisely the case
+// `RefreshCoordinator` answers by rescanning inside the refresh. The repos that second walk found
+// were in the table with no `gh` lookup behind them, so a run whose whole premise is that
+// everything was checked printed "PR status not checked yet" for them. The scan the refresh
+// actually used is read back from the cache the way `AppModel.reloadScanFromCache` reads it, and
+// the refresh is repeated for the repos it added.
+//
+// Two extra passes at most. A pass can only add repos when the walk before it was still truncated,
+// and a CLI run that has not finished walking in three attempts still owes the user the table it
+// has; each extra pass is skipped entirely on every run the deadline did not fire on, which is
+// every ordinary run.
+var expandedRepoIDs = Set(scan.repos.map(\.id))
+var snapshot = await coordinator.refresh(
     force: true,
-    expandedRepoIDs: Set(scan.repos.map(\.id)),
+    expandedRepoIDs: expandedRepoIDs,
     tools: tools,
     onProgress: { _ in })
+var finalScan = ((try? cache.load()) ?? nil)?.scan ?? scan
+var extraPasses = 0
+while !Set(finalScan.repos.map(\.id)).isSubset(of: expandedRepoIDs), extraPasses < 2 {
+    extraPasses += 1
+    let added = finalScan.repos.map(\.id).filter { !expandedRepoIDs.contains($0) }.count
+    expandedRepoIDs.formUnion(finalScan.repos.map(\.id))
+    FileHandle.standardError.write(Data(
+        ("branchbar-cli: the scan this refresh used lists \(added) repo(s) the discovery pass had "
+            + "not found; fetching their PRs (pass \(extraPasses) of 2)\n").utf8))
+    snapshot = await coordinator.refresh(
+        force: true,
+        expandedRepoIDs: expandedRepoIDs,
+        tools: tools,
+        onProgress: { _ in })
+    finalScan = ((try? cache.load()) ?? nil)?.scan ?? finalScan
+}
 
 if options.json {
     let encoder = JSONEncoder()
@@ -449,11 +481,6 @@ if options.json {
     exit(0)
 }
 
-// The refresh rescans when the discovery pass was cut short by `scanDeadline`, so the scan the
-// table describes is read back the way `AppModel.reloadScanFromCache` reads it: whatever the
-// refresh actually used. Identical to `scan` on any run the deadline did not fire on.
-let finalScan = ((try? cache.load()) ?? nil)?.scan ?? scan
-
 let presenter = SnapshotPresenter()
 let viewModel = presenter.present(
     snapshot,
@@ -463,25 +490,99 @@ let viewModel = presenter.present(
     appVersion: "cli",
     now: Date())
 
+// codex round 4, MAJOR 4: the table prints the three kinds of record a repo section holds, not
+// one of them.
+//
+// A branch row is what it always was. A **detached worktree** — a folder git has checked out at a
+// commit with no branch on it — is a row the presenter titles with the folder's own name, so a
+// worktree map keyed by branch name never matched it and every one of them printed `—` in the
+// WORKTREE column, which is the one column that had the answer. And an **open-elsewhere PR** — a
+// PR open on GitHub with no branch for it on this Mac — was not printed at all, so the headless
+// fallback and the Gate 3 hand-check saw less than the popover does.
+//
+// The URL column is what the third kind needs and the other two do not have: a PR row's link is
+// the only thing it can be acted on with. It is the last column and empty elsewhere, so a branch
+// row renders exactly the six cells it did before.
 var rows: [[String]] = []
+var branchRowCount = 0
+var worktreeRowCount = 0
+var prRowCount = 0
 for (section, repo) in zip(viewModel.sections, snapshot.repos) {
+    // A branch row's folder is the worktree that has *that branch* checked out, which is the only
+    // one of the three record kinds a branch-keyed lookup can answer.
     let worktreeByBranch = Dictionary(
-        repo.branches.map { ($0.name, $0.worktreePath) }, uniquingKeysWith: { first, _ in first })
+        repo.branches.compactMap { branch in branch.worktreePath.map { (branch.name, $0) } },
+        uniquingKeysWith: { first, _ in first })
+    // The worktrees git has checked out at a commit with no branch on them, keyed by the folder
+    // name `SnapshotPresenter.noBranchWorktreeRows` titles their rows with.
+    let detachedWorktrees = repo.worktrees.filter { !$0.isBare && $0.branch == nil }
+    let detachedByFolder = Dictionary(
+        detachedWorktrees.map { (URL(fileURLWithPath: $0.path).lastPathComponent, $0) },
+        uniquingKeysWith: { first, _ in first })
+
     for row in section.active + section.merged + section.closedUnmerged {
+        // A row the presenter made for a detached worktree is printed below as a worktree record
+        // instead, so the two kinds do not appear twice under two different titles. It is
+        // recognised the way the presenter builds it: titled by its folder, and with an empty
+        // push cell because there is no branch here to have pushed anything (a branch row always
+        // carries a push sentence, even when that sentence is that nothing is known).
+        if row.pushLabel.isEmpty, detachedByFolder[row.title] != nil { continue }
+        branchRowCount += 1
         rows.append([
             repo.name,
             row.title,
-            worktreeByBranch[row.title].flatMap { $0 } ?? "—",
+            worktreeByBranch[row.title] ?? "—",
             row.prPill?.text ?? "—",
             row.pushLabel,
             row.aheadLabel ?? "—",
+            "",
+        ])
+    }
+
+    // The second kind. Looked up by worktree rather than by branch, which is the whole finding:
+    // a detached worktree has no branch name to be found by, so the branch-keyed lookup printed
+    // `—` in the WORKTREE column — the one column that had its answer. The primary worktree is
+    // included, and it is the case the popover cannot show at all: a repo whose own root is on a
+    // detached HEAD has a checkout that belongs to no branch row anywhere.
+    //
+    // The BRANCH cell carries `Strings.detachedWorktree`, the same sentence the popover puts under
+    // such a row, so this file still composes no copy of its own.
+    for worktree in detachedWorktrees {
+        worktreeRowCount += 1
+        rows.append([
+            repo.name,
+            Strings.detachedWorktree(shortSHA: String(worktree.headSHA.prefix(7))),
+            worktree.path,
+            "—",
+            "",
+            "—",
+            "",
+        ])
+    }
+
+    // The third: a PR open on GitHub with no branch for it on this Mac. No worktree, no push
+    // observation and nothing to be ahead of — `—` says so — and the URL is the only thing it can
+    // be acted on with.
+    for row in section.openElsewhere {
+        prRowCount += 1
+        rows.append([
+            repo.name,
+            row.title,
+            "—",
+            row.prPill.text,
+            "",
+            "—",
+            row.url,
         ])
     }
 }
 
-print(table(["REPO", "BRANCH", "WORKTREE", "PR", "PUSH", "AHEAD"], rows))
+print(table(["REPO", "BRANCH", "WORKTREE", "PR", "PUSH", "AHEAD", "URL"], rows))
 print("")
-say("\(viewModel.footer.updatedLabel) · \(snapshot.repos.count) repo(s) · \(rows.count) branch row(s)")
+say(
+    "\(viewModel.footer.updatedLabel) · \(snapshot.repos.count) repo(s) · "
+        + "\(branchRowCount) branch row(s) · \(worktreeRowCount) detached worktree row(s) · "
+        + "\(prRowCount) open-elsewhere PR row(s)")
 if let notice = viewModel.footer.toolNotice {
     say(notice.text)
 }

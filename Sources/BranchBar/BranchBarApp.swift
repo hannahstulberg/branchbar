@@ -80,6 +80,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// code under it. Two actions are deliberately absent: "Add folder…" runs a modal `NSOpenPanel`
     /// that only a person can answer, and the login-item toggle has its own mode below.
     private func runActionCheck(on path: String) {
+        // Where this run's own log entries begin, so the Terminal grep below reads what this probe
+        // wrote rather than what some earlier launch did (codex round 4, BLOCKER 1).
+        let logOffset = Self.logByteCount()
         Log.info("action check: starting on \(path)")
 
         Actions.openInAvailableEditor(path: path)
@@ -117,6 +120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Actions.openPR(url: "https://github.com/o/n/pull/1", host: nil)
         Actions.openFilesAndFoldersSettings()
 
+        checkNoTerminalDocumentIsARepositoryPath(since: logOffset)
+
         Log.info("action check: done")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.terminate(nil) }
     }
@@ -125,8 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// A row's path comes from `git worktree list --porcelain` or from `cache.json`, and neither
     /// is trusted: a crafted worktree record, or a tampered cache, can name `/tmp/payload.command`
-    /// as a branch's folder. On a Mac with neither Cursor nor VS Code the editor chain ends at
-    /// `open -a Terminal <path>`, and Terminal *runs* a `.command` document. Three targets are
+    /// as a branch's folder. On a Mac with neither Cursor nor VS Code the editor chain used to end
+    /// at `open -a Terminal <path>`, and Terminal *runs* a `.command` document; since codex round
+    /// 4 it ends at Finder, which is checked below. Three targets are
     /// built here — a regular `.command` file, a FIFO, and a symlink pointing at a real directory
     /// — and every row action must refuse all three while still accepting the real folder the
     /// probe was given. The clipboard is read back afterwards because a refusal that still
@@ -173,15 +179,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "\(target.0): refusedEditor=\(!editor) refusedFinder=\(!finder) "
                     + "refusedCopy=\(!copied)")
         }
-        // The editor chain ends at Terminal only on a Mac with neither Cursor nor VS Code, and this
-        // one may have both, so the step that would have executed the file is asked directly.
-        let terminal = Actions.openInTerminal(path: command.path)
+        // codex round 4, BLOCKER 1: the last step of the chain is reached only on a Mac with
+        // neither Cursor nor VS Code, and this one may have both, so the no-editor chain is asked
+        // directly. It must refuse the `.command` file like every other step, and on a real folder
+        // it must end at Finder — which selects a document and never executes one — rather than at
+        // the Terminal step that used to be there.
+        let noEditors = EditorAvailability(cursor: false, vsCode: false)
+        let chainOnPayload = Actions.openInAvailableEditor(path: command.path, editors: noEditors)
+        let chainOnFolder = Actions.openInAvailableEditor(path: directory.path, editors: noEditors)
         let clipboard = NSPasteboard.general.string(forType: .string) ?? "—"
-        Log.info("action check: open -a Terminal on a .command file refused=\(!terminal)")
+        Log.info(
+            "action check: with no editor installed the chain refuses a .command file="
+                + "\(!chainOnPayload) and ends at Show in Finder for a real folder=\(chainOnFolder) "
+                + "· label=\(Actions.openInAvailableEditorLabel)")
         Log.info("action check: non-directory targets " + verdicts.joined(separator: " · "))
         Log.info(
             "action check: clipboard survived the refusals=\(clipboard == sentinel) · "
                 + "a real folder still passes=\(ActionPaths.isDirectory(directory.path))")
+    }
+
+    /// codex round 4, BLOCKER 1, read back off the log rather than asserted in the code that
+    /// wrote it: no path this run handed to Terminal belongs to a repository or to the cache.
+    ///
+    /// Every Terminal invocation the shell makes goes through one member and logs one line before
+    /// running `/usr/bin/open`, so the log of this probe — which exercises the whole row-action
+    /// surface, hostile payloads included — is the record of what Terminal was asked to open. The
+    /// only document allowed on that list is a sign-in script under
+    /// `Actions.signInParentDirectory`, which this app wrote itself; anything else with a path in
+    /// it is the finding.
+    private func checkNoTerminalDocumentIsARepositoryPath(since offset: Int) {
+        let lines = Self.logLines(since: offset)
+        let signInParent = Actions.signInParentDirectory.path
+        let terminalLines = lines.filter { $0.contains("open -a Terminal") }
+        let offenders = terminalLines.filter { line in
+            guard let document = line.components(separatedBy: "open -a Terminal ").last else {
+                return false
+            }
+            // A Terminal opened on no document names no path at all; anything else has to be the
+            // app's own sign-in directory.
+            guard document.contains("/") else { return false }
+            return !document.hasPrefix(signInParent)
+        }
+        Log.info(
+            "action check: Terminal document grep over \(lines.count) log line(s) — "
+                + "terminalCalls=\(terminalLines.count) "
+                + "allUnderSignInDirectory=\(offenders.isEmpty) "
+                + "signInDirectory=\(signInParent)"
+                + (offenders.isEmpty ? "" : " offenders=\(offenders.joined(separator: " | "))"))
+    }
+
+    /// How many bytes the log holds right now, so a later read can start there.
+    private static func logByteCount() -> Int {
+        let size = (try? FileManager.default.attributesOfItem(atPath: Log.fileURL.path))?[.size]
+        return (size as? NSNumber)?.intValue ?? 0
+    }
+
+    /// The log entries written since `offset`. Read whole and sliced rather than `seek`-ed,
+    /// because `Log.capIfNeeded` can rewrite the file underneath a byte offset; a cap during the
+    /// probe leaves this reading fewer lines, never the wrong ones.
+    private static func logLines(since offset: Int) -> [String] {
+        guard let data = FileManager.default.contents(atPath: Log.fileURL.path) else { return [] }
+        let tail = data.dropFirst(max(0, offset))
+        return String(decoding: tail, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
     }
 
     /// The `BRANCHBAR_ACTION_CHECK` value that runs the cancel probe rather than a folder's
@@ -309,6 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 + "isOurs=\(live.loadedProgramIsOurs) toggleReadsOn=\(LaunchAtLogin.isEnabled)")
         checkLaunchctlPrintParsing()
         checkLaunchAgentPlistSchema()
+        checkSymlinkedInstallPathsAreRefused()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
     }
 
@@ -381,6 +443,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 + LaunchAtLogin.installCandidateBundlePaths.joined(separator: " , ")
                 + " · running=\(LaunchAtLogin.runningInstallBundlePath ?? "neither")"
                 + " · agentWouldName=\(LaunchAtLogin.installedExecutablePath)")
+    }
+
+    /// codex round 4, MAJOR 5: the shape that used to register a login item pointing at Downloads.
+    ///
+    /// `~/Applications/BranchBar.app -> ~/Downloads/BranchBar.app` resolved to a real bundle, so
+    /// the old check — resolve both sides, compare — called it installed, and the LaunchAgent then
+    /// stored the *unresolved* link. Retargeting the link changed what ran at login. The four
+    /// cases below are built out of real files under the app's temporary folder rather than
+    /// asserted about literals, because the question is what `lstat` says about a path on this
+    /// Mac, and each is the same walk `installPathVerdict` runs on the running bundle.
+    private func checkSymlinkedInstallPathsAreRefused() {
+        let manager = FileManager.default
+        let created = manager.temporaryDirectory
+            .appendingPathComponent("BranchBar-launch-check-\(UUID().uuidString)", isDirectory: true)
+        guard (try? manager.createDirectory(at: created, withIntermediateDirectories: true)) != nil
+        else {
+            Log.info("launch at login check: could not build the symlink cases")
+            return
+        }
+        defer { try? manager.removeItem(at: created) }
+
+        // `realpath`, not `resolvingSymlinksInPath`: `/var` is a link to `/private/var`, and
+        // Foundation's resolver deliberately puts the `/private` prefix back, so every case below
+        // would read "/var is a symbolic link" and none of them would say anything about the
+        // difference this is here to show.
+        let root = Self.resolved(created)
+        let real = root.appendingPathComponent("Applications", isDirectory: true)
+        let bundle = real.appendingPathComponent("BranchBar.app", isDirectory: true)
+        let executable = bundle.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        guard (try? manager.createDirectory(at: executable, withIntermediateDirectories: true)) != nil
+        else {
+            Log.info("launch at login check: could not build the symlink cases under \(root.path)")
+            return
+        }
+
+        // A link where the *parent folder* belongs: every path under it names a folder someone
+        // else can retarget, which is the case a check on the final component misses.
+        let linkedParent = root.appendingPathComponent("LinkedApplications", isDirectory: true)
+        let madeParentLink = (try? manager.createSymbolicLink(at: linkedParent, withDestinationURL: real)) != nil
+        // And the link the finding actually names: the bundle itself.
+        let linkedBundle = real.appendingPathComponent("Linked.app", isDirectory: true)
+        let madeBundleLink = (try? manager.createSymbolicLink(at: linkedBundle, withDestinationURL: bundle)) != nil
+
+        func verdict(_ url: URL) -> String {
+            LaunchAtLogin.symlinkComponentReason(url.path) ?? "accepted"
+        }
+
+        Log.info(
+            "launch at login check: symlink walk realBundle=\(verdict(bundle)) "
+                + "realExecutablePath=\(verdict(executable)) "
+                + "viaSymlinkedParent="
+                + "\(madeParentLink ? verdict(linkedParent.appendingPathComponent("BranchBar.app")) : "not built") "
+                + "symlinkedBundle=\(madeBundleLink ? verdict(linkedBundle) : "not built") "
+                + "missing=\(verdict(real.appendingPathComponent("Absent.app")))")
+        Log.info(
+            "launch at login check: this bundle's verdict="
+                + "\(LaunchAtLogin.describe(LaunchAtLogin.installPathVerdict)) "
+                + "installedBundleValid=\(LaunchAtLogin.isInstalledBundleValid)")
+    }
+
+    /// A path with every symlink actually gone, which `NSString.resolvingSymlinksInPath` will not
+    /// give: it re-strips a leading `/private`, so `/var/folders/…` resolves back to itself.
+    private static func resolved(_ url: URL) -> URL {
+        guard let resolved = realpath(url.path, nil) else { return url }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
     }
 
     /// Lays the popover's own view out in an ordinary window and logs `rendered state <id>` once

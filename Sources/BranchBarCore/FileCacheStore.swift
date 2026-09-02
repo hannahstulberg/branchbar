@@ -49,15 +49,18 @@ public struct FileCacheStore: CacheStore {
     /// app initialization with nothing able to end it. A cache file that is not a plain regular
     /// file is simply not a cache.
     public func load() throws -> CacheFile? {
-        // Size before contents (codex MAJOR 2): the load is synchronous and on the launch path,
-        // so an unbounded file is an unbounded launch, and the decode is the expensive half.
-        let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
-        if let size = (attributes?[.size] as? NSNumber)?.intValue, size > Self.maximumFileBytes {
-            return nil
-        }
+        // One descriptor, no path preflight in front of it (codex round 4, BLOCKER 3). The bound
+        // used to come from `FileManager.attributesOfItem`, which is a second pathname resolution
+        // that follows symlinks and carries no `O_NONBLOCK` — on the synchronous launch path, so a
+        // `cache.json` symlinked at a stalled automount parked app initialization where nothing
+        // above it could end it. `readBoundedRegularFile` already refuses a symlink, refuses
+        // anything that is not `S_IFREG`, and never blocks in its `open`; asking it for one byte
+        // more than the cap makes the *read* enforce the size, so a file past the bound is still
+        // "no cache" and the expensive half — the decode — is still skipped.
         guard let data = try? RealFileSystem().readBoundedRegularFile(
-            path: fileURL.path, maxBytes: Self.maximumFileBytes, tail: false)
+            path: fileURL.path, maxBytes: Self.maximumFileBytes + 1, tail: false)
         else { return nil }
+        guard data.count <= Self.maximumFileBytes else { return nil }
         guard !data.isEmpty else { return nil }
         guard let cache = try? Self.makeDecoder().decode(CacheFile.self, from: data) else { return nil }
         guard cache.schemaVersion == CacheFile.currentSchemaVersion else { return nil }
