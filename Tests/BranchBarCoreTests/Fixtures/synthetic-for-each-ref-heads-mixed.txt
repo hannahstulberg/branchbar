@@ -1,0 +1,8 @@
+refs/heads/main77777777777777777777777777777777777777771788310842origin/mainorigin*
+refs/heads/ahead-two88888888888888888888888888888888888888881788300000origin/ahead-twooriginahead 2 
+refs/heads/behind-three99999999999999999999999999999999999999991788200000origin/behind-threeoriginbehind 3 
+refs/heads/divergedaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1788100000origin/divergedoriginahead 1, behind 4 
+refs/heads/upstream-gonebbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1788000000origin/upstream-goneorigingone 
+refs/heads/no-upstreamcccccccccccccccccccccccccccccccccccccccc1787900000 
+refs/heads/feature/nested namedddddddddddddddddddddddddddddddddddddddd1787800000origin/feature/nested nameorigin 
+refs/tags/maineeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee1787700000 

@@ -1,0 +1,8 @@
+github.com
+  X Failed to log in to github.com account tester (keyring)
+  - Active account: true
+  - The token in keyring is invalid.
+  - To re-authenticate, run: gh auth login -h github.com
+  - To forget about this account, run: gh auth logout -h github.com -u tester
+
+HTTP 401: Bad credentials (https://api.github.com/graphql)

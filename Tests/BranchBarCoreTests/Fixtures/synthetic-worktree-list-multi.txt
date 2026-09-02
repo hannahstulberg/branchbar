@@ -1,0 +1,29 @@
+worktree /Users/tester/monorepo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /Users/tester/monorepo/.claude/worktrees/spike
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/worktree-spike
+
+worktree /Users/tester/monorepo/.claude/worktrees/detached-review
+HEAD 3333333333333333333333333333333333333333
+detached
+
+worktree /Users/tester/Developer/repos with spaces/design tokens
+HEAD 4444444444444444444444444444444444444444
+branch refs/heads/feature/spacing scale
+
+worktree /Users/tester/monorepo/.claude/worktrees/held
+HEAD 5555555555555555555555555555555555555555
+branch refs/heads/worktree-held
+locked waiting on the NYT tester to confirm Gate 0b
+
+worktree /Users/tester/monorepo/.claude/worktrees/gone
+HEAD 6666666666666666666666666666666666666666
+detached
+prunable gitdir file points to non-existent location
+
+worktree /Users/tester/mirrors/archive.git
+bare
+

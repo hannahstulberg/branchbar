@@ -1,0 +1,4 @@
+worktree /Users/hannahstulberg/hannah-personal-agent
+HEAD bf8508404ad5abe161d9dba8b61385c7425726af
+branch refs/heads/main
+
