@@ -130,12 +130,30 @@ struct BranchRowView: View {
         row.pushTooltip.hasPrefix(Strings.pushedTooltip) ? Glyph.pushObserved : Glyph.pushUnknown
     }
 
+    /// The ahead arrow belongs to exactly one sentence, `Strings.ahead(_:remote:)`, so the row
+    /// tests for that sentence rather than excluding the three it must not appear on.
+    ///
+    /// The exclusion list was `Strings.inSync`, `Strings.noUpstream`, and `Strings.upstreamMissing`
+    /// — the origin-only spellings. A branch tracking a fork reads "In sync with last-known fork",
+    /// which none of those prefixes match, so an in-sync row drew an ahead arrow (codex round 2,
+    /// MAJOR 5 reached the copy but not the glyph). Matching the positive case holds for every
+    /// remote and needs no remote name in the view.
     private var showsAheadGlyph: Bool {
-        guard let ahead = row.aheadLabel else { return false }
-        return !ahead.hasPrefix(Strings.inSync)
-            && !ahead.hasPrefix(Strings.noUpstream)
-            && !ahead.hasPrefix(Strings.upstreamMissing)
+        guard let ahead = row.aheadLabel,
+              let infix = ahead.range(of: Self.aheadInfix)
+        else { return false }
+        // "2 ahead of last-known fork" qualifies; "No local commits ahead of last-known origin"
+        // carries the same words with a sentence in front of them and does not.
+        let count = ahead[ahead.startIndex..<infix.lowerBound]
+        return !count.isEmpty && count.allSatisfy(\.isNumber)
     }
+
+    /// " ahead of last-known " — asked of `Strings.ahead(_:remote:)` rather than typed here, so the
+    /// row still composes no copy of its own and the wording stays owned by Core.
+    private static let aheadInfix: String = {
+        let count = 0
+        return String(Strings.ahead(count, remote: "").dropFirst("\(count)".count))
+    }()
 
     private var minimumHeight: CGFloat {
         row.pushLabel.isEmpty ? Metrics.branchRowSingleLineHeight : Metrics.branchRowHeight

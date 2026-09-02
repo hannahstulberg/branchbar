@@ -56,7 +56,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         if let path = environment["BRANCHBAR_ACTION_CHECK"], !path.isEmpty {
-            runActionCheck(on: path)
+            // F10: the footer's Cancel is the first caller `AppModel.cancelRefresh()` has ever
+            // had, and a popover button cannot be clicked from a script without an Accessibility
+            // grant (0.2 spike item 4). This value runs the click instead of a folder's actions.
+            if path == Self.cancelRefreshCheck {
+                runCancelRefreshCheck(model)
+            } else {
+                runActionCheck(on: path)
+            }
             return
         }
 
@@ -110,6 +117,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Log.info("action check: done")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.terminate(nil) }
+    }
+
+    /// The `BRANCHBAR_ACTION_CHECK` value that runs the cancel probe rather than a folder's
+    /// actions. A literal no path can be: an action check is given an absolute path.
+    static let cancelRefreshCheck = "cancel-refresh"
+
+    /// Starts a real refresh, presses the footer's Cancel as soon as one is actually in flight,
+    /// and waits for the model to publish the cancellation before quitting.
+    ///
+    /// The evidence is the `refresh: cancelled …` line `AppModel.performRefresh` writes: it names
+    /// the reason, how many rows were marked stale, Core's own outcome, the "Updated" label that
+    /// was kept, and that the PR warm-up and any queued rescan were suppressed. A probe that
+    /// quit on a timer could print none of that.
+    private func runCancelRefreshCheck(_ model: AppModel) {
+        Log.info("action check: cancel-refresh starting a refresh")
+        model.refresh(reason: .manual)
+        pressCancelOnceRunning(model, attemptsLeft: 120)
+    }
+
+    /// Polls rather than sleeping a fixed interval: the preflight runs `git --version` before the
+    /// coordinator sees anything, and cancelling in that window cancels nothing.
+    private func pressCancelOnceRunning(_ model: AppModel, attemptsLeft: Int) {
+        guard attemptsLeft > 0 else {
+            Log.info("action check: cancel-refresh saw no repo finish before the wait ran out; quitting")
+            NSApp.terminate(nil)
+            return
+        }
+        // Progress as well as a running refresh: cancelling in the first 250 ms proves the button
+        // is wired but nothing about what a cancel costs. Waiting for `.running(completed > 0)`
+        // means the run being stopped has already reloaded repos, so the log line reports both the
+        // rows it kept and the ones it marked stale. A cached list on screen is not evidence —
+        // those rows belong to the previous run.
+        guard model.isRefreshRunning, Self.completedRepos(model.refreshState) > 0 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self.pressCancelOnceRunning(model, attemptsLeft: attemptsLeft - 1)
+            }
+            return
+        }
+        Log.info("action check: cancel-refresh pressing Cancel")
+        model.cancelRefresh()
+        waitForCancelledRefresh(model, attemptsLeft: 240)
+    }
+
+    /// How many repos the running refresh has reloaded, or 0 when it is not running.
+    private static func completedRepos(_ state: RefreshState) -> Int {
+        if case .running(let completed, _) = state { return completed }
+        return 0
+    }
+
+    private func waitForCancelledRefresh(_ model: AppModel, attemptsLeft: Int) {
+        guard attemptsLeft > 0 else {
+            Log.info("action check: cancel-refresh never returned; quitting")
+            NSApp.terminate(nil)
+            return
+        }
+        guard !model.isRefreshRunning else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self.waitForCancelledRefresh(model, attemptsLeft: attemptsLeft - 1)
+            }
+            return
+        }
+        // One more turn so the `refresh: cancelled …` line is on disk before the process goes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            Log.info("action check: cancel-refresh done")
+            NSApp.terminate(nil)
+        }
     }
 
     /// codex MINOR 1: two sign-in clicks in a row used to share one directory and one

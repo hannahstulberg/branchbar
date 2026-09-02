@@ -312,11 +312,18 @@ guard let scan = ((try? discoveryCache.load()) ?? nil)?.scan else {
 try? FileManager.default.removeItem(atPath: discoveryDirectory)
 try? cache.save(CacheFile(scan: scan))
 
+// `runner` and `gitPath` switch the per-remote owner lookup on: without them `RepoLoader` skips
+// `config --get remote.<name>.url` and every branch is attributed to the origin repository's owner,
+// so a branch tracking a fork is matched against a head that only shares its name (codex round 2,
+// MAJOR 4). The discovery loader above stays without them on purpose — it is wired to a runner that
+// launches nothing, and its only job is the walk.
 let loader = RepoLoader(
     git: GitClient(runner: runner, gitPath: gitPath, timeout: policy.gitTimeout),
     gh: ghPath.map { GHClient(runner: runner, ghPath: $0, policy: policy) },
     reflog: ReflogFileReader(fileSystem: fileSystem),
-    policy: policy)
+    policy: policy,
+    runner: runner,
+    gitPath: gitPath)
 
 let coordinator = RefreshCoordinator(
     scanner: scanner,

@@ -74,6 +74,12 @@ final class AppModel: ObservableObject {
     /// True between handing the coordinator a refresh and getting its snapshot back. What makes a
     /// user action taken during a refresh detectable (REVIEW CR-03).
     private var isRefreshInFlight = false
+
+    /// Whether there is a refresh for `cancelRefresh()` to stop. Read by the `cancel-refresh`
+    /// harness so it cancels a refresh that has actually reached the coordinator rather than one
+    /// still inside the `git --version` preflight. The footer reads `refreshState` instead — that
+    /// is what `.running` is for, and it is what publishes.
+    var isRefreshRunning: Bool { isRefreshInFlight }
     /// A rescan that arrived during a refresh and was therefore coalesced into it. Run once, after.
     private var pendingRescan = false
 
@@ -354,6 +360,7 @@ final class AppModel: ObservableObject {
             "refresh: finished reason=\(reason.rawValue) repos=\(final.repos.count) "
                 + "rows=\(final.repos.reduce(0) { $0 + $1.branches.count }) "
                 + "outcome=\(outcome?.rawValue ?? "—")")
+        logRemoteOwners(final)
         logRendered()
 
         runFollowUp()
@@ -642,6 +649,36 @@ final class AppModel: ObservableObject {
         Log.info("rendered footer: \(vm.footer.updatedLabel) · \(vm.footer.version)")
     }
 
+    /// One line per repo naming the remotes this refresh's branches actually track and the owner
+    /// each one resolved to — the observable end of `RepoLoader`'s per-remote owner lookup, which
+    /// the app only gets because both loaders are now built with `runner:` and `gitPath:`.
+    ///
+    /// The shell reports what the snapshot proves rather than re-running the lookup: `Repo` does
+    /// not carry the loader's `remoteOwners` map and `GitClient.command` is internal to Core, so
+    /// the app cannot reissue `config --get remote.<name>.url` in the frozen shape. `origin` is
+    /// therefore named by the repo's own slug, any other remote by the owner of the PR head its
+    /// branches matched, and `?` means a tracked remote whose owner is not visible from here.
+    /// F11 owes Core a `Repo.remoteOwners` (or `Branch.upstreamOwnerLogin`) so the second column
+    /// is the lookup's own answer instead of an inference from the match it produced.
+    private func logRemoteOwners(_ snapshot: Snapshot) {
+        for repo in snapshot.repos {
+            var owners: [String: Set<String>] = [:]
+            for branch in repo.branches {
+                guard let remote = branch.push.remoteName else { continue }
+                var resolved = owners[remote] ?? []
+                if remote == "origin", let owner = repo.githubSlug?.owner { resolved.insert(owner) }
+                if let owner = branch.pr?.headRepositoryOwnerLogin { resolved.insert(owner) }
+                owners[remote] = resolved
+            }
+            guard !owners.isEmpty else { continue }
+            let pairs = owners.keys.sorted().map { remote -> String in
+                let names = (owners[remote] ?? []).sorted()
+                return "\(remote)=\(names.isEmpty ? "?" : names.joined(separator: "/"))"
+            }
+            Log.info("remote owners: \(repo.name) \(pairs.joined(separator: " "))")
+        }
+    }
+
     /// docs/UI-CONTRACT.md section 3: one repo is expanded; with more than one only the most
     /// recently active is, and the rest start collapsed. The user's own choice outranks the default
     /// on every later launch, which is why the default is applied only to a repo the cache has
@@ -769,18 +806,27 @@ final class AppModel: ObservableObject {
         let ghClients = GHClientPerRefresh {
             ghPath.map { GHClient(runner: runner, ghPath: $0, policy: policy) }
         }
+        // `runner` and `gitPath` are what turn the per-remote owner lookup on: without them
+        // `RepoLoader` never issues `config --get remote.<name>.url` and every branch falls back to
+        // the origin repository's owner, so a branch tracking a fork matches a PR whose head merely
+        // shares its name (codex round 2, MAJOR 4). The app built both loaders without them, which
+        // left the fix landed in Core but unreachable from the menu bar.
         let makeLoader: @Sendable (DiscoveredRepo) -> RepoLoader = { _ in
             RepoLoader(
                 git: GitClient(runner: runner, gitPath: gitPath, timeout: policy.gitTimeout),
                 gh: ghClients.current(),
                 reflog: ReflogFileReader(fileSystem: fileSystem),
-                policy: policy)
+                policy: policy,
+                runner: runner,
+                gitPath: gitPath)
         }
         let loader = RepoLoader(
             git: GitClient(runner: runner, gitPath: gitPath, timeout: policy.gitTimeout),
             gh: nil,
             reflog: ReflogFileReader(fileSystem: fileSystem),
-            policy: policy)
+            policy: policy,
+            runner: runner,
+            gitPath: gitPath)
         // codex round 2 BLOCKER 1: discovery runs in the `branchbar-cli` helper whenever that
         // helper is beside this executable, because a *process* can be killed at the deadline and a
         // task blocked inside `open()`/`readdir()` cannot — which is how first launch could stay on

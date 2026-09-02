@@ -68,6 +68,7 @@ struct RootView: View {
                 isRefreshing: isRefreshing,
                 perform: model.perform,
                 refresh: { model.refresh(reason: $0) },
+                cancel: model.cancelRefresh,
                 addFolder: { if let url = Actions.pickFolder() { model.addFolder(url) } },
                 removeRoot: model.removeRoot,
                 hiddenCount: model.hiddenRepoIDs.count,

@@ -96,6 +96,7 @@ enum Glyph {
     static let pushObserved = "arrow.up.circle"
     static let pushUnknown = "questionmark.circle"
     static let ahead = "arrow.up"
+    static let cancelRefresh = "xmark.circle"
 }
 
 /// A glyph that is never spoken and never focused.

@@ -8,6 +8,8 @@ struct FooterView: View {
     let isRefreshing: Bool
     let perform: (UserFacingFailure.Action) -> Void
     let refresh: (RefreshReason) -> Void
+    /// Stops the refresh that is running. Only reachable while one is.
+    let cancel: () -> Void
     let addFolder: () -> Void
     let removeRoot: (String) -> Void
 
@@ -57,6 +59,20 @@ struct FooterView: View {
                     Label(Strings.refreshPRsNowActionLabel, systemImage: Glyph.refresh).fixedSize()
                 }
                 .disabled(isRefreshing)
+                // A full refresh walks the home folder and then talks to GitHub, so it can run for
+                // the better part of a minute with every other control disabled behind it.
+                // `AppModel.cancelRefresh()` has existed since F8 and nothing called it; this is
+                // the caller. It appears only while a refresh is running, because a Cancel button
+                // with nothing to cancel invites a click that does nothing.
+                if isRefreshing {
+                    Button(role: .cancel) {
+                        cancel()
+                    } label: {
+                        Label(FooterStrings.cancelRefreshActionLabel, systemImage: Glyph.cancelRefresh)
+                            .fixedSize()
+                    }
+                    .accessibilityLabel(FooterStrings.cancelRefreshAccessibilityLabel)
+                }
                 Spacer(minLength: 0)
             }
             .font(.caption)
@@ -167,4 +183,20 @@ struct FooterView: View {
         }
         .padding(.horizontal, Metrics.horizontalPadding)
     }
+}
+
+/// Copy the footer needs that `Strings` does not hold yet.
+///
+/// TODO(F11): move to Strings. Core owns every user-facing sentence in this app, and the
+/// `everyFixtureStringIsRenderedOrOnAFrozenExemptionList` test is what keeps that list from
+/// growing quietly — which is also why a shell packet cannot add a member to it. These two live
+/// here until Core takes them.
+enum FooterStrings {
+    /// Literal: `Cancel`
+    static let cancelRefreshActionLabel = "Cancel"
+
+    /// What VoiceOver reads. The visible label is one word because the button sits beside Refresh
+    /// and Refresh PRs now at 340 pt; spoken on its own, one word does not say what is cancelled.
+    /// Literal: `Cancel the running refresh`
+    static let cancelRefreshAccessibilityLabel = "Cancel the running refresh"
 }
