@@ -1,12 +1,12 @@
 # SESSION HANDOFF — BranchBar
 
-**Last updated:** 2026-09-02 05:10 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+**Last updated:** 2026-09-02 06:00 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
 
 ## Current state
 
-- **Phase / packet:** 4.1 (6154beb) and 4.2 (4d736be) accepted and pushed; 5.1 icon (dd3c67c). In flight: 3.3 (bounded, prompt-safe scan). Queued: 4.3 (ShellStrings → Strings, prURL, repo path), 5.1a first zip v0.9.0, 5.2 docs.
-- **Suite:** 248 passing at 4d736be (3.3 adds more)
-- **In-flight agents:** 3.3 (packets/3.3.md).
+- **Phase / packet:** 3.3 accepted (320c086). `v0.9.0` tagged at 4c2cacc; CI release job builds and attaches the zip. In flight: 4.3 (ShellStrings → Strings, prURL, repo path). Queued: 5.2 docs, Gate 5 (NYT tester on v0.9.0 by 09-12), 5.1b v1.0.0.
+- **Suite:** 256 passing
+- **In-flight agents:** 4.3 (packets/4.3.md).
 - **Blocked on:** nothing. Hannah's own packet 0.0 items are open: ask Andrew Lisy whether JobRunner opened on NYT-managed Macs; name the NYT tester and their macOS version.
 
 ## Next steps (in order)
