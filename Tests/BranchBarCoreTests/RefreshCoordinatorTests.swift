@@ -126,7 +126,10 @@ import Testing
 private struct RepoStub: Sendable {
     var path: String
     var slug: String
-    var revParse: String
+    /// codex round 2, MAJOR 3: `rev-parse` is one invocation per path now, so there is one
+    /// fixture per path too.
+    var revParseCommonDir: String
+    var revParseTopLevel: String
     var heads: String
     var remotes: String
     var config: String
@@ -144,7 +147,8 @@ private struct RepoStub: Sendable {
     static let branchbar = RepoStub(
         path: home + "/branchbar",
         slug: "github.com/hannahstulberg/branchbar",
-        revParse: "recorded-branchbar-rev-parse.txt",
+        revParseCommonDir: "recorded-branchbar-rev-parse-common-dir.txt",
+        revParseTopLevel: "recorded-branchbar-rev-parse-toplevel.txt",
         heads: "recorded-branchbar-for-each-ref-heads.txt",
         remotes: "recorded-branchbar-for-each-ref-remotes.txt",
         config: "recorded-branchbar-config-remote-origin-url.txt",
@@ -155,7 +159,8 @@ private struct RepoStub: Sendable {
     static let personalAgent = RepoStub(
         path: home + "/hannah-personal-agent",
         slug: "github.com/hannahstulberg/hannah-personal-agent",
-        revParse: "recorded-hannah-personal-agent-rev-parse.txt",
+        revParseCommonDir: "recorded-hannah-personal-agent-rev-parse-common-dir.txt",
+        revParseTopLevel: "recorded-hannah-personal-agent-rev-parse-toplevel.txt",
         heads: "recorded-hannah-personal-agent-for-each-ref-heads.txt",
         remotes: "recorded-hannah-personal-agent-for-each-ref-remotes.txt",
         config: "recorded-hannah-personal-agent-config-remote-origin-url.txt",
@@ -166,7 +171,8 @@ private struct RepoStub: Sendable {
     static let charlie = RepoStub(
         path: home + "/code/charlie",
         slug: "github.com/hannahstulberg/charlie",
-        revParse: "synthetic-refresh-charlie-rev-parse.txt",
+        revParseCommonDir: "synthetic-refresh-charlie-rev-parse-common-dir.txt",
+        revParseTopLevel: "synthetic-refresh-charlie-rev-parse-toplevel.txt",
         heads: "synthetic-refresh-charlie-for-each-ref-heads.txt",
         remotes: "synthetic-refresh-charlie-for-each-ref-remotes.txt",
         config: "synthetic-refresh-charlie-config-remote-origin-url.txt",
@@ -180,12 +186,16 @@ private struct RepoStub: Sendable {
 /// builds. Taken from `GitClient`'s own format constants rather than retyped, so a format drift is
 /// a compile error and not a silently unstubbed command.
 private enum Stage: CaseIterable, Sendable {
-    case revParse, config, heads, remotes, worktrees
+    // codex round 2, MAJOR 3 split `rev-parse` into one invocation per path: a folder named
+    // `project\narchive` used to shift the two fields of the combined answer.
+    case revParseCommonDir, revParseTopLevel, config, heads, remotes, worktrees
 
     func arguments(_ path: String) -> [String] {
         switch self {
-        case .revParse:
-            return ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"]
+        case .revParseCommonDir:
+            return ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+        case .revParseTopLevel:
+            return ["-C", path, "rev-parse", "--path-format=absolute", "--show-toplevel"]
         case .config:
             return ["-C", path, "config", "--get", "remote.origin.url"]
         case .heads:
@@ -200,7 +210,8 @@ private enum Stage: CaseIterable, Sendable {
 
     func fixture(_ repo: RepoStub) -> String {
         switch self {
-        case .revParse: return repo.revParse
+        case .revParseCommonDir: return repo.revParseCommonDir
+        case .revParseTopLevel: return repo.revParseTopLevel
         case .config: return repo.config
         case .heads: return repo.heads
         case .remotes: return repo.remotes
@@ -471,7 +482,10 @@ struct RefreshCoordinatorCoalescingTests {
 
         #expect(a == b)
         for repo in RepoStub.all {
-            let revParses = harness.gitCalls(for: repo).filter { $0.arguments.contains("rev-parse") }
+            // One identity **pair** per repo since codex round 2 MAJOR 3 split `rev-parse` into
+            // one invocation per path; counting the common-dir half counts the refreshes.
+            let revParses = harness.gitCalls(for: repo)
+                .filter { $0.arguments.contains("--git-common-dir") }
             #expect(revParses.count == 1, "\(repo.name) was walked \(revParses.count) times, not once")
         }
     }
@@ -1301,5 +1315,90 @@ struct RefreshCoordinatorCacheTrustTests {
         // And the refresh still persisted its own work.
         #expect(after.lastSnapshot?.repos.count == RepoStub.all.count)
         #expect(after.scan?.repos.count == RepoStub.all.count)
+    }
+}
+
+// MARK: - Packet F6 — codex round 2, MAJOR 9 (coordinator half)
+
+/// "Cancel does not preserve truthful refresh state." A cancelled refresh returned the last
+/// progressive emit, which carries the **new** `refreshedAt`, so `AppModel` marked the operation
+/// idle and "updated" over rows that had never been reloaded — and the presenter only shows its
+/// stale-row warning while a refresh is running, so nothing on screen said so.
+///
+/// A cancelled refresh now says it was cancelled, keeps the timestamp of the refresh that really
+/// finished, and leaves every row it did not reach marked stale.
+@Suite("A cancelled refresh reports itself as cancelled and claims nothing new", .serialized)
+struct RefreshCoordinatorCancelOutcomeTests {
+
+    private static let previousRefreshedAt = Date(timeIntervalSince1970: 1_788_399_000)
+
+    @Test("cancelledRefreshKeepsThePreviousRefreshedAt")
+    func cancelledRefreshKeepsThePreviousRefreshedAt() async throws {
+        let previous = previousSnapshot(
+            [
+                (RepoStub.branchbar, Date(timeIntervalSince1970: 1_788_317_855)),
+                (RepoStub.personalAgent, Date(timeIntervalSince1970: 1_788_310_842)),
+                (RepoStub.charlie, Date(timeIntervalSince1970: 1_788_000_000)),
+            ],
+            refreshedAt: Self.previousRefreshedAt)
+        let cached = CacheFile(
+            scan: scanResult(RepoStub.all, scannedAt: Self.previousRefreshedAt),
+            lastSnapshot: previous)
+        let harness = makeHarness(
+            policy: RefreshPolicy(debounce: 0, overallDeadline: 30, maxConcurrentRepos: 4, perHeadFallbackCap: 0),
+            cacheFile: cached,
+            delays: Dictionary(uniqueKeysWithValues: RepoStub.all.map { ($0.path, 5.0) }))
+
+        let refresh = Task {
+            await harness.coordinator.refresh(
+                force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+        }
+        await waitUntil { harness.runner.callCount > 0 }
+        await harness.coordinator.cancel()
+        let snapshot = await refresh.value
+
+        #expect(await harness.coordinator.lastOutcome == .cancelled,
+                "a cancelled refresh must be distinguishable from one that completed")
+        #expect(
+            snapshot.refreshedAt == Self.previousRefreshedAt,
+            "the cancelled refresh claimed \(String(describing: snapshot.refreshedAt)) as its update time")
+        #expect(snapshot.repos.allSatisfy { $0.isStale },
+                "rows nothing reloaded were presented as current")
+        #expect(harness.cache.saveCount == 0)
+    }
+
+    /// The complement, so the cancelled outcome cannot quietly become the answer for every
+    /// refresh: one that runs to the end reports `completed` and stamps its own time.
+    @Test("aCompletedRefreshReportsCompletedAndItsOwnRefreshedAt")
+    func completedRefreshReportsCompleted() async throws {
+        let now = Date(timeIntervalSince1970: 1_788_400_000)
+        let harness = makeHarness(
+            policy: RefreshPolicy(debounce: 0, overallDeadline: 30, perHeadFallbackCap: 0),
+            cacheFile: CacheFile(scan: scanResult(RepoStub.all, scannedAt: Self.previousRefreshedAt)),
+            now: now)
+
+        let snapshot = await harness.coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+
+        #expect(await harness.coordinator.lastOutcome == .completed)
+        #expect(snapshot.refreshedAt == now)
+        #expect(snapshot.repos.allSatisfy { !$0.isStale })
+    }
+
+    /// A deadline is not a cancellation: it persists what it has and says which of the two
+    /// happened, because the shell suppresses its follow-ups after a cancel and not after a
+    /// deadline.
+    @Test("aRefreshCutShortByTheDeadlineReportsDeadlineNotCancelled")
+    func deadlineOutcomeIsItsOwn() async throws {
+        let harness = makeHarness(
+            policy: RefreshPolicy(debounce: 0, overallDeadline: 0.3, maxConcurrentRepos: 1, perHeadFallbackCap: 0),
+            cacheFile: CacheFile(scan: scanResult(RepoStub.all, scannedAt: Self.previousRefreshedAt)),
+            delays: Dictionary(uniqueKeysWithValues: RepoStub.all.map { ($0.path, 3.0) }))
+
+        _ = await harness.coordinator.refresh(
+            force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
+
+        #expect(await harness.coordinator.lastOutcome == .deadline)
+        #expect(harness.cache.saveCount == 1, "a deadline persists what it has")
     }
 }

@@ -32,7 +32,11 @@ struct GitClientTests {
         static let branchRefs = ["-C", repo, "for-each-ref", headsFormat, "--", "refs/heads"]
         static let remoteRefs = ["-C", repo, "for-each-ref", remotesFormat, "--", "refs/remotes/"]
         static let worktrees = ["-C", repo, "worktree", "list", "--porcelain", "-z"]
-        static let identity = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"]
+        // codex round 2, MAJOR 3: two invocations, not one. `rev-parse` separates its two paths
+        // with a newline, and a directory may legally contain one, so a single response cannot be
+        // split back into the two paths it came from.
+        static let commonDir = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+        static let topLevel = ["-C", repo, "rev-parse", "--path-format=absolute", "--show-toplevel"]
         static let remoteOriginURL = ["-C", repo, "config", "--get", "remote.origin.url"]
 
         static func reflogShow(_ ref: String) -> [String] {
@@ -71,17 +75,25 @@ struct GitClientTests {
     @Test("identityRunsTheFrozenRevParseInvocation")
     func identityRunsTheFrozenRevParseInvocation() async throws {
         let runner = RecordedCommandRunner()
-        runner.stubGit(Argv.identity, stdout: Fixture.text("recorded-branchbar-rev-parse.txt"))
+        runner.stubGit(Argv.commonDir, stdout: Fixture.text("recorded-branchbar-rev-parse-common-dir.txt"))
+        runner.stubGit(Argv.topLevel, stdout: Fixture.text("recorded-branchbar-rev-parse-toplevel.txt"))
 
         let identity = try await Self.client(runner).identity(at: Self.repo)
         #expect(identity.commonDirectory == "/Users/hannahstulberg/branchbar/.git")
         #expect(identity.topLevel == "/Users/hannahstulberg/branchbar")
 
-        let call = try #require(runner.calls.first)
-        Self.expectFrozenShape(call, arguments: Argv.identity)
-        #expect(call.arguments.contains("--path-format=absolute"),
-                "without it git prints a relative common dir and the reflog path breaks")
-        #expect(runner.callCount == 1, "one invocation returns both paths")
+        let calls = runner.calls
+        Self.expectFrozenShape(try #require(calls.first), arguments: Argv.commonDir)
+        Self.expectFrozenShape(try #require(calls.dropFirst().first), arguments: Argv.topLevel)
+        for call in calls {
+            #expect(call.arguments.contains("--path-format=absolute"),
+                    "without it git prints a relative common dir and the reflog path breaks")
+        }
+        // codex round 2, MAJOR 3. This used to read "one invocation returns both paths", which is
+        // exactly the defect: the two paths came back newline-separated, and a folder named
+        // `project\narchive` shifted the fields, so dedupe keyed on the wrong id and later
+        // commands ran with a fragment as their working directory.
+        #expect(runner.callCount == 2, "one invocation per path, so a newline cannot shift them")
     }
 
     // MARK: config
@@ -278,7 +290,8 @@ struct GitClientTests {
         let runner = RecordedCommandRunner()
         let client = Self.client(runner, gitPath: "/opt/homebrew/bin/git")
 
-        runner.stubGit(Argv.identity, stdout: Fixture.text("recorded-branchbar-rev-parse.txt"))
+        runner.stubGit(Argv.commonDir, stdout: Fixture.text("recorded-branchbar-rev-parse-common-dir.txt"))
+        runner.stubGit(Argv.topLevel, stdout: Fixture.text("recorded-branchbar-rev-parse-toplevel.txt"))
         runner.stubGit(Argv.remoteOriginURL, stdout: Fixture.text("recorded-branchbar-config-remote-origin-url.txt"))
         runner.stubGit(Argv.branchRefs, stdout: Fixture.text("recorded-branchbar-for-each-ref-heads.txt"))
         runner.stubGit(Argv.remoteRefs, stdout: Fixture.text("recorded-branchbar-for-each-ref-remotes.txt"))
@@ -293,8 +306,9 @@ struct GitClientTests {
         _ = try await client.worktrees(at: Self.repo)
         _ = try await client.reflogShow(at: Self.repo, ref: "refs/remotes/origin/main")
 
-        #expect(runner.callCount == 6, "six frozen invocations, no extras")
-        #expect(runner.calls(matchingExecutable: "git").count == 6, "GitClient runs git and nothing else")
+        // Seven since codex round 2 MAJOR 3 split `rev-parse` into one invocation per path.
+        #expect(runner.callCount == 7, "seven frozen invocations, no extras")
+        #expect(runner.calls(matchingExecutable: "git").count == 7, "GitClient runs git and nothing else")
 
         for call in runner.calls {
             #expect(call.executable == "/opt/homebrew/bin/git", "the resolved path is used, never bare `git`")
@@ -337,5 +351,71 @@ struct GitClientTests {
         // Six, not five, since codex MAJOR 12 added `-z` to the frozen argv.
         #expect(call.arguments.count == 6, "the path is one element, spaces and all")
         #expect(call.workingDirectory == spaced)
+    }
+}
+
+// MARK: - Packet F6 — codex round 2, MAJOR 3
+
+/// "Repository paths containing newlines still corrupt identity and actions." `rev-parse` prints
+/// its two paths newline-separated, and a directory name may legally contain a newline, so the
+/// response cannot be split back into the two paths that produced it. Worktree output was moved to
+/// NUL framing in the first round (MAJOR 12); repo identity was not.
+@Suite("A newline inside a repo path stays inside it")
+struct GitClientNewlinePathTests {
+
+    private static let path = "/Users/tester/project\narchive"
+
+    @Test("repoPathWithNewlineKeepsItsIdentity")
+    func repoPathWithNewlineKeepsItsIdentity() async throws {
+        let path = Self.path
+        let runner = RecordedCommandRunner()
+        runner.stubGit(
+            ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stdout: path + "/.git\n")
+        runner.stubGit(
+            ["-C", path, "rev-parse", "--path-format=absolute", "--show-toplevel"],
+            stdout: path + "\n")
+
+        let identity = try await GitClient(runner: runner, gitPath: "/usr/bin/git").identity(at: Self.path)
+
+        #expect(identity.commonDirectory == Self.path + "/.git")
+        #expect(identity.topLevel == Self.path)
+        // The reflog path is built from the common directory, so a shifted field sends the reader
+        // somewhere else entirely.
+        #expect(ReflogFileReader.reflogPath(
+            commonDirectory: identity.commonDirectory, remote: "origin", branch: "main")
+                == Self.path + "/.git/logs/refs/remotes/origin/main")
+    }
+
+    /// Exactly one trailing record newline goes, and only from the end: a path that really ends
+    /// in a newline keeps the rest of it, and a response without one is still read.
+    @Test("exactlyOneTrailingNewlineIsStripped")
+    func exactlyOneTrailingNewlineIsStripped() async throws {
+        let runner = RecordedCommandRunner()
+        runner.stubGit(
+            ["-C", "/r", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stdout: "/tmp/trailing\n\n")
+        runner.stubGit(
+            ["-C", "/r", "rev-parse", "--path-format=absolute", "--show-toplevel"],
+            stdout: "/tmp/no-newline")
+
+        let identity = try await GitClient(runner: runner, gitPath: "/usr/bin/git").identity(at: "/r")
+        #expect(identity.commonDirectory == "/tmp/trailing\n")
+        #expect(identity.topLevel == "/tmp/no-newline")
+    }
+
+    /// An empty answer is still a failure, so a git that prints nothing cannot become a repo whose
+    /// common directory is the empty string.
+    @Test("anEmptyRevParseAnswerStillThrows")
+    func emptyRevParseAnswerThrows() async throws {
+        let runner = RecordedCommandRunner()
+        runner.stubGit(
+            ["-C", "/r", "rev-parse", "--path-format=absolute", "--git-common-dir"], stdout: "\n")
+        runner.stubGit(
+            ["-C", "/r", "rev-parse", "--path-format=absolute", "--show-toplevel"], stdout: "/r\n")
+
+        await #expect(throws: CommandError.self) {
+            _ = try await GitClient(runner: runner, gitPath: "/usr/bin/git").identity(at: "/r")
+        }
     }
 }

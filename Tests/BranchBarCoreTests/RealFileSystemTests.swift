@@ -201,3 +201,135 @@ struct RealFileSystemTests {
                        as: UTF8.self) == "one line\n")
     }
 }
+
+// MARK: - Packet F6 — codex round 2, BLOCKER 2 (special files) and MINOR 3 (unknown entry type)
+
+/// codex BLOCKER 2: "Hostile repository files can create new uninterruptible hangs."
+///
+/// `FileHandle(forReadingFrom:)` is `open(O_RDONLY)` with symlinks followed and no type check, so
+/// a `.git` file, a reflog, or a cache file that is really a symlink to a FIFO blocks the caller
+/// inside the kernel until a writer appears — which, for an attacker-planted FIFO, is never. That
+/// is the same unkillable state BLOCKER 1 is about, reached through a file rather than a
+/// directory. Every bounded read now goes through one primitive that opens with
+/// `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, requires `S_IFREG` from `fstat`, and `pread`s a bounded
+/// window.
+@Suite("Bounded reads open only regular files, and never through a symlink")
+struct RealFileSystemBoundedReadTests {
+
+    /// A named pipe with no writer: the whole point is that this call **returns**, and returns an
+    /// error rather than a lie. Without `O_NONBLOCK` the open blocks; without the `fstat` the read
+    /// blocks.
+    @Test("fifoIsRejectedWithoutBlocking")
+    func fifoIsRejectedWithoutBlocking() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let fifo = temp.file("pipe").path
+        #expect(mkfifo(fifo, 0o600) == 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+
+        let fileSystem = RealFileSystem()
+        let started = Date()
+        #expect(throws: FileReadError.notARegularFile(path: fifo)) {
+            _ = try fileSystem.readBoundedRegularFile(path: fifo, maxBytes: 4096, tail: false)
+        }
+        #expect(throws: FileReadError.notARegularFile(path: fifo)) {
+            _ = try fileSystem.readBoundedRegularFile(path: fifo, maxBytes: 4096, tail: true)
+        }
+        #expect(Date().timeIntervalSince(started) < 5, "the open blocked on the FIFO")
+
+        // The two seam entry points the scanner and the reflog reader actually call.
+        #expect(throws: (any Error).self) { _ = try fileSystem.readFile(atPath: fifo, maximumBytes: 4096) }
+        #expect(throws: (any Error).self) { _ = try fileSystem.readFileTail(atPath: fifo, maximumBytes: 4096) }
+    }
+
+    /// A directory is not a regular file either, and `open(O_RDONLY)` on one succeeds — the read
+    /// is what fails, with an errno nobody was checking.
+    @Test("aDirectoryIsNotABoundedRegularFile")
+    func directoryIsNotARegularFile() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        #expect(throws: FileReadError.notARegularFile(path: temp.url.path)) {
+            _ = try RealFileSystem().readBoundedRegularFile(
+                path: temp.url.path, maxBytes: 4096, tail: false)
+        }
+    }
+
+    /// `O_NOFOLLOW`. A `.git` that is a symlink is the review's own example, and the target is
+    /// never opened even when it is an ordinary file: the walk was told to stay inside the tree.
+    @Test("boundedReadRefusesToFollowASymlink")
+    func boundedReadRefusesToFollowASymlink() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let target = temp.file("real.txt")
+        try Data("gitdir: /elsewhere\n".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: temp.file("link"), withDestinationURL: target)
+
+        #expect(throws: (any Error).self) {
+            _ = try RealFileSystem().readBoundedRegularFile(
+                path: temp.file("link").path, maxBytes: 4096, tail: false)
+        }
+        // The target itself still reads, so the rule is "no symlinks", not "no files".
+        #expect(try RealFileSystem().readBoundedRegularFile(
+            path: target.path, maxBytes: 4096, tail: false) == Data("gitdir: /elsewhere\n".utf8))
+    }
+
+    /// The bound survives the rewrite: a head read stops at the cap, a tail read starts at
+    /// `size - cap`, and a file under the cap comes back whole either way.
+    @Test("boundedRegularFileReadsHeadAndTailWithinTheCap")
+    func boundedReadsHeadAndTail() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let fileSystem = RealFileSystem()
+
+        let file = temp.file("big")
+        var bytes = Data(repeating: 0x41, count: 300_000)
+        bytes.replaceSubrange(0..<4, with: Data("HEAD".utf8))
+        bytes.replaceSubrange((bytes.count - 4)..<bytes.count, with: Data("TAIL".utf8))
+        try bytes.write(to: file)
+
+        let head = try fileSystem.readBoundedRegularFile(path: file.path, maxBytes: 1024, tail: false)
+        #expect(head.count == 1024)
+        #expect(String(decoding: head.prefix(4), as: UTF8.self) == "HEAD")
+
+        let tail = try fileSystem.readBoundedRegularFile(path: file.path, maxBytes: 1024, tail: true)
+        #expect(tail.count == 1024)
+        #expect(String(decoding: tail.suffix(4), as: UTF8.self) == "TAIL")
+
+        let short = temp.file("short")
+        try Data("one line\n".utf8).write(to: short)
+        #expect(try fileSystem.readBoundedRegularFile(path: short.path, maxBytes: 4096, tail: false)
+                == Data("one line\n".utf8))
+        #expect(try fileSystem.readBoundedRegularFile(path: short.path, maxBytes: 4096, tail: true)
+                == Data("one line\n".utf8))
+
+        // A missing file is an error, not an empty read: the reflog fallback depends on it.
+        #expect(throws: (any Error).self) {
+            _ = try fileSystem.readBoundedRegularFile(path: temp.file("nope").path, maxBytes: 16, tail: false)
+        }
+    }
+
+    /// codex MINOR 3: a failed resource-value lookup used to become `false/false`, so a directory
+    /// on a degraded or unusual filesystem was silently walked past as if it were a file. An entry
+    /// whose type is unknown is unknown, and the caller reports the **parent** as not scanned —
+    /// which is the row the user can act on.
+    @Test("anEntryWhoseTypeIsUnknownMakesTheDirectoryUnreadable")
+    func unknownEntryTypeMakesTheDirectoryUnreadable() throws {
+        #expect(throws: FileReadError.entryTypeUnknown(path: "/x/y")) {
+            _ = try RealFileSystem.entryFlags(
+                isDirectory: nil, isSymbolicLink: nil, path: "/x/y")
+        }
+        #expect(throws: FileReadError.entryTypeUnknown(path: "/x/y")) {
+            _ = try RealFileSystem.entryFlags(
+                isDirectory: nil, isSymbolicLink: false, path: "/x/y")
+        }
+
+        // A known link needs no directory answer: the target is never touched, so `isDirectory`
+        // being absent is not a failure there.
+        let link = try RealFileSystem.entryFlags(isDirectory: nil, isSymbolicLink: true, path: "/x/y")
+        #expect(link.isSymbolicLink)
+        #expect(!link.isDirectory)
+
+        let directory = try RealFileSystem.entryFlags(isDirectory: true, isSymbolicLink: false, path: "/x/y")
+        #expect(directory.isDirectory)
+        #expect(!directory.isSymbolicLink)
+    }
+}

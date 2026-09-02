@@ -344,3 +344,55 @@ struct ReflogFileReaderTailBoundTests {
         #expect(found.pushedAt == Date(timeIntervalSince1970: 1_788_310_851))
     }
 }
+
+// MARK: - Packet F6 — codex round 2, BLOCKER 2
+
+/// "The same problem exists for reflog symlinks/FIFOs at ReflogFileReader.swift:31." A reflog path
+/// is built from the repo's own common directory, so a hostile repo chooses what sits there. The
+/// reader must come back — with an error the loader can report as `RepoError(stage: .reflog)` —
+/// rather than parking a thread inside `open()`.
+@Suite("A reflog that is not a regular file is rejected, not waited on")
+struct ReflogSpecialFileTests {
+
+    @Test("fifoReflogIsRejectedWithoutBlocking")
+    func fifoReflogIsRejectedWithoutBlocking() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+
+        let commonDirectory = temp.url.appendingPathComponent("repo/.git").path
+        let path = ReflogFileReader.reflogPath(
+            commonDirectory: commonDirectory, remote: "origin", branch: "main")
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        #expect(mkfifo(path, 0o600) == 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+
+        let reader = ReflogFileReader(fileSystem: RealFileSystem())
+        let started = Date()
+        #expect(throws: (any Error).self) {
+            _ = try reader.observation(commonDirectory: commonDirectory, remote: "origin", branch: "main")
+        }
+        #expect(Date().timeIntervalSince(started) < 5, "the reflog read blocked on a FIFO")
+    }
+
+    /// An ordinary reflog beside it still reads, so the rejection is about the file type and not
+    /// about the real path shape.
+    @Test("aRegularReflogStillReadsThroughTheBoundedPrimitive")
+    func regularReflogStillReads() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+
+        let commonDirectory = temp.url.appendingPathComponent("repo/.git").path
+        let path = ReflogFileReader.reflogPath(
+            commonDirectory: commonDirectory, remote: "origin", branch: "main")
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try Data(("00000000000000000000000000000000000000aa "
+                  + "00000000000000000000000000000000000000bb "
+                  + "Tester tester@example.com 1788310851 -0400\tupdate by push\n").utf8)
+            .write(to: URL(fileURLWithPath: path))
+
+        let found = try #require(try ReflogFileReader(fileSystem: RealFileSystem())
+            .observation(commonDirectory: commonDirectory, remote: "origin", branch: "main"))
+        #expect(found.newOID == "00000000000000000000000000000000000000bb")
+    }
+}

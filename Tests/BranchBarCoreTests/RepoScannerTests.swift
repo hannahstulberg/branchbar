@@ -471,3 +471,109 @@ struct RepoScannerBoundedAndRootRepoTests {
         #expect(result.repos.map(\.path) == ["/Volumes/work/mono"])
     }
 }
+
+// MARK: - Packet F6 — codex round 2, BLOCKER 2 and MAJOR 3
+
+/// A hand-built listing plus a record of every file the scanner opened. `InMemoryFileSystem`
+/// reports a symlink as a directory, which is the opposite of what `RealFileSystem` does for the
+/// case under test, so the entries are given verbatim here.
+private final class MarkerFileSystem: FileSystem, @unchecked Sendable {
+    private let listings: [String: [DirectoryEntry]]
+    private let lock = NSLock()
+    private var _opened: [String] = []
+
+    init(_ listings: [String: [DirectoryEntry]]) { self.listings = listings }
+
+    /// Every path a read was attempted on, in call order.
+    var opened: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _opened
+    }
+
+    func contentsOfDirectory(atPath path: String) throws -> [DirectoryEntry] {
+        guard let entries = listings[path] else {
+            throw InMemoryFileSystem.PermissionDenied(path: path)
+        }
+        return entries
+    }
+
+    func fileExists(atPath path: String) -> Bool { listings[path] != nil }
+    func isExecutableFile(atPath path: String) -> Bool { false }
+    func readFile(atPath path: String) throws -> Data {
+        lock.lock(); _opened.append(path); lock.unlock()
+        throw InMemoryFileSystem.PermissionDenied(path: path)
+    }
+    func modificationDate(atPath path: String) throws -> Date {
+        throw InMemoryFileSystem.PermissionDenied(path: path)
+    }
+    func homeDirectory() -> String { "/Users/tester" }
+    func pathEnvironment() -> String { "/usr/bin:/bin" }
+}
+
+@Suite("A .git marker that is a symlink is never opened, and a newline in a path is part of it")
+struct RepoScannerHostileMarkerTests {
+
+    /// codex BLOCKER 2: "A `.git` symlink is reported as `isDirectory == false`, then RepoScanner
+    /// treats it as a regular `.git` file … A repo containing `.git -> /path/to/FIFO` therefore
+    /// blocks the scan in `open(O_RDONLY)` indefinitely."
+    ///
+    /// A symlink is not a marker this scanner will vouch for, so it is classified `unrecognized`
+    /// and the walk carries on — the same answer a `.git` file with no `gitdir:` line gets. The
+    /// assertion that matters is the one about `opened`: the file is never read at all, so there
+    /// is nothing for a FIFO behind it to block.
+    @Test("dotGitSymlinkIsNeverOpened")
+    func dotGitSymlinkIsNeverOpened() async throws {
+        let fileSystem = MarkerFileSystem([
+            "/Users/tester": [
+                DirectoryEntry(name: "hostile", path: "/Users/tester/hostile", isDirectory: true),
+                DirectoryEntry(name: "plain", path: "/Users/tester/plain", isDirectory: true),
+            ],
+            "/Users/tester/hostile": [
+                // What `RealFileSystem` reports for `.git -> /tmp/fifo`: a link, never a directory.
+                DirectoryEntry(
+                    name: ".git", path: "/Users/tester/hostile/.git",
+                    isDirectory: false, isSymbolicLink: true),
+            ],
+            "/Users/tester/plain": [
+                DirectoryEntry(name: ".git", path: "/Users/tester/plain/.git", isDirectory: true),
+            ],
+        ])
+
+        let result = try await RepoScanner(fileSystem: fileSystem)
+            .scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+
+        #expect(result.repos.map(\.path) == ["/Users/tester/plain"],
+                "a symlinked .git was vouched for as a repo marker")
+        #expect(!fileSystem.opened.contains("/Users/tester/hostile/.git"),
+                "the scanner opened a symlinked .git: \(fileSystem.opened)")
+    }
+
+    /// codex MAJOR 3: "A legal folder such as `project\narchive` shifts the common-directory/
+    /// top-level fields. Dedupe uses the wrong ID, subsequent commands use a fragment as their
+    /// working directory."
+    ///
+    /// The dedupe asks `rev-parse` for the two paths as **two invocations**, each stripped of
+    /// exactly one trailing record newline, so a newline inside a path stays inside it.
+    @Test("repoPathWithNewlineKeepsItsIdentity")
+    func repoPathWithNewlineKeepsItsIdentity() async throws {
+        let path = "/Users/tester/project\narchive"
+        let commonDirectory = path + "/.git"
+
+        let fileSystem = InMemoryFileSystem(home: "/Users/tester")
+        fileSystem.addRepository(at: path)
+
+        let runner = RecordedCommandRunner()
+        runner.stubGit(
+            ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stdout: commonDirectory + "\n")
+        runner.stubGit(
+            ["-C", path, "rev-parse", "--path-format=absolute", "--show-toplevel"],
+            stdout: path + "\n")
+
+        let result = try await RepoScanner(fileSystem: fileSystem, commandRunner: runner)
+            .scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+
+        #expect(result.repos.map(\.path) == [path])
+        #expect(result.repos.first?.id == RepoID(commonDir: commonDirectory))
+    }
+}

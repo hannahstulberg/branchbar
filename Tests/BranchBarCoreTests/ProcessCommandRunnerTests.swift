@@ -364,3 +364,150 @@ struct ProcessCommandRunnerTests {
         return false
     }
 }
+
+// MARK: - Packet F6 — codex round 2, MAJOR 2 (pgid) and MINOR 2 (pipe read errors)
+
+/// codex round 2, MAJOR 2: "Process-group escalation loses descendants when the group leader exits
+/// first." `signalGroup` refused to signal unless `Process.isRunning`, and asked `getpgid(pid)` at
+/// signal time. A direct child that accepts SIGTERM and exits therefore takes the whole escalation
+/// with it: at SIGKILL time the leader is gone, `isRunning` is false, and a grandchild that
+/// ignored SIGTERM keeps running with the pipes open.
+///
+/// MINOR 2: "Pipe read failures are treated as clean EOF." `try?` around the read turned an I/O
+/// error into a short buffer returned as success, so a truncated `for-each-ref` would read as a
+/// shorter branch list.
+@Suite("Escalation reaches the saved process group, and a pipe error is not an EOF")
+struct ProcessCommandRunnerGroupAndReadTests {
+
+    private static func shell(_ script: String, timeout: TimeInterval = 120) -> Command {
+        Command(executable: "/bin/sh", arguments: ["-c", script], timeout: timeout)
+    }
+
+    /// The existing `cancellationKillsAGrandchildThatDidNotExec` keeps the **parent** alive by
+    /// trapping SIGTERM, so it never reaches the case where the leader is gone. Here the parent
+    /// takes the default disposition and dies on SIGTERM; only the grandchild traps it, and it
+    /// holds stdout, so the readers never see EOF either.
+    @Test("escalationKillsAGrandchildAfterTheLeaderExited")
+    func escalationKillsAGrandchildAfterTheLeaderExited() async throws {
+        let directory = try Packet25TempDir()
+        defer { directory.remove() }
+        let parentFile = directory.url.appendingPathComponent("parent.pid").path
+        let grandchildFile = directory.url.appendingPathComponent("grandchild.pid").path
+
+        // The grandchild ignores TERM and never exits on its own; it inherits stdout, so the
+        // runner's readers stay blocked after the leader is reaped.
+        let script = """
+            sh -c 'trap "" TERM; echo $$ > \(grandchildFile); while :; do sleep 1; done' &
+            echo $$ > \(parentFile)
+            wait
+            """
+
+        let task = Task { try await ProcessCommandRunner().run(Self.shell(script)) }
+
+        let parentPID = try await Self.awaitPID(inFile: parentFile)
+        let grandchildPID = try await Self.awaitPID(inFile: grandchildFile)
+        #expect(grandchildPID != parentPID)
+        #expect(getpgid(grandchildPID) == getpgid(parentPID),
+                "the grandchild must share the leader's group for this to be the case under test")
+
+        task.cancel()
+        await #expect(throws: CommandError.cancelled) { try await task.value }
+
+        #expect(await Self.waitUntilGone(parentPID), "the leader outlived its own SIGTERM")
+        #expect(
+            await Self.waitUntilGone(grandchildPID),
+            "grandchild pid \(grandchildPID) survived the escalation because the leader had already exited")
+    }
+
+    /// The saved group id is captured at spawn, so the escalation does not depend on the leader
+    /// still being there to ask.
+    @Test("theProcessGroupIsCapturedAtSpawnNotAtSignalTime")
+    func processGroupIsCapturedAtSpawn() async throws {
+        let directory = try Packet25TempDir()
+        defer { directory.remove() }
+        let pidFile = directory.url.appendingPathComponent("child.pid").path
+
+        let task = Task {
+            try await ProcessCommandRunner().run(
+                Self.shell("echo $$ > '\(pidFile)'; exec sleep 30"))
+        }
+        let childPID = try await Self.awaitPID(inFile: pidFile)
+        let group = getpgid(childPID)
+
+        #expect(group == childPID)
+        #expect(group != getpgrp(), "signalling this group must never reach BranchBar itself")
+
+        task.cancel()
+        _ = try? await task.value
+        #expect(await Self.waitUntilGone(childPID))
+    }
+
+    /// codex MINOR 2. The bounded drain returns what it read only when the read **ended**; an
+    /// error mid-stream throws, and the bytes already buffered are dropped rather than handed back
+    /// as a complete answer.
+    @Test("aPipeReadErrorDiscardsPartialOutput")
+    func pipeReadErrorDiscardsPartialOutput() throws {
+        struct Boom: Error {}
+        var chunk = 0
+
+        #expect(throws: Boom.self) {
+            _ = try PipeDrain.readBounded(cap: 1_000_000) {
+                chunk += 1
+                // A record boundary, which is exactly what makes a silent truncation plausible.
+                if chunk == 1 { return Data("refs/heads/main\n".utf8) }
+                throw Boom()
+            }
+        }
+        #expect(chunk == 2, "the drain stopped before it reached the failing read")
+
+        // A clean EOF still returns everything, so the distinction is error-versus-EOF and not
+        // "short reads are suspicious".
+        var remaining = [Data("a".utf8), Data("b".utf8)]
+        let whole = try PipeDrain.readBounded(cap: 1_000_000) {
+            remaining.isEmpty ? nil : remaining.removeFirst()
+        }
+        #expect(whole == Data("ab".utf8))
+    }
+
+    /// Past the cap the drain still reports the overflow rather than the bytes, which is the
+    /// behaviour `stdoutBeyondTheCapTerminatesTheChildWithOutputTooLarge` already pins end to end.
+    @Test("theBoundedDrainStillReportsAnOverflow")
+    func boundedDrainReportsOverflow() throws {
+        #expect(throws: PipeDrain.Overflow.self) {
+            _ = try PipeDrain.readBounded(cap: 4) { Data(repeating: 0x41, count: 8) }
+        }
+    }
+
+    /// A read error is a distinct `CommandError`, not a `nonZeroExit` and not a truncated success,
+    /// so the caller can tell "git said nothing" from "we could not hear git".
+    @Test("readFailedIsItsOwnCommandError")
+    func readFailedIsItsOwnCommandError() {
+        let error = CommandError.readFailed(stream: .standardOutput, message: "Input/output error")
+        #expect(error != CommandError.cancelled)
+        #expect(error == CommandError.readFailed(stream: .standardOutput, message: "Input/output error"))
+        #expect(error != CommandError.readFailed(stream: .standardError, message: "Input/output error"))
+    }
+
+    // MARK: Helpers
+
+    private static func awaitPID(inFile file: String, timeout: TimeInterval = 10) async throws -> pid_t {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let text = try? String(contentsOfFile: file, encoding: .utf8),
+               let value = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return value
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        throw CancellationError()
+    }
+
+    private static func waitUntilGone(_ pid: pid_t, timeout: TimeInterval = 10) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return false
+    }
+}

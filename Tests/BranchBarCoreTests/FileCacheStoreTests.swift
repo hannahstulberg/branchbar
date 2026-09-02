@@ -277,3 +277,39 @@ struct FileCacheStoreTrustTests {
         #expect(loaded.lastSnapshot?.refreshedAt == justNow)
     }
 }
+
+// MARK: - Packet F6 — codex round 2, BLOCKER 2
+
+/// "A tampered cache FIFO can hang app initialization at FileCacheStore.swift:44." The cache load
+/// is synchronous and on the launch path, and its path is a fixed one under Application Support
+/// that any process running as the user can replace. Every way the cache can be wrong already
+/// reads as "no cache"; a file that is not a regular file is one more of them.
+@Suite("A cache file that is not a regular file loads nil rather than blocking")
+struct FileCacheStoreSpecialFileTests {
+
+    @Test("fifoCacheFileLoadsNil")
+    func fifoCacheFileLoadsNil() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let url = temp.file("cache.json")
+        #expect(mkfifo(url.path, 0o600) == 0, "mkfifo failed: \(String(cString: strerror(errno)))")
+
+        let started = Date()
+        #expect(try FileCacheStore(fileURL: url).load() == nil)
+        #expect(Date().timeIntervalSince(started) < 5, "the cache load blocked on a FIFO")
+    }
+
+    /// A symlinked cache file loads nil too: the store reads the path it owns, never wherever
+    /// something else points it.
+    @Test("aSymlinkedCacheFileLoadsNil")
+    func symlinkedCacheFileLoadsNil() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let real = temp.file("real.json")
+        try FileCacheStore.makeEncoder().encode(CacheFile()).write(to: real)
+        let link = temp.file("cache.json")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        #expect(try FileCacheStore(fileURL: link).load() == nil)
+    }
+}
