@@ -6,7 +6,7 @@ LOG        := $(HOME)/Library/Logs/BranchBar/BranchBar.log
 TEST_FLAGS ?= --disable-xctest --enable-swift-testing
 ARCHS      ?= arm64
 
-.PHONY: test build release bundle zip run stop logs screenshot install verify record-fixtures doc-refs doc-strings clean
+.PHONY: test build release bundle zip run stop logs screenshot install verify record-fixtures doc-refs doc-strings snapshot clean
 
 test:            ## unit tests for BranchBarCore (Swift Testing only)
 	swift test $(TEST_FLAGS)
@@ -53,6 +53,9 @@ doc-refs:        ## fail if any ARCHITECTURE.md file:line no longer points at it
 
 doc-strings:     ## regenerate docs/UI-CONTRACT.md string table from Sources/BranchBarCore/Strings.swift
 	scripts/doc-strings.sh
+
+snapshot:        ## Gate 3 harness: print every repo, branch, worktree, PR, and push for ROOTS with Apple git
+	swift run -c release branchbar-cli snapshot $(foreach r,$(ROOTS),--root $(r)) --git $(or $(BRANCHBAR_GIT),/usr/bin/git)
 
 clean:
 	rm -rf .build dist

@@ -1,21 +1,22 @@
 # SESSION HANDOFF — BranchBar
 
-**Last updated:** 2026-09-02 03:10 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+**Last updated:** 2026-09-02 04:00 by session `cced85a0-5ced-4282-bc94-e23dcbe42d18`
 
 ## Current state
 
-- **Phase / packet:** Phase 3: 3.1 green (b98b0eb); red(3.2) 9d8fb7d committed; 3.2 implementer in flight (coordinator + branchbar-cli + PRCacheEntry.queriedHeads). 2.2 presenter green (2b1b083). Local main is ahead of origin (push held until 3.2 is green because red(3.2) traps the whole run).
-- **Suite:** 226 passing with `--skip RefreshCoordinator` (clean worktree at b98b0eb); CI green at d9444b6.
-- **In-flight agents:** 3.2-I (spec packets/3.2.md implementer role).
+- **Phase / packet:** Phase 3 complete; Gate 3 PASSED. Pushed at c09e55a (CI pending). Phase 4/5 in flight: 4.1 SwiftUI shell and 5.1a icon/packaging.
+- **Suite:** 248 passing (`make test`)
+- **In-flight agents:** 4.1 (packets/4.1.md; Sources/BranchBar/**, scripts/screenshot-states.sh, scripts/windowid.swift) and 5.1a-icon (scripts/render-icon.swift, scripts/make-icns.sh, Resources/icon-1024.png, scripts/bundle.sh icns step, Resources/Info.plist.template CFBundleIconFile).
 - **Blocked on:** nothing. Hannah's own packet 0.0 items are open: ask Andrew Lisy whether JobRunner opened on NYT-managed Macs; name the NYT tester and their macOS version.
 
 ## Next steps (in order)
 
-1. Accept 3.2-I: full `make test` green at its SHA, zero edits to RefreshCoordinatorTests since 9d8fb7d; commit `green(3.2)`; push; confirm CI.
-2. Gate 3: run `swift run branchbar-cli snapshot --root ~/hannah-personal-agent --root ~/branchbar --root ~/WalkTimer-or-a-third-repo --git /usr/bin/git` and hand-check against `git branch -vv` / `git worktree list` / `gh pr list` for 3 repos; record in DECISION-LOG.
-3. Dispatch 4.1 (packets/4.1.md) after Gate 3; Hannah's Gate 4.0 read of docs/UI-CONTRACT.md is async.
-4. Then 5.1a (first zip, tag v0.9.0) by 09-10, 4.2 (actions + launch at login), 5.1b, 5.2.
-5. Hannah: Gate 0b NYT tester (runbook sent), Andrew Lisy question, Cursor push check.
+1. Confirm CI green at c09e55a.
+2. Accept 4.1 (real popover shows real repos; 32 state fixtures render; ≥ 1 popover screenshot) and 5.1a-icon; commit; push.
+3. Tag `v0.9.0`: `make zip` (arm64), Release with zip + sha256 + install note; send URL to the NYT tester (Gate 5 by 09-12). Target 09-10.
+4. Dispatch 4.2 (packets/4.2.md: actions, Add folder…, Hide, gh sign-in action, launch at login) → Gate 4 screenshots reviewed by Hannah.
+5. 5.1b hardening + 5.2 README/ARCHITECTURE/CLAUDE.md docs sync (`make doc-refs` script still to be written; ARCHITECTURE §2/§3 to fill).
+6. Hannah: Gate 0b NYT tester (runbook sent), Gate 4.0 read of docs/UI-CONTRACT.md, Andrew Lisy question, Cursor push check.
 
 ## Re-read order for a fresh session
 

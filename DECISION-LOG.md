@@ -2,6 +2,15 @@
 
 <!-- Newest first. What / Why / Limits / Cost accepted / Deliberately not changed / Session. -->
 
+## 2026-09-02 — Packet 3.2 green (248 tests); Gate 3 PASSED on three real repos with Apple git 2.39.5
+
+- **What:** `RefreshCoordinator` and `branchbar-cli` landed at c09e55a; `PRCacheEntry.queriedHeads` records which heads a fetch actually asked about so a warm cache renders `none` only for heads that were queried. Gate 3: `branchbar-cli snapshot --root ~/hannah-personal-agent --root ~/branchbar --root ~/in-the-weeds-metrics-dashboard --git /usr/bin/git` (36 branch rows, 17 s cold incl. build) matched the hand-check: push observations equal the reflog file counts ("Pushed from this Mac 3 hours ago" for a branch with 29 push lines; "Last push unknown · newest commit dated 5 months ago" for a 0-byte reflog file whose PR #2 is merged); the dashboard's `main` (ahead 1, behind 103, remote tip moved) renders "1 ahead of last-known origin" and "(origin has moved since)" and never shows behind; 8 Merged rows equal the merged PRs that still have local branches with tip == PR head; exactly 5 rows read "PR status not checked yet" (25 unmatched heads minus the cap of 20, spent most-recently-active first); the detached-HEAD primary worktree is in the snapshot with no branch.
+- **Why:** PLAN.md §8 Gate 3 required the CLI to match a hand-checked table for three repos, identically under `BRANCHBAR_GIT=/usr/bin/git`.
+- **Limits:** The eager-PR top-N term applies only on the coordinator's first refresh (launch bootstrap, ranked by the previous snapshot); afterwards the shell's expanded set is authoritative. The CLI table prints branch rows only; worktrees without a branch appear in `--json` and in the app's rows. Gate 3's "busy repo > 100 PRs" timing case is still open: the dashboard has 10 PRs, so the recent-100 window was not exercised at scale.
+- **Cost accepted:** `RefreshCoordinator.init` and `refresh` carry five and two defaulted parameters beyond the frozen signatures.
+- **Deliberately not changed:** No test file edited since red(3.2) 9d8fb7d.
+- **Session:** `cced85a0-5ced-4282-bc94-e23dcbe42d18`
+
 ## 2026-09-02 — Packet 3.1 green (226 tests minus the coordinator); loader judgment calls accepted
 
 - **What:** `PushInfoDeriver`, `RepoAssembler`, `RepoLoader` implemented; red a3cbf49 (compile-red on the new defaulted `previous:` parameter), green b98b0eb. Accepted judgment calls: `rev-parse` failure files under `RepoError.Stage.reflog`; the per-head cap is spent most-recently-active first; a branch checked out in the primary worktree carries the primary's path and therefore never enters Merged; `remoteRefObservedAt` carries the remote tip's committer date rather than a new field.
