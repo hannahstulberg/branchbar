@@ -70,6 +70,7 @@ struct RepoAssemblerTests {
         pullRequests: [PRInfo] = [],
         authoredOpenPullRequests: [PRInfo] = [],
         queriedHeads: Set<String> = [],
+        remoteOwners: [String: String] = [:],
         prAvailability: PRAvailability = .available,
         prLoadState: PRLoadState = .loaded,
         remoteURL: String? = RepoAssemblerTests.remoteURL
@@ -86,7 +87,11 @@ struct RepoAssemblerTests {
             pushObservations: pushObservations,
             pullRequests: pullRequests,
             authoredOpenPullRequests: authoredOpenPullRequests,
-            queriedHeads: queriedHeads,
+            // codex round 2 MAJOR 4 keyed coverage by (owner, head). A bare set of head names is
+            // still what most of these tests mean — "the app asked about this head" — so it maps
+            // to the owner-agnostic half, which is what a `--head` query really answers.
+            queryCoverage: PRQueryCoverage(anyOwnerHeads: queriedHeads),
+            remoteOwners: remoteOwners,
             prAvailability: prAvailability,
             prLoadState: prLoadState
         )
@@ -460,6 +465,53 @@ struct RepoAssemblerTests {
             queriedHeads: ["signed-off"]
         ))
         #expect(upstreamElsewhere.openPRsNotOnThisMac.isEmpty)
+    }
+
+    /// codex round 2, MAJOR 4. A branch tracking a remote other than `origin` has a head owner
+    /// this app can only learn by resolving that remote\'s URL. Falling back to the origin
+    /// repository\'s owner answered a question nobody asked, and rendering `none` afterwards told
+    /// the user GitHub had been asked about a head that was never established. Not checked is the
+    /// only honest answer.
+    @Test("unknownOwnerRendersNotCheckedNeverNone")
+    func unknownOwnerRendersNotCheckedNeverNone() throws {
+        let repo = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature", upstream: "fork")],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["fork-feature"]
+        ))
+
+        let branch = try #require(Self.branch(repo, "fork-feature"))
+        #expect(branch.pr == nil, "no PR may be claimed for a head nobody could name")
+        #expect(branch.prStatus == .notChecked)
+        #expect(branch.prStatus != PRStatus.none)
+    }
+
+    /// The other half of codex round 2 MAJOR 4: once the fork's owner **is** resolved, the fork's
+    /// own PR reaches the branch that tracks it, and `none` is reachable again.
+    @Test("resolvedRemoteOwnerMatchesTheForksOwnPR")
+    func resolvedRemoteOwnerMatchesTheForksOwnPR() throws {
+        let repo = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature", upstream: "fork")],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["fork-feature"],
+            remoteOwners: ["fork": "contributor"]
+        ))
+
+        let branch = try #require(Self.branch(repo, "fork-feature"))
+        #expect(branch.pr?.number == 110)
+        #expect(branch.prStatus == .open)
+
+        // A resolved owner that is not the PR's owner still rejects it, and the head was covered
+        // by the query, so the row says so.
+        let elsewhere = RepoAssembler.assemble(Self.inputs(
+            branchRefs: [Self.ref("fork-feature", upstream: "fork")],
+            pullRequests: Self.mixedPRs,
+            queriedHeads: ["fork-feature"],
+            remoteOwners: ["fork": "someone-else"]
+        ))
+        let other = try #require(Self.branch(elsewhere, "fork-feature"))
+        #expect(other.pr == nil)
+        #expect(other.prStatus == PRStatus.none)
     }
 
     /// codex MAJOR 12, the grouping half. When `git worktree list` fails there is no worktree

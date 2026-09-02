@@ -44,6 +44,7 @@
               "observedPushAt" : 810129600,
               "observedPushOID" : "1111111111111111111111111111111111111111",
               "originMovedSince" : false,
+              "remoteRefExists" : false,
               "source" : "reflogObserved",
               "upstreamGone" : false
             },

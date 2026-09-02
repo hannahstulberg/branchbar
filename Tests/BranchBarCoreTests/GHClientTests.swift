@@ -51,6 +51,18 @@ private enum GH {
     static let personalAgent = GitHubSlug(host: "github.com", owner: "hannahstulberg", name: "hannah-personal-agent")
     static let branchbar = GitHubSlug(host: "github.com", owner: "hannahstulberg", name: "branchbar")
 
+    /// The bare `gh auth status` (no `--hostname`) whose host lines say which hosts `gh` holds a
+    /// login for — the allow-list codex round 2 MAJOR 6 requires before any host but `github.com`
+    /// is treated as GitHub.
+    static let loggedInHostsArguments = ["auth", "status"]
+
+    static func stubLoggedInHosts(_ runner: RecordedCommandRunner, hosts: [String]) {
+        let body = hosts
+            .map { "\($0)\n  ✓ Logged in to \($0) account tester (keyring)\n  - Active account: true\n" }
+            .joined(separator: "\n")
+        runner.stub(.init(executableName: "gh", arguments: loggedInHostsArguments, result: .stdout(body)))
+    }
+
     /// Stubs the successful `gh auth status` every list invocation preflights.
     static func stubAuthSuccess(_ runner: RecordedCommandRunner, host: String = "github.com") {
         runner.stub(.init(
@@ -137,6 +149,9 @@ struct GHClientAuthTests {
         #expect(enterprise.host == "github.nytimes.com")
 
         let runner = RecordedCommandRunner()
+        // codex round 2, MAJOR 6: an enterprise host is a GitHub host because `gh auth status`
+        // says it holds a login for it, so the allow-list read comes first.
+        GH.stubLoggedInHosts(runner, hosts: ["github.com", "github.nytimes.com"])
         GH.stubAuthSuccess(runner, host: "github.nytimes.com")
         GH.stubAuthSuccess(runner, host: "github.com")
         runner.stubGH(GH.recentArguments(enterprise), stdout: Fixture.text("synthetic-gh-pr-list-empty.json"))
@@ -511,7 +526,10 @@ struct GHClientHardeningTests {
         let availability = GHClient.availability(
             forFailedCommand: .nonZeroExit(exitCode: 1, standardError: saml), host: "github.com")
 
-        #expect(reason(availability) == .ghNotAuthenticated(host: "github.com"))
+        // Was `ghNotAuthenticated` until codex round 2 MAJOR 7: SAML, an IP allow-list and an
+        // organization policy are not credential problems, and the one action that reason offers
+        // is `gh auth login`, which cannot lift any of them.
+        #expect(reason(availability) == .forbidden(repo: "github.com"))
         #expect(detail(availability)?.hasPrefix("HTTP 403: Resource protected") == true)
         #expect(detail(availability)?.contains("trailing diagnostic line") == false,
                 "the first stderr line is the diagnostic")
@@ -521,7 +539,8 @@ struct GHClientHardeningTests {
             forFailedCommand: .nonZeroExit(
                 exitCode: 1,
                 standardError: "HTTP 403: Must have admin rights to Repository. (https://api.github.com/graphql)"),
-            host: "github.com")) == .ghNotAuthenticated(host: "github.com"))
+            host: "github.com",
+            repo: "github.com/tester/demo")) == .forbidden(repo: "github.com/tester/demo"))
 
         // And the real rate limit still is one, message or status code.
         #expect(reason(GHClient.availability(
@@ -530,6 +549,65 @@ struct GHClientHardeningTests {
         #expect(reason(GHClient.availability(
             forFailedCommand: .nonZeroExit(exitCode: 1, standardError: "You have exceeded a secondary RATE LIMIT."),
             host: "github.com")) == .rateLimited)
+    }
+
+    /// codex round 2, MAJOR 7. Only evidence about the credential maps to "not signed in": a 401,
+    /// a "Bad credentials" body, or `gh`'s own "not logged in". Every other 403 — SAML, an IP
+    /// allow-list, an organization policy, a missing grant on a repo the account can otherwise
+    /// see — is a refusal that signing in again does not lift, and telling the user to sign in
+    /// again sent them round a loop that could not end.
+    @Test("only401OrBadCredentialsMapsToGhNotAuthenticated")
+    func only401OrBadCredentialsMapsToGhNotAuthenticated() async throws {
+        let unauthorized = GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: "HTTP 401: Bad credentials (https://api.github.com/graphql)"),
+            host: "github.com")
+        #expect(reason(unauthorized) == .ghNotAuthenticated(host: "github.com"))
+
+        let notLoggedIn = GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: "You are not logged into any GitHub hosts. To log in, run: gh auth login"),
+            host: "github.com")
+        #expect(reason(notLoggedIn) == .ghNotAuthenticated(host: "github.com"))
+    }
+
+    /// codex round 2, MAJOR 7. The 403 that is not rate limiting and not a bad token gets a reason
+    /// of its own, and copy that says so rather than sending the user back to `gh auth login`.
+    @Test("policyForbiddenIsItsOwnReasonNotAnAuthenticationProblem")
+    func policyForbiddenIsItsOwnReasonNotAnAuthenticationProblem() async throws {
+        let saml = "HTTP 403: Resource protected by organization SAML enforcement. "
+            + "You must grant your OAuth token access to this organization (https://api.github.com/graphql)\n"
+        let availability = GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: saml),
+            host: "github.com",
+            repo: "github.com/newsroom/demo")
+
+        #expect(reason(availability) == .forbidden(repo: "github.com/newsroom/demo"))
+        let copy = Strings.unavailable(reason: try #require(reason(availability)))
+        #expect(copy.message == "GitHub refused this request for github.com/newsroom/demo "
+                + "(policy, SSO, or scopes). Signing in again will not fix it.")
+        #expect(copy.action?.kind != .openTerminalWithGhAuthLogin,
+                "the one action may not be the one the copy says will not help")
+    }
+
+    /// codex round 2, MAJOR 7. `commandFailed` covered a 404 answered in 40 ms and a lookup that
+    /// really did run out of time, and its copy asserted both the timing and the cure. The timeout
+    /// keeps that copy under its own reason; `commandFailed` says only what happened.
+    @Test("timeoutIsItsOwnReasonAndCommandFailedClaimsNoTimingOrCure")
+    func timeoutIsItsOwnReasonAndCommandFailedClaimsNoTimingOrCure() async throws {
+        let timedOut = GHClient.availability(forFailedCommand: .timedOut(after: 25), host: "github.com")
+        #expect(reason(timedOut) == .timedOut)
+        #expect(Strings.unavailable(reason: .timedOut).message
+                == "The GitHub CLI did not answer for this repo in time. Refreshing usually fixes it.")
+
+        let notFound = GHClient.availability(
+            forFailedCommand: .nonZeroExit(exitCode: 1, standardError: "HTTP 404: Not Found (https://api.github.com/repos/x/y)"),
+            host: "github.com")
+        #expect(reason(notFound) == .commandFailed)
+
+        let copy = Strings.unavailable(reason: .commandFailed, detail: "HTTP 404: Not Found")
+        #expect(copy.message == "The GitHub CLI reported an error for this repo: HTTP 404: Not Found")
+        for forbidden in ["in time", "Refreshing usually fixes it"] {
+            #expect(!copy.message.contains(forbidden), "commandFailed copy claims \(forbidden)")
+        }
     }
 
     /// REVIEW WR-02. A renamed, deleted, or no-longer-visible repo answers 404 or "Could not
@@ -557,6 +635,48 @@ struct GHClientHardeningTests {
                 standardError: "HTTP 403: Could not resolve to a Repository with the name 'x/y'."),
             host: "github.com")
         #expect(reason(both) == .commandFailed)
+    }
+
+    /// codex round 2, MAJOR 6. The other half of the rule: a host `gh auth status` reports a
+    /// login for is a GitHub host whatever it is called, so a GitHub Enterprise remote at NYT
+    /// keeps its preflight, its `--repo` operand, and its PR list. Rejecting unknown hosts must
+    /// not reject the one enterprise host this app was written for.
+    @Test("enterpriseHostAlreadyLoggedInIsAccepted")
+    func enterpriseHostAlreadyLoggedInIsAccepted() async throws {
+        let enterprise = try #require(GitHubSlug(remoteURL: Fixture.text("synthetic-config-remote-origin-url-ghe.txt")))
+        #expect(enterprise.host == "github.nytimes.com")
+
+        let runner = RecordedCommandRunner()
+        GH.stubLoggedInHosts(runner, hosts: ["github.com", "github.nytimes.com"])
+        GH.stubAuthSuccess(runner, host: "github.nytimes.com")
+        runner.stubGH(GH.recentArguments(enterprise), stdout: Fixture.text("synthetic-gh-pr-list-empty.json"))
+
+        let client = GHClient(runner: runner, ghPath: GH.path)
+        let result = await client.recentPullRequests(slug: enterprise)
+
+        #expect(value(result) != nil, "a logged-in enterprise host answers like github.com")
+        let gh = runner.calls(matchingExecutable: "gh").map(\.arguments)
+        #expect(gh.contains(GH.authArguments(host: "github.nytimes.com")), "the per-host preflight still runs")
+        #expect(gh.contains(GH.recentArguments(enterprise)))
+    }
+
+    /// codex round 2, MAJOR 6. `Repo.swift` accepts any RFC 1123 hostname, so `gitlab.com`,
+    /// `localhost`, and an attacker-chosen domain all became "GitHub" slugs and were preflighted
+    /// with a `gh` process and offered as `gh auth login --hostname <repo-controlled-host>`.
+    /// Only `github.com` and hosts `gh` already holds a login for are GitHub hosts.
+    @Test("unknownHostIsNeverPreflightedOrOfferedForSignIn")
+    func unknownHostIsNeverPreflightedOrOfferedForSignIn() async throws {
+        let gitlab = try #require(GitHubSlug(remoteURL: "git@gitlab.com:team/tools.git"))
+        let runner = RecordedCommandRunner()
+        GH.stubLoggedInHosts(runner, hosts: ["github.com"])
+
+        let client = GHClient(runner: runner, ghPath: GH.path)
+        let result = await client.recentPullRequests(slug: gitlab)
+
+        #expect(reason(try #require(failure(result))) == .notGitHubRemote)
+        let gh = runner.calls(matchingExecutable: "gh").map(\.arguments)
+        #expect(!gh.contains(GH.authArguments(host: "gitlab.com")))
+        #expect(!gh.contains(GH.recentArguments(gitlab)))
     }
 
     /// codex MINOR 2. Four repo tasks reach `authStatus` at once, all see an empty memo, all
@@ -599,7 +719,9 @@ struct GHClientHardeningTests {
         let client = GHClient(runner: runner, ghPath: GH.path)
 
         #expect(reason(await client.authStatus(host: "github.com")) == .commandFailed)
-        #expect(reason(await client.authStatus(host: "github.com")) == .commandFailed)
+        // The timeout has its own reason since codex round 2 MAJOR 7; what this test is about —
+        // that neither is memoized — is unchanged.
+        #expect(reason(await client.authStatus(host: "github.com")) == .timedOut)
         #expect(await client.authStatus(host: "github.com") == .available,
                 "a cancelled or timed-out preflight was memoized as a failure")
         #expect(runner.calls.count == 3)

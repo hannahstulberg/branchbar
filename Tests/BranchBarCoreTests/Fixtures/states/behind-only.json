@@ -31,6 +31,7 @@
               "observedPushAt" : 809524800,
               "observedPushOID" : "1111111111111111111111111111111111111111",
               "originMovedSince" : false,
+              "remoteRefExists" : false,
               "remoteRefObservedAt" : 810298800,
               "remoteTipCommitDate" : 810295200,
               "source" : "reflogObserved",

@@ -253,6 +253,11 @@ enum UIStates {
         refreshRunning,
         hiddenRepo,
         launchAtLoginNeedsApproval,
+        ghForbidden,
+        ghCommandFailed,
+        nonOriginUpstream,
+        untrackedRemoteBranch,
+        staleRowsIdle,
     ]
 
     // 1
@@ -453,17 +458,19 @@ enum UIStates {
     static let prListTimeout = UIState(
         id: "pr-list-timeout",
         title: "The PR lookup did not answer in time",
-        planReference: "§5a item 1: gh pr list timeout; PRUnavailableReason.commandFailed",
+        planReference: "§5a item 1: gh pr list timeout; PRUnavailableReason.timedOut",
         entries: [
             ("commandFailedTitle", Strings.commandFailedTitle),
-            ("commandFailedMessage", Strings.commandFailedMessage),
+            // codex round 2 MAJOR 7 split the timeout out of `commandFailed`: this state is the
+            // one failure whose copy may say the CLI ran out of time.
+            ("timedOutMessage", Strings.timedOutMessage),
             ("repoPRStatusFailed", Strings.repoPRStatusFailed),
             ("repoErrorNotice", Strings.repoErrorNotice(stage: .github)),
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(
                 branches: [UIFixtures.branch("main", prStatus: .unavailable)],
-                prAvailability: .unavailable(.commandFailed, detail: "timed out after 25 s"),
+                prAvailability: .unavailable(.timedOut, detail: "gh timed out after 25s"),
                 prLoadState: .notLoaded,
                 errors: [RepoError(stage: .github, message: "timed out after 25 s")]
             )
@@ -717,7 +724,7 @@ enum UIStates {
                 "pushed",
                 Strings.pushed(reflogAt: UIClock.ago(2 * UIClock.day), now: UIClock.now, originMovedSince: true)
             ),
-            ("originMovedSince", Strings.originMovedSince),
+            ("remoteMovedSince", Strings.remoteMovedSince()),
             ("pushedTooltip", Strings.pushedTooltip),
         ],
         snapshot: UIFixtures.snapshot([
@@ -1017,7 +1024,7 @@ enum UIStates {
         title: "Ahead of an origin this clone has never fetched from",
         planReference: "§3: the ahead tooltip's anchor is a local observation, not a commit date",
         entries: [
-            ("originNotFetchedYet", Strings.originNotFetchedYet)
+            ("notFetchedYet", Strings.notFetchedYet)
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(branches: [
@@ -1074,7 +1081,7 @@ enum UIStates {
         title: "Nothing local ahead, but last-known origin has moved on",
         planReference: "§3: \"In sync\" only when nothing is ahead and nothing is behind",
         entries: [
-            ("noLocalCommitsAhead", Strings.noLocalCommitsAhead)
+            ("noLocalCommitsAhead", Strings.noLocalCommitsAhead())
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(branches: [
@@ -1218,6 +1225,122 @@ enum UIStates {
         ]),
         refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
     )
+
+    // 35 — codex round 2, MAJOR 7
+    static let ghForbidden = UIState(
+        id: "gh-forbidden",
+        title: "GitHub refused the request for a reason signing in again will not lift",
+        planReference: "§5a item 1: PRUnavailableReason.forbidden — SAML, IP allow-list, org policy",
+        entries: [
+            ("forbiddenTitle", Strings.forbiddenTitle),
+            ("forbiddenMessage", Strings.forbiddenMessage(repo: "github.com/newsroom/demo")),
+            ("refreshActionLabel", Strings.refreshActionLabel),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(
+                branches: [UIFixtures.branch("main", prStatus: .unavailable)],
+                prAvailability: .unavailable(
+                    .forbidden(repo: "github.com/newsroom/demo"),
+                    detail: "HTTP 403: Resource protected by organization SAML enforcement"),
+                prLoadState: .notLoaded)
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 36 — codex round 2, MAJOR 7
+    static let ghCommandFailed = UIState(
+        id: "gh-command-failed",
+        title: "The GitHub CLI failed for a reason the reason list does not name",
+        planReference: "§5a item 1: PRUnavailableReason.commandFailed — neutral copy, no timing or cure claim",
+        entries: [
+            ("commandFailedMessage", Strings.commandFailedMessage(detail: "HTTP 404: Not Found")),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(
+                branches: [UIFixtures.branch("main", prStatus: .unavailable)],
+                prAvailability: .unavailable(.commandFailed, detail: "HTTP 404: Not Found"),
+                prLoadState: .notLoaded)
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 37 — codex round 2, MAJOR 5
+    static let nonOriginUpstream = UIState(
+        id: "non-origin-upstream",
+        title: "A branch tracking a fork, counted against the fork and told so",
+        planReference: "§3: the wording names the remote the comparison used, not the word origin",
+        entries: [
+            ("ahead", Strings.ahead(2, remote: "fork")),
+            ("remoteMovedSince", Strings.remoteMovedSince(remote: "fork")),
+            ("aheadTooltip", Strings.aheadTooltip(
+                remote: "fork", remoteObservedAt: UIClock.ago(3 * UIClock.hour), now: UIClock.now)),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "fork-feature",
+                    upstream: Upstream(ref: "fork/fork-feature", remote: "fork", ahead: 2),
+                    prStatus: .notChecked,
+                    push: PushInfo(
+                        observedPushAt: UIClock.ago(UIClock.day),
+                        observedPushOID: UIFixtures.otherSHA,
+                        originMovedSince: true,
+                        source: .reflogObserved,
+                        hasUpstream: true,
+                        aheadOfLastKnownRemote: 2,
+                        remoteRefObservedAt: UIClock.ago(3 * UIClock.hour),
+                        remoteName: "fork",
+                        remoteRefExists: true
+                    )
+                )
+            ])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 38 — codex round 2, MAJOR 5
+    static let untrackedRemoteBranch = UIState(
+        id: "untracked-remote-branch",
+        title: "Pushed without -u: no tracking, and origin holds the branch anyway",
+        planReference: "§3: the row may not deny the ref whose reflog produced its push line",
+        entries: [
+            ("untrackedRemoteBranchExists", Strings.untrackedRemoteBranchExists()),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "hotfix",
+                    upstream: nil,
+                    prStatus: .notChecked,
+                    push: PushInfo(
+                        observedPushAt: UIClock.ago(2 * UIClock.day),
+                        observedPushOID: UIFixtures.tipSHA,
+                        source: .reflogObserved,
+                        hasUpstream: false,
+                        remoteName: "origin",
+                        remoteRefExists: true
+                    )
+                )
+            ])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 39 — F8 addendum: a cancelled refresh leaves rows nobody is updating
+    static let staleRowsIdle = UIState(
+        id: "stale-rows-idle",
+        title: "Rows that did not finish updating, with no refresh running",
+        planReference: "§3: a cancelled or deadline-cut refresh leaves rows visibly stale while idle",
+        entries: [
+            ("staleRowsIdleNotice", Strings.staleRowsIdleNotice),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(
+                branches: [UIFixtures.branch("main", prStatus: .notChecked)],
+                isStale: true)
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
 }
 
 // MARK: - Tests
@@ -1306,7 +1429,28 @@ struct StringsTests {
 
         let moved = Strings.pushed(reflogAt: instant, now: UIClock.now, originMovedSince: true)
         #expect(moved == "Pushed from this Mac 2 days ago (origin has moved since)")
-        #expect(moved.hasSuffix(Strings.originMovedSince))
+        #expect(moved.hasSuffix(Strings.remoteMovedSince()))
+        // codex round 2, MAJOR 5: the clause names the remote the comparison used, and origin
+        // keeps its locked wording because origin is a remote like any other.
+        let fork = Strings.pushed(reflogAt: instant, now: UIClock.now, remote: "fork", originMovedSince: true)
+        #expect(fork == "Pushed from this Mac 2 days ago (fork has moved since)")
+    }
+
+    /// codex round 2, MAJOR 5. `FETCH_HEAD` is rewritten by a fetch of **any** remote and is left
+    /// alone by `git fetch --no-write-fetch-head`, so its modification date does not prove when
+    /// origin was seen. The tooltip may say only what the file itself says.
+    @Test("fetchHeadTooltipDoesNotClaimOriginWasSeen")
+    func fetchHeadTooltipDoesNotClaimOriginWasSeen() {
+        let tooltip = Strings.aheadTooltip(
+            remoteObservedAt: UIClock.ago(3 * UIClock.hour), now: UIClock.now)
+
+        #expect(tooltip.contains("This repo's last fetch changed FETCH_HEAD 3 hours ago"))
+        #expect(!tooltip.lowercased().contains("last seen"),
+                "the date is the file's, not origin's: \(tooltip)")
+
+        let unfetched = Strings.aheadTooltip(remoteObservedAt: nil, now: UIClock.now)
+        #expect(!unfetched.lowercased().contains("last seen"))
+        #expect(unfetched.contains("has not fetched yet"), "\(unfetched)")
     }
 
     /// A blank pill is a row that says nothing. All ten `PRStatus` cases, including the three that
@@ -1499,6 +1643,9 @@ extension PRUnavailableReason {
         .noRemote,
         .notGitHubRemote,
         .rateLimited,
+        // codex round 2, MAJOR 7: the two reasons `commandFailed` used to swallow.
+        .forbidden(repo: "github.com/newsroom/demo"),
+        .timedOut,
         .commandFailed,
     ]
 }

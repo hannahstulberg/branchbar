@@ -185,6 +185,47 @@ struct PRStatusMapperMatchTests {
         #expect(matched.state == "OPEN")
     }
 
+    /// codex round 2, MAJOR 4. GitHub logins are case-insensitive — `Contributor` and
+    /// `contributor` are one account — and `gh` prints whatever casing the account was created
+    /// with, while `remote.origin.url` carries whatever casing the clone URL was typed with.
+    /// Comparing the two as bytes rejected the user's own PR and left the row reading "No PR"
+    /// beside an open one.
+    @Test("ownerComparisonIsCaseInsensitive")
+    func ownerComparisonIsCaseInsensitive() throws {
+        let prs = try mixedPullRequests()
+        let fork = try pr(110, in: prs)
+        #expect(fork.headRepositoryOwnerLogin == "contributor")
+
+        #expect(PRStatusMapper.match(
+            branchName: "fork-feature",
+            upstreamOwnerLogin: "Contributor",
+            repoOwnerLogin: "Tester",
+            in: prs)?.number == 110,
+            "a differently-cased login is the same account")
+
+        // The repo-owner fallback is compared the same way.
+        #expect(PRStatusMapper.match(
+            branchName: "signed-off",
+            upstreamOwnerLogin: nil,
+            repoOwnerLogin: "TESTER",
+            in: prs)?.number == 105)
+
+        // Case-insensitive never means "everyone matches": a different owner still loses.
+        #expect(PRStatusMapper.match(
+            branchName: "fork-feature",
+            upstreamOwnerLogin: "TESTER",
+            repoOwnerLogin: "tester",
+            in: prs) == nil)
+
+        // The open-elsewhere key is the same comparison, so a differently-cased local head still
+        // keeps the PR out of the "not on this Mac" group.
+        let localHeads: Set<PRStatusMapper.LocalHead> = [
+            PRStatusMapper.LocalHead(ownerLogin: "Contributor", branchName: "fork-feature")
+        ]
+        #expect(PRStatusMapper.openPRsNotOnThisMac(
+            authoredOpenPRs: [fork], localHeads: localHeads).isEmpty)
+    }
+
     @Test("aBranchNoPRSharesAHeadWithMatchesNothing")
     func aBranchNoPRSharesAHeadWithMatchesNothing() throws {
         let prs = try mixedPullRequests()

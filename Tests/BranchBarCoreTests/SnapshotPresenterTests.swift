@@ -188,9 +188,12 @@ struct SnapshotPresenterTests {
         // state the contract had no row for: `zero-repos-documents-denied` (MAJOR 3),
         // `origin-not-fetched` (MAJOR 7), and `behind-only` (MAJOR 5). The fix wave added
         // `git-not-found` (REVIEW CR-04).
+        // codex round 2 added four: `gh-forbidden` and `gh-command-failed` (MAJOR 7),
+        // `non-origin-upstream` and `untracked-remote-branch` (MAJOR 5). `stale-rows-idle` is the
+        // idle half of the stale-row warning.
         #expect(
-            stateFixtureIDs.count == 38,
-            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1; found \(stateFixtureIDs.count)")
+            stateFixtureIDs.count == 43,
+            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1, codex round 2 added 5; found \(stateFixtureIDs.count)")
 
         // Nothing is exempted that no fixture actually asks for.
         var contracted: Set<String> = []
@@ -274,7 +277,7 @@ struct SnapshotPresenterTests {
                 aheadOfLastKnownRemote: 0)))
 
         let label = try #require(behind.aheadLabel)
-        #expect(label == Strings.noLocalCommitsAhead)
+        #expect(label == Strings.noLocalCommitsAhead())
         #expect(!label.contains(Strings.inSync))
         #expect(!label.contains("20"), "PLAN.md §3 still forbids showing the behind count")
         #expect(!label.lowercased().contains("behind"))
@@ -364,6 +367,82 @@ struct SnapshotPresenterTests {
             remoteObservedAt: UIClock.ago(3 * UIClock.hour),
             now: UIClock.now
         )))
+    }
+
+    /// codex round 2, MAJOR 5. The reflog of `origin/feature` is read precisely because that ref
+    /// exists, so a row whose push line came from it may not also say there is no matching branch
+    /// on origin. The two sentences contradict each other on the same row.
+    @Test("untrackedBranchWithExistingRemoteRefDoesNotClaimNoMatchingBranch")
+    func untrackedBranchWithExistingRemoteRefDoesNotClaimNoMatchingBranch() throws {
+        // `git push origin feature` without `-u`: no tracking configuration, and `origin/feature`
+        // is right there in the remote-tracking ref list.
+        let repo = RepoAssembler.assemble(RepoAssembler.Inputs(
+            id: UIFixtures.id("demo"),
+            path: "\(UIFixtures.home)/demo",
+            remoteURL: "https://github.com/tester/demo.git",
+            branchRefs: [ParsedBranchRef(
+                refName: "refs/heads/feature",
+                objectName: UIFixtures.tipSHA,
+                committerDate: UIClock.ago(2 * UIClock.day),
+                upstreamShort: "",
+                upstreamRemoteName: "",
+                track: "",
+                isHead: true)],
+            remoteRefs: [ParsedRemoteRef(
+                refName: "refs/remotes/origin/feature",
+                objectName: UIFixtures.tipSHA,
+                committerDate: UIClock.ago(3 * UIClock.day))],
+            pushObservations: ["feature": ReflogObservation(
+                pushedAt: UIClock.ago(2 * UIClock.day), newOID: UIFixtures.tipSHA)],
+            prLoadState: .loaded))
+
+        let branch = try #require(repo.branches.first)
+        #expect(branch.upstream == nil, "the branch tracks nothing")
+        #expect(branch.push.source == .reflogObserved, "and its push line came from origin/feature")
+
+        let row = try Self.onlyRow(of: UIFixtures.snapshot([repo]))
+        let ahead = try #require(row.aheadLabel)
+        #expect(!ahead.contains(Strings.noUpstream),
+                "origin holds the very branch this line says it does not: \(ahead)")
+        #expect(ahead.contains("origin"), "the line still names what it is talking about: \(ahead)")
+    }
+
+    /// codex round 2, MAJOR 5. A branch tracking `fork/feature` was compared against `fork`, and
+    /// then told the user about `origin`. Every wording that names a remote names the one the
+    /// comparison actually used.
+    @Test("nonOriginUpstreamWordingNamesTheRemote")
+    func nonOriginUpstreamWordingNamesTheRemote() throws {
+        let row = try Self.onlyRow(of: Self.singleBranchSnapshot(
+            upstream: Upstream(ref: "fork/feature", remote: "fork", ahead: 2),
+            push: PushInfo(
+                observedPushAt: UIClock.ago(UIClock.day),
+                observedPushOID: UIFixtures.otherSHA,
+                originMovedSince: true,
+                source: .reflogObserved,
+                hasUpstream: true,
+                aheadOfLastKnownRemote: 2,
+                remoteRefObservedAt: UIClock.ago(3 * UIClock.hour))))
+
+        let ahead = try #require(row.aheadLabel)
+        #expect(ahead.contains("2 ahead of last-known fork"))
+        #expect(!ahead.contains("origin"), "the comparison was never against origin: \(ahead)")
+        #expect(row.pushLabel.contains("(fork has moved since)"))
+        #expect(!row.pushLabel.contains("origin"))
+        #expect(!row.pushTooltip.contains("last-known origin"))
+
+        // origin keeps its wording verbatim, which is what PLAN.md §3 locked.
+        let onOrigin = try Self.onlyRow(of: Self.singleBranchSnapshot(
+            upstream: Upstream(ref: "origin/feature", remote: "origin", ahead: 2),
+            push: PushInfo(
+                observedPushAt: UIClock.ago(UIClock.day),
+                observedPushOID: UIFixtures.otherSHA,
+                originMovedSince: true,
+                source: .reflogObserved,
+                hasUpstream: true,
+                aheadOfLastKnownRemote: 2,
+                remoteRefObservedAt: UIClock.ago(3 * UIClock.hour))))
+        #expect(onOrigin.aheadLabel?.contains("2 ahead of last-known origin") == true)
+        #expect(onOrigin.pushLabel.contains("(origin has moved since)"))
     }
 
     // MARK: - Group copy (PLAN.md §3: the app deletes nothing)
@@ -464,15 +543,20 @@ struct SnapshotPresenterTests {
                 now: UIClock.now
             )
             let notice = try #require(vm.sections.first?.prNotice, "\(reason) produced no notice")
-            let failure = Strings.unavailable(reason: reason)
+            let failure = Strings.unavailable(reason: reason, detail: "diagnostic that is never rendered")
 
             #expect(notice.text.contains(failure.title))
             #expect(notice.text.contains(failure.message))
             #expect(notice.action?.label == failure.action?.label)
             #expect(notice.action?.kind == failure.action?.kind)
             #expect(notice.action?.payload == failure.action?.payload)
-            // PLAN.md §5: `detail` is logged, never rendered.
-            #expect(!notice.text.contains("diagnostic that is never rendered"))
+            // PLAN.md §5: `detail` is logged, never rendered — with the one exception codex round
+            // 2 MAJOR 7 created. `commandFailed` is the reason that names no cause and no cure, so
+            // the first stderr line is the only thing it has to tell the user; every other reason
+            // still renders none of it.
+            if reason != .commandFailed {
+                #expect(!notice.text.contains("diagnostic that is never rendered"))
+            }
             #expect(vm.sections.first?.active.first?.prPill?.text == Strings.prUnavailable)
         }
     }

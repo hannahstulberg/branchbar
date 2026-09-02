@@ -7,7 +7,7 @@
     "macOS is waiting for approval. Open System Settings → General → Login Items and turn BranchBar on under “Open at Login”.",
     "Move BranchBar to your Applications folder and open it from there, then this can be turned on. Right now it is running from a temporary copy macOS made.",
     "This only works from the BranchBar app in your Applications folder.",
-    "Copy BranchBar into your Applications folder first — the login item points at /Applications/BranchBar.app.",
+    "Move BranchBar into your Applications folder first — either /Applications or the Applications folder inside your home folder.",
     "macOS would not add BranchBar to your login items. The log has the details."
   ],
   "id" : "launch-at-login-needs-approval",
@@ -32,6 +32,7 @@
             "push" : {
               "hasUpstream" : false,
               "originMovedSince" : false,
+              "remoteRefExists" : false,
               "source" : "none",
               "upstreamGone" : false
             },

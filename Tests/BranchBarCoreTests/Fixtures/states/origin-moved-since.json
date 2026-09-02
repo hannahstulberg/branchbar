@@ -33,6 +33,7 @@
               "observedPushAt" : 810129600,
               "observedPushOID" : "2222222222222222222222222222222222222222",
               "originMovedSince" : true,
+              "remoteRefExists" : false,
               "remoteRefObservedAt" : 810298800,
               "source" : "reflogObserved",
               "upstreamGone" : false

@@ -32,7 +32,11 @@ struct RepoLoaderTests {
             "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(upstream:short)%1f%(upstream:remotename)%1f%(upstream:track,nobracket)%1f%(HEAD)"
         static let remotesFormat = "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)"
 
-        static let identity = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"]
+        // codex round 2, MAJOR 3: one invocation per path. `rev-parse` separates its two paths
+        // with a newline, and a directory name may legally contain one, so a combined answer
+        // cannot be split back into the two paths that produced it.
+        static let identityCommonDir = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+        static let identityTopLevel = ["-C", repo, "rev-parse", "--path-format=absolute", "--show-toplevel"]
         static let remoteOriginURL = ["-C", repo, "config", "--get", "remote.origin.url"]
         static let branchRefs = ["-C", repo, "for-each-ref", headsFormat, "--", "refs/heads"]
         static let remoteRefs = ["-C", repo, "for-each-ref", remotesFormat, "--", "refs/remotes/"]
@@ -80,7 +84,8 @@ struct RepoLoaderTests {
     /// matching stub, so a test that breaks a stage registers its failure stub before calling
     /// this.
     private static func stubGitStages(_ runner: RecordedCommandRunner) {
-        runner.stubGit(Argv.identity, stdout: "\(Argv.commonDirectory)\n\(Argv.repo)\n")
+        runner.stubGit(Argv.identityCommonDir, stdout: "\(Argv.commonDirectory)\n")
+        runner.stubGit(Argv.identityTopLevel, stdout: "\(Argv.repo)\n")
         runner.stubGit(Argv.remoteOriginURL, stdout: "https://github.com/tester/demo.git\n")
         runner.stubGit(Argv.branchRefs, stdout: Fixture.text("synthetic-for-each-ref-heads-mixed.txt"))
         runner.stubGit(Argv.remoteRefs, stdout: Fixture.text("synthetic-for-each-ref-remotes.txt"))
@@ -88,6 +93,10 @@ struct RepoLoaderTests {
     }
 
     private static func stubGH(_ runner: RecordedCommandRunner, recent: String? = nil) {
+        // codex round 2, MAJOR 6: the host allow-list read that decides whether a host other than
+        // github.com is GitHub at all. github.com never needs it, so most tests never see it run.
+        runner.stub(.init(executableName: "gh", arguments: ["auth", "status"],
+                          result: .stdout(Fixture.text("recorded-gh-auth-status-github.com.txt"))))
         runner.stub(.init(executableName: "gh", arguments: GH.auth,
                           result: .stdout(Fixture.text("recorded-gh-auth-status-github.com.txt"))))
         runner.stub(.init(executableName: "gh", arguments: GH.recent,
@@ -115,7 +124,8 @@ struct RepoLoaderTests {
         _ runner: RecordedCommandRunner,
         fileSystem: FileSystem? = nil,
         gh: GHClient? = nil,
-        policy: RefreshPolicy = .default
+        policy: RefreshPolicy = .default,
+        wireRemoteLookup: Bool = false
     ) -> RepoLoader {
         let fs = fileSystem ?? Self.fileSystem()
         return RepoLoader(
@@ -125,7 +135,12 @@ struct RepoLoaderTests {
             // The loader stats `FETCH_HEAD` for the "last seen" anchor (codex MAJOR 7), so the
             // same in-memory filesystem the reflog reads through is handed to it directly.
             fileSystem: fs,
-            policy: policy)
+            policy: policy,
+            // `config --get remote.<name>.url` for every remote other than origin (codex round 2,
+            // MAJOR 4). Off by default here so the rest of this file keeps asserting the exact
+            // command list it was written against.
+            runner: wireRemoteLookup ? runner : nil,
+            gitPath: wireRemoteLookup ? "/usr/bin/git" : nil)
     }
 
     private static func branch(_ repo: Repo, _ name: String) -> Branch? {
@@ -200,7 +215,8 @@ struct RepoLoaderTests {
         let brokenPath = "/Users/tester/broken"
         let broken = DiscoveredRepo(path: brokenPath, id: RepoID(commonDir: brokenPath + "/.git"))
         for arguments in [
-            ["-C", brokenPath, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
+            ["-C", brokenPath, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ["-C", brokenPath, "rev-parse", "--path-format=absolute", "--show-toplevel"],
             ["-C", brokenPath, "config", "--get", "remote.origin.url"],
             ["-C", brokenPath, "for-each-ref", Argv.headsFormat, "--", "refs/heads"],
             ["-C", brokenPath, "for-each-ref", Argv.remotesFormat, "--", "refs/remotes/"],
@@ -437,6 +453,141 @@ struct RepoLoaderTests {
         }
         #expect(repo.branches.allSatisfy { $0.prStatus == .unavailable })
         #expect(repo.errors.isEmpty, "an unset remote is not a stage failure")
+    }
+
+    // MARK: - Owner-keyed query coverage and host classification — codex round 2, MAJOR 4 and 6
+
+    /// codex round 2, MAJOR 4. The recent-100 list answers for the heads **it** names, and a head
+    /// name alone is not a head: `stranger:main` and `tester:main` are two different heads that
+    /// share a name. Marking `main` queried because a stranger's PR mentioned it skipped the
+    /// per-head query for the user's own `main`, the stranger's PR was then correctly rejected as
+    /// a match, and the row read "No PR" beside an open one.
+    @Test("strangersRecentSameNamedPRDoesNotSuppressThePerHeadQuery")
+    func strangersRecentSameNamedPRDoesNotSuppressThePerHeadQuery() async throws {
+        let strangerMain = """
+        [
+          {
+            "baseRefName": "main",
+            "headRefName": "main",
+            "headRefOid": "5555555555555555555555555555555555555555",
+            "headRepositoryOwner": { "id": "U_s", "name": "A Stranger", "login": "stranger" },
+            "isDraft": false,
+            "mergeCommit": null,
+            "mergedAt": null,
+            "number": 900,
+            "reviewDecision": "",
+            "state": "OPEN",
+            "updatedAt": "2026-08-30T10:00:00Z",
+            "url": "https://github.com/tester/demo/pull/900"
+          }
+        ]
+        """
+        let ownMain = """
+        [
+          {
+            "baseRefName": "release",
+            "headRefName": "main",
+            "headRefOid": "7777777777777777777777777777777777777777",
+            "headRepositoryOwner": { "id": "U_t", "name": "Tester Person", "login": "tester" },
+            "isDraft": false,
+            "mergeCommit": null,
+            "mergedAt": null,
+            "number": 901,
+            "reviewDecision": "APPROVED",
+            "state": "OPEN",
+            "updatedAt": "2026-08-20T10:00:00Z",
+            "url": "https://github.com/tester/demo/pull/901"
+          }
+        ]
+        """
+
+        let runner = RecordedCommandRunner()
+        Self.stubGitStages(runner)
+        // Registered before the batch stubs so the first match wins for `--head main`.
+        runner.stub(.init(executableName: "gh", arguments: GH.head("main"), result: .stdout(ownMain)))
+        Self.stubGH(runner, recent: strangerMain)
+
+        let repo = await Self.loader(runner).load(
+            Self.discovered, wantsPullRequests: true, cachedPRs: nil, now: Self.now)
+
+        #expect(Self.ghCalls(runner).map(\.arguments).contains(GH.head("main")),
+                "tester:main was never asked about, so the per-head query still owes an answer")
+
+        let main = try #require(Self.branch(repo, "main"))
+        #expect(main.pr?.number == 901, "the user's own PR, found by the per-head query")
+        #expect(main.prStatus == .approved)
+    }
+
+    /// codex round 2, MAJOR 4. A branch tracking a fork has its head on the fork, and the only
+    /// place that owner is written down is `remote.<name>.url`. Reading it is what stops the
+    /// branch from being matched against the origin repository's owner — a different head that
+    /// happens to share a name — and what lets the fork's own PR reach the row.
+    ///
+    /// New invocation, PLAN.md §5: `git -C <repo> config --get remote.<name>.url`, once per
+    /// distinct upstream remote name that is not `origin`.
+    @Test("perRemoteUpstreamOwnerIsResolvedFromThatRemotesURL")
+    func perRemoteUpstreamOwnerIsResolvedFromThatRemotesURL() async throws {
+        let unit = "\u{1f}"
+        let heads = [
+            "refs/heads/fork-feature", String(repeating: "d", count: 40), "1788300000",
+            "fork/fork-feature", "fork", "", "*",
+        ].joined(separator: unit) + "\n"
+        let remotes = [
+            "refs/remotes/fork/fork-feature", String(repeating: "d", count: 40), "1788300000",
+        ].joined(separator: unit) + "\n"
+        let forkURL = ["-C", Argv.repo, "config", "--get", "remote.fork.url"]
+
+        let runner = RecordedCommandRunner()
+        runner.stubGit(Argv.branchRefs, stdout: heads)
+        runner.stubGit(Argv.remoteRefs, stdout: remotes)
+        runner.stubGit(forkURL, stdout: "https://github.com/contributor/demo.git\n")
+        Self.stubGitStages(runner)
+        Self.stubGH(runner, recent: Fixture.text("synthetic-gh-pr-list-mixed.json"))
+
+        let repo = await Self.loader(runner, wireRemoteLookup: true).load(
+            Self.discovered, wantsPullRequests: true, cachedPRs: nil, now: Self.now)
+
+        #expect(runner.calls(matchingExecutable: "git").map(\.arguments).contains(forkURL),
+                "the fork's own remote URL is the only place its owner is written down")
+        #expect(repo.errors.isEmpty)
+
+        let branch = try #require(Self.branch(repo, "fork-feature"))
+        #expect(branch.pr?.number == 110, "PR 110's head is contributor:fork-feature, which is this branch")
+        #expect(branch.prStatus == .open)
+        #expect(branch.push.remoteName == "fork")
+
+        // One lookup per distinct remote name, however many branches track it, and never for
+        // origin — stage 2 already read that one.
+        #expect(runner.calls(matchingExecutable: "git")
+            .filter { $0.arguments.contains("remote.fork.url") }.count == 1)
+        #expect(!runner.calls(matchingExecutable: "git")
+            .contains { $0.arguments.contains("remote.origin.url") && $0.arguments != Argv.remoteOriginURL })
+    }
+
+    /// codex round 2, MAJOR 6. A GitLab remote is a syntactically valid hostname, which is all the
+    /// slug parser ever asked for, so the repo was preflighted with `gh auth status --hostname
+    /// gitlab.com` and the UI offered `gh auth login --hostname gitlab.com`. That is a
+    /// network-target and phishing path, and the honest answer is the one a `file://` remote gets.
+    @Test("gitlabRemoteIsNotOfferedForGhSignIn")
+    func gitlabRemoteIsNotOfferedForGhSignIn() async throws {
+        let runner = RecordedCommandRunner()
+        runner.stubGit(Argv.remoteOriginURL, stdout: "git@gitlab.com:team/tools.git\n")
+        Self.stubGitStages(runner)
+        Self.stubGH(runner)
+
+        let repo = await Self.loader(runner).load(
+            Self.discovered, wantsPullRequests: true, cachedPRs: nil, now: Self.now)
+
+        if case .unavailable(let reason, _) = repo.prAvailability {
+            #expect(reason == .notGitHubRemote)
+            if case .ghNotAuthenticated = reason {
+                Issue.record("a GitLab remote was offered as a GitHub sign-in target")
+            }
+        } else {
+            Issue.record("expected notGitHubRemote, got \(repo.prAvailability)")
+        }
+        #expect(!Self.ghCalls(runner).contains { $0.arguments.contains("gitlab.com") },
+                "no gh process may be pointed at a host the repo named and gh has never heard of")
     }
 
     // MARK: - Push history without tracking configuration — codex MAJOR 6

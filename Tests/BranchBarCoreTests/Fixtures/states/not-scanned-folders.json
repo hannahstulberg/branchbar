@@ -86,6 +86,7 @@
             "push" : {
               "hasUpstream" : false,
               "originMovedSince" : false,
+              "remoteRefExists" : false,
               "source" : "none",
               "upstreamGone" : false
             },

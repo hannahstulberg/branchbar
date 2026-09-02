@@ -4,7 +4,7 @@
 
   ],
   "expectedStrings" : [
-    "origin not fetched by this clone yet"
+    "This repo has not fetched yet."
   ],
   "id" : "origin-not-fetched",
   "now" : 810302400,
@@ -31,6 +31,7 @@
               "observedPushAt" : 810216000,
               "observedPushOID" : "2222222222222222222222222222222222222222",
               "originMovedSince" : false,
+              "remoteRefExists" : false,
               "remoteTipCommitDate" : 809956800,
               "source" : "reflogObserved",
               "upstreamGone" : false

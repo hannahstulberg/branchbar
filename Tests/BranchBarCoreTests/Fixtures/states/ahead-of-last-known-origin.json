@@ -5,7 +5,7 @@
   ],
   "expectedStrings" : [
     "2 ahead of last-known origin",
-    "Counted against last-known origin, last seen 3 hours ago. BranchBar never fetches, so origin may have moved."
+    "Counted against last-known origin. This repo's last fetch changed FETCH_HEAD 3 hours ago. BranchBar never fetches, so origin may have moved."
   ],
   "id" : "ahead-of-last-known-origin",
   "now" : 810302400,
@@ -32,6 +32,7 @@
               "observedPushAt" : 810216000,
               "observedPushOID" : "2222222222222222222222222222222222222222",
               "originMovedSince" : false,
+              "remoteRefExists" : false,
               "remoteRefObservedAt" : 810291600,
               "source" : "reflogObserved",
               "upstreamGone" : false

@@ -11,7 +11,7 @@
   ],
   "id" : "pr-list-timeout",
   "now" : 810302400,
-  "planReference" : "§5a item 1: gh pr list timeout; PRUnavailableReason.commandFailed",
+  "planReference" : "§5a item 1: gh pr list timeout; PRUnavailableReason.timedOut",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
@@ -31,6 +31,7 @@
             "push" : {
               "hasUpstream" : false,
               "originMovedSince" : false,
+              "remoteRefExists" : false,
               "source" : "none",
               "upstreamGone" : false
             },
@@ -62,11 +63,11 @@
         "prAvailability" : {
           "unavailable" : {
             "_0" : {
-              "commandFailed" : {
+              "timedOut" : {
 
               }
             },
-            "detail" : "timed out after 25 s"
+            "detail" : "gh timed out after 25s"
           }
         },
         "prFetchedAt" : 810302100,

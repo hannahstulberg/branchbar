@@ -243,7 +243,11 @@ struct PushInfoDeriverTests {
         }
 
         let seen = try tooltip(push)
-        #expect(seen.contains("last seen 3 hours ago"), "\(seen)")
+        // Was "last seen 3 hours ago" until codex round 2 MAJOR 5: `FETCH_HEAD` is rewritten by a
+        // fetch of any remote and left alone by `--no-write-fetch-head`, so its date proves when
+        // this repo last fetched and nothing about origin.
+        #expect(seen.contains("This repo's last fetch changed FETCH_HEAD 3 hours ago"), "\(seen)")
+        #expect(!seen.contains("last seen"), "\(seen)")
         #expect(!seen.contains("2 years ago"), "the remote tip's commit date is not an observation")
 
         // No FETCH_HEAD: the clone has never fetched, and the tooltip says that rather than
@@ -251,7 +255,7 @@ struct PushInfoDeriverTests {
         var neverFetched = push
         neverFetched.remoteRefObservedAt = nil
         let unfetched = try tooltip(neverFetched)
-        #expect(unfetched.contains(Strings.originNotFetchedYet), "\(unfetched)")
+        #expect(unfetched.contains(Strings.notFetchedYet), "\(unfetched)")
         #expect(!unfetched.contains("last seen"))
     }
 
