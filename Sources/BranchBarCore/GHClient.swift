@@ -21,6 +21,15 @@ public actor GHClient {
     /// anything back (`concurrentReposIssueOneAuthStatusPerHost`).
     private var authByHost: [String: Task<AuthAnswer, Never>] = [:]
 
+    /// The hosts `gh auth status` reports a login for, read once per refresh (codex round 2,
+    /// MAJOR 6). `Repo.swift` accepts any RFC 1123 hostname as a slug, which is right for parsing
+    /// and wrong for trust: `gitlab.com`, `localhost`, an IPv4 literal and an attacker-chosen
+    /// domain all became "GitHub" hosts, each one preflighted with a `gh` process and each one
+    /// offered to the user as `gh auth login --hostname <repo-controlled-host>`. Only
+    /// `github.com` and a host `gh` already holds a login for is treated as GitHub. Held as the
+    /// in-flight `Task` for the same reason `authByHost` is.
+    private var loggedInHostsTask: Task<Set<String>, Never>?
+
     /// A preflight result plus whether it is an answer about the account at all.
     private struct AuthAnswer: Sendable {
         var availability: PRAvailability
@@ -67,6 +76,12 @@ public actor GHClient {
     /// `.unavailable(.ghNotAuthenticated(host:), detail:)` carrying the stderr on failure, so one
     /// failure short-circuits `gh pr list` for every repo on that host.
     public func authStatus(host: String) async -> PRAvailability {
+        // codex round 2, MAJOR 6: a host this app has no reason to believe is GitHub never
+        // reaches a `gh` process and is never offered as a sign-in target. It gets the answer a
+        // `file://` remote gets.
+        guard await isGitHubHost(host) else {
+            return .unavailable(.notGitHubRemote, detail: host)
+        }
         if let inFlight = authByHost[host] { return await inFlight.value.availability }
 
         let command = Command(
@@ -92,7 +107,9 @@ public actor GHClient {
                 // deadline arrived, or the keychain was slow.
                 let isVerdict: Bool
                 switch error {
-                case .cancelled, .timedOut, .outputTooLarge: isVerdict = false
+                // Packet F6 / codex round 2, MINOR 2: a pipe we could not read through says
+                // nothing about the account either.
+                case .cancelled, .timedOut, .outputTooLarge, .readFailed: isVerdict = false
                 case .launchFailed, .nonZeroExit: isVerdict = true
                 }
                 return AuthAnswer(
@@ -120,7 +137,53 @@ public actor GHClient {
     /// life of the process, so this is how the next refresh gets a clean one (REVIEW CR-02).
     /// Without it a `gh auth login` the user just ran in Terminal stays invisible until relaunch,
     /// and "Refresh PRs now" serves the same ten-minute-old list it was told to bypass.
+    /// True for `github.com`, and for a host `gh auth status` lists a login for. Nothing else
+    /// (codex round 2, MAJOR 6).
+    public func isGitHubHost(_ host: String) async -> Bool {
+        if host == GitHubSlug.gitHubDotCom { return true }
+        return await loggedInHosts().contains(host)
+    }
+
+    /// `gh auth status` with no `--hostname`: one process per refresh, whose host lines name every
+    /// host `gh` holds a login for. Judged by its output and not by its exit code — `gh` exits
+    /// non-zero when *any* configured host is logged out, and the hosts that are logged in are
+    /// still listed.
+    private func loggedInHosts() async -> Set<String> {
+        if let inFlight = loggedInHostsTask { return await inFlight.value }
+
+        let command = Command(
+            executable: ghPath,
+            arguments: ["auth", "status"],
+            environment: Self.frozenEnvironment,
+            timeout: policy.ghAuthTimeout
+        )
+        let task = Task<Set<String>, Never> { [runner] in
+            guard let output = try? await runner.run(command) else { return [] }
+            return Self.loggedInHosts(inAuthStatus: output.standardOutputText + "\n" + output.standardErrorText)
+        }
+        loggedInHostsTask = task
+        return await task.value
+    }
+
+    /// Every `<host>` in a `Logged in to <host> …` line, lower-cased and held to the same hostname
+    /// grammar `GitHubSlug` applies. gh 2.89 writes the list to stdout; older builds wrote it to
+    /// stderr, so both streams are read.
+    nonisolated static func loggedInHosts(inAuthStatus text: String) -> Set<String> {
+        var hosts: Set<String> = []
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let marker = line.range(of: "Logged in to ") else { continue }
+            let rest = line[marker.upperBound...]
+            guard let token = rest.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first else {
+                continue
+            }
+            let host = String(token).lowercased()
+            if GitHubSlug.isValidHostname(host) { hosts.insert(host) }
+        }
+        return hosts
+    }
+
     public func resetForNewRefresh() {
+        loggedInHostsTask = nil
         authByHost.removeAll()
         recentCache.removeAll()
         authorCache.removeAll()
@@ -229,18 +292,29 @@ public actor GHClient {
     /// The order matters, and it is the order of how specific the evidence is (codex MAJOR 11,
     /// REVIEW WR-02):
     ///
-    /// 1. A 401 or "Bad credentials" is `ghNotAuthenticated`: the token is wrong.
+    /// 1. A 401, a "Bad credentials" body, or `gh`'s own "not logged in" is `ghNotAuthenticated`:
+    ///    the credential is wrong or missing, and signing in again is the fix.
     /// 2. A 404 or "Could not resolve to a Repository" is `commandFailed`: the repo is renamed,
     ///    deleted, or not visible to this account. Neither waiting nor signing in fixes it, so it
     ///    keeps the neutral reason and carries the line that says what happened.
     /// 3. Only an explicit rate-limit message or a 429 is `rateLimited`, whose copy promises that
     ///    waiting a few minutes fixes it.
-    /// 4. Any **other** 403 is `ghNotAuthenticated`: SAML enforcement, a missing `repo` scope, an
-    ///    IP allow-list, an organization policy. All of them are answered by signing in again
-    ///    with the right grant, and none of them by waiting — which is what the old blanket
-    ///    "403 means rate limited" told a managed NYT account.
-    /// 5. Everything else is `commandFailed` carrying the first stderr line.
-    public nonisolated static func availability(forFailedCommand error: CommandError, host: String) -> PRAvailability {
+    /// 4. Any **other** 403 is `forbidden`: SAML enforcement, a missing `repo` scope, an IP
+    ///    allow-list, an organization policy. It used to be `ghNotAuthenticated`, whose one action
+    ///    is `gh auth login` — a loop a managed NYT account cannot get out of, because none of
+    ///    these is a credential problem (codex round 2, MAJOR 7).
+    /// 5. The runner's timeout is `timedOut`, and only the runner's timeout: it is the one failure
+    ///    whose copy may say the CLI ran out of time.
+    /// 6. Everything else is `commandFailed` carrying the first stderr line, and its copy claims
+    ///    nothing about the cause or the cure.
+    ///
+    /// `repo` is the `host/owner/name` the request named, which `forbidden`'s copy repeats back;
+    /// with none given the host stands in, which is what an auth preflight has.
+    public nonisolated static func availability(
+        forFailedCommand error: CommandError,
+        host: String,
+        repo: String? = nil
+    ) -> PRAvailability {
         switch error {
         case .launchFailed(_, let message):
             // The GUI PATH has no Homebrew: a launch failure is a missing `gh`, and the reason
@@ -249,7 +323,9 @@ public actor GHClient {
 
         case .nonZeroExit(_, let standardError):
             let lowercased = standardError.lowercased()
-            if lowercased.contains("bad credentials") || standardError.contains("HTTP 401") {
+            if lowercased.contains("bad credentials")
+                || standardError.contains("HTTP 401")
+                || lowercased.contains("not logged in") {
                 return .unavailable(.ghNotAuthenticated(host: host), detail: diagnostic(standardError))
             }
             if lowercased.contains("could not resolve to a repository")
@@ -260,20 +336,26 @@ public actor GHClient {
                 return .unavailable(.rateLimited, detail: diagnostic(standardError))
             }
             if standardError.contains("HTTP 403") {
-                return .unavailable(.ghNotAuthenticated(host: host), detail: firstLine(standardError))
+                return .unavailable(.forbidden(repo: repo ?? host), detail: firstLine(standardError))
             }
             // Everything the reason list does not name: the first stderr line is the diagnostic,
             // so the log says what happened and the row still renders.
             return .unavailable(.commandFailed, detail: firstLine(standardError))
 
         case .timedOut(let after):
-            return .unavailable(.commandFailed, detail: "gh timed out after \(Int(after))s")
+            return .unavailable(.timedOut, detail: "gh timed out after \(Int(after))s")
 
         case .cancelled:
             return .unavailable(.commandFailed, detail: "gh was cancelled")
 
         case .outputTooLarge(let stream, let limit):
             return .unavailable(.commandFailed, detail: "gh wrote more than \(limit) bytes to \(stream.rawValue)")
+
+        // Packet F6 / codex round 2, MINOR 2. A pipe that failed partway is a failure to hear the
+        // answer, not an answer: the partial output is discarded upstream, so the row says the
+        // command failed rather than showing a shorter list than gh actually returned.
+        case .readFailed(let stream, let message):
+            return .unavailable(.commandFailed, detail: "could not read gh's \(stream.rawValue): \(message)")
         }
     }
 
@@ -296,7 +378,8 @@ public actor GHClient {
             guard output.exitCode == 0 else {
                 return .failure(Self.availability(
                     forFailedCommand: .nonZeroExit(exitCode: output.exitCode, standardError: output.standardErrorText),
-                    host: slug.host
+                    host: slug.host,
+                    repo: slug.ghRepoArgument
                 ))
             }
             do {
@@ -307,7 +390,7 @@ public actor GHClient {
                 return .failure(.unavailable(.commandFailed, detail: Self.diagnostic("\(error)")))
             }
         } catch let error as CommandError {
-            return .failure(Self.availability(forFailedCommand: error, host: slug.host))
+            return .failure(Self.availability(forFailedCommand: error, host: slug.host, repo: slug.ghRepoArgument))
         } catch {
             return .failure(.unavailable(.commandFailed, detail: Self.diagnostic("\(error)")))
         }

@@ -35,19 +35,32 @@ public enum PushInfoDeriver {
     ///   really did push, and the row says so beside "Upstream missing from last-known origin".
     /// - **Unknown tip.** With no `remoteTipOID` there is no evidence origin moved, so
     ///   `originMovedSince` stays false. The app never fetches and never guesses.
+    /// `remoteName` names the remote every fact here was measured against; it defaults to the
+    /// upstream's own remote, and a caller that resolved the tip from `origin/<branch>` behind an
+    /// untracked branch passes `"origin"`. `remoteRefExists` follows from the tip: a
+    /// remote-tracking ref that `for-each-ref` listed is a ref that exists (codex round 2,
+    /// MAJOR 5).
     public static func derive(
         observation: ReflogObservation?,
         upstream: Upstream?,
         remoteTipOID: String?,
         remoteTipCommitDate: Date?,
-        fetchHeadObservedAt: Date? = nil
+        fetchHeadObservedAt: Date? = nil,
+        remoteName: String? = nil
     ) -> PushInfo {
+        let remote = remoteName ?? upstream?.remote
+        let remoteRefExists = remoteTipOID != nil || remoteTipCommitDate != nil
+
         guard let upstream else {
             // No tracking configuration, but the reflog of a same-named remote ref may still hold
             // a real push. The count stays nil — there is no upstream to be ahead of — while the
             // observation is reported for what it is.
             guard let observation else {
-                return PushInfo(source: .none, hasUpstream: false)
+                return PushInfo(
+                    source: .none,
+                    hasUpstream: false,
+                    remoteName: remote,
+                    remoteRefExists: remoteRefExists)
             }
             return PushInfo(
                 observedPushAt: observation.pushedAt,
@@ -57,7 +70,9 @@ public enum PushInfoDeriver {
                 hasUpstream: false,
                 aheadOfLastKnownRemote: nil,
                 remoteRefObservedAt: fetchHeadObservedAt,
-                remoteTipCommitDate: remoteTipCommitDate)
+                remoteTipCommitDate: remoteTipCommitDate,
+                remoteName: remote,
+                remoteRefExists: remoteRefExists)
         }
 
         let source: PushInfo.Source
@@ -81,7 +96,9 @@ public enum PushInfoDeriver {
             upstreamGone: upstream.isGone,
             aheadOfLastKnownRemote: upstream.isGone ? nil : upstream.ahead,
             remoteRefObservedAt: fetchHeadObservedAt,
-            remoteTipCommitDate: remoteTipCommitDate
+            remoteTipCommitDate: remoteTipCommitDate,
+            remoteName: remote,
+            remoteRefExists: remoteRefExists
         )
     }
 

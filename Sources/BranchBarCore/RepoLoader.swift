@@ -11,6 +11,14 @@ public struct RepoLoader: Sendable {
     private let reflog: ReflogFileReader
     private let fileSystem: FileSystem
     private let policy: RefreshPolicy
+    /// The seam the per-remote URL lookup runs through, and the git it runs. Optional because
+    /// `GitClient` freezes one remote — `origin` — and belongs to another packet: rather than add
+    /// an invocation there, the loader issues `config --get remote.<name>.url` itself, in the same
+    /// frozen shape and environment `GitClient.command` builds (codex round 2, MAJOR 4). With no
+    /// runner the loader resolves origin from the slug and nothing else, which is what it did
+    /// before.
+    private let runner: CommandRunner?
+    private let gitPath: String?
 
     /// `fileSystem` is the same seam `reflog` already reads through, named separately because the
     /// loader also has to stat `FETCH_HEAD` for the "last seen" anchor (codex MAJOR 7) and
@@ -21,13 +29,17 @@ public struct RepoLoader: Sendable {
         gh: GHClient?,
         reflog: ReflogFileReader,
         fileSystem: FileSystem = RealFileSystem(),
-        policy: RefreshPolicy = .default
+        policy: RefreshPolicy = .default,
+        runner: CommandRunner? = nil,
+        gitPath: String? = nil
     ) {
         self.git = git
         self.gh = gh
         self.reflog = reflog
         self.fileSystem = fileSystem
         self.policy = policy
+        self.runner = runner
+        self.gitPath = gitPath
     }
 
     /// Run the five git stages for this repo (`rev-parse`, `config --get remote.origin.url`, both
@@ -155,6 +167,26 @@ public struct RepoLoader: Sendable {
                 message: "git worktree list --porcelain -z failed (\(Self.describe(error)))"))
         }
 
+        // Who owns each remote this repo's branches actually track. `origin` is the slug, which
+        // stage 2 already read; every other remote costs one `config --get remote.<name>.url`,
+        // issued once per distinct name. Without it a branch tracking a fork fell back to the
+        // origin repository's owner, which is a different head that happens to share a name
+        // (codex round 2, MAJOR 4).
+        var remoteOwners: [String: String] = [:]
+        if let owner = slug?.owner { remoteOwners["origin"] = owner }
+        for name in Self.upstreamRemoteNames(of: branchRefs) where remoteOwners[name] == nil {
+            do {
+                if let url = try await configuredRemoteURL(forRemote: name, at: path),
+                   let remoteSlug = GitHubSlug(remoteURL: url) {
+                    remoteOwners[name] = remoteSlug.owner
+                }
+            } catch {
+                errors.append(RepoError(
+                    stage: .remotes,
+                    message: "git config --get remote.\(name).url failed (\(Self.describe(error)))"))
+            }
+        }
+
         // When this clone last heard from origin. `FETCH_HEAD` is rewritten by every fetch and by
         // nothing else, so its modification date is a local observation — unlike the remote tip's
         // committer date, which the tooltip used to report as "last seen" (codex MAJOR 7). A clone
@@ -215,7 +247,11 @@ public struct RepoLoader: Sendable {
             pr.pullRequests = cachedPRs.prs
             pr.authored = cachedPRs.authorPRs
             pr.fetchedAt = cachedPRs.fetchedAt
-            pr.queriedHeads = Set(cachedPRs.queriedHeads).union(cachedPRs.prs.map(\.headRefName))
+            // `queriedHeads` are the heads a `--head` query asked about, which answers for every
+            // owner; the recent-100 list is re-read out of `prs` and answers only for the owners
+            // it named (codex round 2, MAJOR 4).
+            pr.coverage = PRQueryCoverage(anyOwnerHeads: Set(cachedPRs.queriedHeads))
+            for entry in cachedPRs.prs { pr.coverage.record(entry) }
             pr.loadState = .loaded
         } else if wantsPullRequests {
             await runPullRequestStage(
@@ -224,6 +260,7 @@ public struct RepoLoader: Sendable {
                 branchRefs: branchRefs,
                 remoteURL: remoteURL,
                 slug: slug,
+                remoteOwners: remoteOwners,
                 now: now)
             // Only a fetch that reached the recent-100 list is worth keeping; a failed one would
             // cache a blank answer as if GitHub had given it.
@@ -232,7 +269,7 @@ public struct RepoLoader: Sendable {
                     fetchedAt: fetchedAt,
                     prs: pr.pullRequests,
                     authorPRs: pr.authored,
-                    queriedHeads: pr.queriedHeads.sorted())
+                    queriedHeads: pr.coverage.anyOwnerHeads.sorted())
             }
         } else if let cachedPRs {
             // Not eager, and the entry is past its TTL: show what was last known rather than
@@ -255,7 +292,8 @@ public struct RepoLoader: Sendable {
             pushObservations: observations,
             pullRequests: pr.pullRequests,
             authoredOpenPullRequests: pr.authored,
-            queriedHeads: pr.queriedHeads,
+            queryCoverage: pr.coverage,
+            remoteOwners: remoteOwners,
             prAvailability: pr.availability,
             prFetchedAt: pr.fetchedAt,
             prLoadState: pr.loadState,
@@ -273,7 +311,7 @@ public struct RepoLoader: Sendable {
     private struct PRStage {
         var pullRequests: [PRInfo] = []
         var authored: [PRInfo] = []
-        var queriedHeads: Set<String> = []
+        var coverage = PRQueryCoverage()
         var availability: PRAvailability = .available
         var fetchedAt: Date?
         var loadState: PRLoadState = .notLoaded
@@ -288,6 +326,7 @@ public struct RepoLoader: Sendable {
         branchRefs: [ParsedBranchRef],
         remoteURL: String?,
         slug: GitHubSlug?,
+        remoteOwners: [String: String],
         now: Date
     ) async {
         pr.loadState = .loaded
@@ -313,21 +352,32 @@ public struct RepoLoader: Sendable {
         case .success(let recent):
             pr.pullRequests = recent
             pr.fetchedAt = now
-            pr.queriedHeads.formUnion(recent.map(\.headRefName))
+            // One (owner, head) pair per PR, not one head name: the list answered for the heads it
+            // named and for nobody else's (codex round 2, MAJOR 4).
+            for entry in recent { pr.coverage.record(entry) }
         }
 
         // The per-head fallback, capped per repo per refresh by `GHClient`. The cap is spent
         // most-recently-active first, because that is where a live PR is: branches past it render
         // `notChecked`, never `none` (`unqueriedBranchIsNotCheckedNeverNone`).
+        let coverage = pr.coverage
         let unmatched = branchRefs
             .filter { $0.refName.hasPrefix("refs/heads/") }
             .sorted { $0.committerDate > $1.committerDate }
+            .filter { row in
+                let upstream = ForEachRefParser.upstream(from: row)
+                let owner = RepoAssembler.upstreamOwnerLogin(
+                    upstream: upstream, slug: slug, remoteOwners: remoteOwners)
+                let claimed = (upstream != nil && owner == nil) ? nil : (owner ?? slug.owner)
+                return !coverage.covers(headRefName: row.branchName, ownerLogin: claimed)
+            }
             .map(\.branchName)
-            .filter { !pr.queriedHeads.contains($0) }
 
         if !unmatched.isEmpty {
             for (head, prs) in await gh.pullRequests(slug: slug, unmatchedHeads: unmatched) {
-                pr.queriedHeads.insert(head)
+                // `--head <name>` filters on the head branch and not on its owner, so it answers
+                // for every owner of that head.
+                pr.coverage.recordAnyOwner(head: head)
                 pr.pullRequests.append(contentsOf: prs)
             }
         }
@@ -371,6 +421,47 @@ public struct RepoLoader: Sendable {
         return repo
     }
 
+    /// Distinct `%(upstream:remotename)` values across the `refs/heads` rows, in first-seen order.
+    /// One lookup per remote, however many branches track it.
+    static func upstreamRemoteNames(of branchRefs: [ParsedBranchRef]) -> [String] {
+        var seen: Set<String> = []
+        var names: [String] = []
+        for row in branchRefs where row.refName.hasPrefix("refs/heads/") {
+            guard let remote = ForEachRefParser.upstream(from: row)?.remote, !remote.isEmpty else { continue }
+            if seen.insert(remote).inserted { names.append(remote) }
+        }
+        return names
+    }
+
+    /// `git -C <path> config --get remote.<name>.url`, the same invocation `GitClient` runs for
+    /// origin, in the same frozen shape and environment. An unset key is nil and not an error, as
+    /// it is for origin; the URL is sanitized before it can reach a log or the cache, because an
+    /// HTTPS remote can carry a token as its user info (codex MAJOR 1).
+    private func configuredRemoteURL(forRemote name: String, at path: String) async throws -> String? {
+        guard let runner, let gitPath else { return nil }
+        let output = try await runner.run(GitClient.command(
+            gitPath: gitPath,
+            arguments: ["config", "--get", "remote.\(name).url"],
+            at: path,
+            timeout: policy.gitTimeout))
+        let url = output.standardOutputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if url.isEmpty {
+            // Exit 1 with nothing on stdout is "the key is unset"; anything else is a failure.
+            if output.exitCode != 0 && output.exitCode != 1 {
+                throw CommandError.nonZeroExit(
+                    exitCode: output.exitCode,
+                    standardError: output.standardErrorText.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return nil
+        }
+        guard output.exitCode == 0 else {
+            throw CommandError.nonZeroExit(
+                exitCode: output.exitCode,
+                standardError: output.standardErrorText.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return GitClient.sanitize(remoteURL: url)
+    }
+
     /// A short diagnostic for the log. Never user-facing copy — packet 4.0's `Strings.swift` owns
     /// what the user reads for each failure.
     private static func describe(_ error: Error) -> String {
@@ -386,6 +477,10 @@ public struct RepoLoader: Sendable {
             // Packet F3 / codex MAJOR 15: the one line this file needs for the new seam case.
             case .outputTooLarge(let stream, let limit):
                 return "\(stream.rawValue) exceeded \(limit / (1024 * 1024)) MB and the child was terminated"
+            // Packet F6 / codex round 2, MINOR 2: a pipe read that failed partway is not a short
+            // answer; the partial output is discarded and this is what the log says instead.
+            case .readFailed(let stream, let message):
+                return "could not read \(stream.rawValue): \(message)"
             }
         default:
             return "\(error)"
@@ -401,6 +496,8 @@ public struct RepoLoader: Sendable {
         case .noRemote: name = "noRemote"
         case .notGitHubRemote: name = "notGitHubRemote"
         case .rateLimited: name = "rateLimited"
+        case .forbidden(let repo): name = "forbidden(\(repo))"
+        case .timedOut: name = "timedOut"
         case .commandFailed: name = "commandFailed"
         }
         guard let detail, !detail.isEmpty else { return name }

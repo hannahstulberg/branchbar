@@ -28,9 +28,15 @@ public enum RepoAssembler {
         /// The recent-100 list plus anything the per-head fallback returned.
         public var pullRequests: [PRInfo]
         public var authoredOpenPullRequests: [PRInfo]
-        /// Branch names whose head was actually queried. A branch outside this set gets
-        /// `notChecked`; a branch inside it with no PR gets `none`.
-        public var queriedHeads: Set<String>
+        /// The (owner, head) pairs this refresh actually asked GitHub about. A branch the
+        /// coverage does not cover gets `notChecked`; one it covers with no PR gets `none`.
+        /// Keyed by owner as well as name since codex round 2 MAJOR 4.
+        public var queryCoverage: PRQueryCoverage
+        /// Owner login per configured remote name, resolved by `RepoLoader` from
+        /// `config --get remote.<name>.url`. A branch tracking a remote that is absent here has an
+        /// owner that exists and could not be established, which is not the same as origin's
+        /// (codex round 2, MAJOR 4).
+        public var remoteOwners: [String: String]
         public var prAvailability: PRAvailability
         public var prFetchedAt: Date?
         public var prLoadState: PRLoadState
@@ -50,7 +56,8 @@ public enum RepoAssembler {
             pushObservations: [String: ReflogObservation] = [:],
             pullRequests: [PRInfo] = [],
             authoredOpenPullRequests: [PRInfo] = [],
-            queriedHeads: Set<String> = [],
+            queryCoverage: PRQueryCoverage = PRQueryCoverage(),
+            remoteOwners: [String: String] = [:],
             prAvailability: PRAvailability = .available,
             prFetchedAt: Date? = nil,
             prLoadState: PRLoadState = .notLoaded,
@@ -69,7 +76,8 @@ public enum RepoAssembler {
             self.pushObservations = pushObservations
             self.pullRequests = pullRequests
             self.authoredOpenPullRequests = authoredOpenPullRequests
-            self.queriedHeads = queriedHeads
+            self.queryCoverage = queryCoverage
+            self.remoteOwners = remoteOwners
             self.prAvailability = prAvailability
             self.prFetchedAt = prFetchedAt
             self.prLoadState = prLoadState
@@ -109,8 +117,17 @@ public enum RepoAssembler {
         for row in inputs.branchRefs where row.refName.hasPrefix("refs/heads/") {
             let name = row.branchName
             let upstream = ForEachRefParser.upstream(from: row)
-            let tip = upstream.flatMap { remoteTips[$0.ref] }
-            let owner = upstreamOwnerLogin(upstream: upstream, slug: slug)
+            let upstreamTip = upstream.flatMap { remoteTips[$0.ref] }
+            // The same-named `origin/<branch>` behind an untracked branch (codex MAJOR 6): the ref
+            // whose reflog the loader read, and the remote its wording has to name.
+            let sameNamedOriginTip = remoteTips["origin/\(name)"]
+            let tip = upstreamTip ?? sameNamedOriginTip
+            let remoteName = upstream?.remote ?? (sameNamedOriginTip != nil ? "origin" : nil)
+            let owner = upstreamOwnerLogin(upstream: upstream, slug: slug, remoteOwners: inputs.remoteOwners)
+            // A branch that tracks something whose owner this app never resolved: the head exists
+            // on GitHub, and which head it is was never established (codex round 2, MAJOR 4).
+            let ownerUnresolved = upstream != nil && owner == nil
+            let claimedOwner = ownerUnresolved ? nil : (owner ?? slug?.owner)
 
             localBranchNames.insert(name)
             if let owner {
@@ -123,6 +140,7 @@ public enum RepoAssembler {
                     branchName: name,
                     upstreamOwnerLogin: owner,
                     repoOwnerLogin: slug?.owner,
+                    upstreamOwnerUnresolved: ownerUnresolved,
                     in: inputs.pullRequests)
 
             let status: PRStatus
@@ -134,8 +152,11 @@ public enum RepoAssembler {
                 status = PRStatusMapper.status(for: matched)
             } else {
                 // The `none` versus `notChecked` distinction: `none` is only reachable after this
-                // head was actually queried (`unqueriedBranchIsNotCheckedNeverNone`).
-                status = inputs.queriedHeads.contains(name) ? .none : .notChecked
+                // branch's own head — owner included — was queried
+                // (`unqueriedBranchIsNotCheckedNeverNone`, `unknownOwnerRendersNotCheckedNeverNone`).
+                status = inputs.queryCoverage.covers(headRefName: name, ownerLogin: claimedOwner)
+                    ? .none
+                    : .notChecked
             }
 
             let worktreePath = worktreeByBranch[name]?.path
@@ -152,9 +173,10 @@ public enum RepoAssembler {
                 push: PushInfoDeriver.derive(
                     observation: inputs.pushObservations[name],
                     upstream: upstream,
-                    remoteTipOID: tip?.objectName ?? remoteTips["origin/\(name)"]?.objectName,
-                    remoteTipCommitDate: tip?.committerDate ?? remoteTips["origin/\(name)"]?.committerDate,
-                    fetchHeadObservedAt: inputs.fetchHeadObservedAt),
+                    remoteTipOID: tip?.objectName,
+                    remoteTipCommitDate: tip?.committerDate,
+                    fetchHeadObservedAt: inputs.fetchHeadObservedAt,
+                    remoteName: remoteName),
                 group: group(
                     status: status,
                     tipSHA: row.objectName,
@@ -207,13 +229,19 @@ public enum RepoAssembler {
         return byName
     }
 
-    /// The owner half of the "Open PRs not on this Mac" key and of the PR tie-break. It is known
-    /// only for `origin`, whose owner the slug names; a branch tracking some other remote has an
-    /// owner this app never resolved, and guessing the slug's owner there would silently hide a
-    /// fork PR (`openElsewhereKeyedByOwnerAndBranchNotBranchAlone`).
-    static func upstreamOwnerLogin(upstream: Upstream?, slug: GitHubSlug?) -> String? {
-        guard let upstream, upstream.remote == "origin" else { return nil }
-        return slug?.owner
+    /// The owner half of the "Open PRs not on this Mac" key and of the PR match. Guessing the
+    /// slug's owner for a branch that tracks something else would silently hide a fork PR
+    /// (`openElsewhereKeyedByOwnerAndBranchNotBranchAlone`), so it is only ever resolved:
+    /// `remoteOwners` for any configured remote whose URL `RepoLoader` read, and the slug for
+    /// origin, whose URL is the slug (codex round 2, MAJOR 4 widened this past origin).
+    static func upstreamOwnerLogin(
+        upstream: Upstream?,
+        slug: GitHubSlug?,
+        remoteOwners: [String: String] = [:]
+    ) -> String? {
+        guard let upstream else { return nil }
+        if let resolved = remoteOwners[upstream.remote] { return resolved }
+        return upstream.remote == "origin" ? slug?.owner : nil
     }
 
     /// PLAN.md §5: `merged` = `prStatus == merged && tipSHA == headRefOid && worktreePath == nil`;

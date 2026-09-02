@@ -62,8 +62,21 @@ public struct GitHubSlug: Hashable, Codable, Sendable {
         return true
     }
 
+    /// The one host that is GitHub without asking anybody (codex round 2, MAJOR 6). Every other
+    /// host has to be one `gh auth status` already reports a login for.
+    public static let gitHubDotCom = "github.com"
+
     /// The `--repo` operand of every `gh pr list` invocation in PLAN.md §5.
     public var ghRepoArgument: String { "\(host)/\(owner)/\(name)" }
+
+    /// The owner login folded for comparison, never for display (codex round 2, MAJOR 4).
+    ///
+    /// GitHub logins are case-insensitive: `Contributor` and `contributor` are one account. The
+    /// clone URL carries whatever casing was typed and `gh` prints whatever casing the account was
+    /// created with, so comparing the two as bytes rejected the user's own PR and left the row
+    /// reading "No PR" beside an open one. `owner` keeps its original casing because it is what a
+    /// `--repo` operand and a PR link are built from.
+    public var ownerKey: String { owner.lowercased() }
 
     /// Parses the string `git config --get remote.origin.url` prints.
     ///

@@ -52,17 +52,28 @@ public enum PRStatusMapper {
     ///   owner it could plausibly have, and a candidate from elsewhere is not evidence about it.
     /// - Neither known — a repo whose remote never parsed — is no basis to reject, so the head
     ///   name alone matches, as it always did.
+    ///
+    /// Two changes came from codex round 2 (MAJOR 4). Logins are compared case-insensitively:
+    /// GitHub treats `Contributor` and `contributor` as one account, `gh` prints the casing the
+    /// account was created with, and the clone URL carries the casing that was typed, so a byte
+    /// comparison rejected the user's own PR. And `upstreamOwnerUnresolved` is the third answer
+    /// the old two-valued owner could not express: a branch tracking a remote whose URL this app
+    /// could not resolve has an owner that exists and is unknown, which is a reason to claim
+    /// nothing — not a licence to fall back to the origin repository's owner and not a licence to
+    /// match on the head name alone.
     public static func match(
         branchName: String,
         upstreamOwnerLogin: String?,
         repoOwnerLogin: String? = nil,
+        upstreamOwnerUnresolved: Bool = false,
         in prs: [PRInfo]
     ) -> PRInfo? {
-        let claimedOwner = upstreamOwnerLogin ?? repoOwnerLogin
+        guard !upstreamOwnerUnresolved else { return nil }
+        let claimedOwner = (upstreamOwnerLogin ?? repoOwnerLogin)?.lowercased()
         let candidates = prs.filter { pr in
             guard pr.headRefName == branchName else { return false }
             guard let claimedOwner else { return true }
-            return pr.headRepositoryOwnerLogin == claimedOwner
+            return pr.headRepositoryOwnerLogin.lowercased() == claimedOwner
         }
         guard candidates.count > 1 else { return candidates.first }
 
@@ -97,12 +108,16 @@ public enum PRStatusMapper {
     }
 
     /// The key PLAN.md §3 requires for "Open PRs not on this Mac": owner **and** branch.
+    ///
+    /// `ownerLogin` is held lower-cased (codex round 2, MAJOR 4). This value is a lookup key and
+    /// nothing renders it, so folding it here is what makes the set membership test agree with
+    /// GitHub's own case-insensitive account names.
     public struct LocalHead: Hashable, Codable, Sendable {
         public var ownerLogin: String
         public var branchName: String
 
         public init(ownerLogin: String, branchName: String) {
-            self.ownerLogin = ownerLogin
+            self.ownerLogin = ownerLogin.lowercased()
             self.branchName = branchName
         }
     }

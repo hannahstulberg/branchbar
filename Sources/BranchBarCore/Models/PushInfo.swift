@@ -11,9 +11,14 @@ public struct PushInfo: Hashable, Codable, Sendable {
     public var observedPushAt: Date?
     /// New OID of that line.
     public var observedPushOID: String?
-    /// `observedPushOID != current remote-tracking tip OID` → append "(origin has moved since)".
+    /// `observedPushOID != current remote-tracking tip OID` → append "(<remote> has moved since)".
+    /// Named for origin because origin is the modal remote; the wording it drives names
+    /// `remoteName` (codex round 2, MAJOR 5).
     public var originMovedSince: Bool
     public var source: Source
+    /// The branch has tracking configuration — this is the `hasConfiguredUpstream` fact codex
+    /// round 2 MAJOR 5 asks the row to keep apart from `remoteRefExists`. The stored name is
+    /// unchanged because it is a required key of every `CacheFile` already on disk.
     public var hasUpstream: Bool
     /// `%(upstream:track,nobracket)` said `gone`; copy says "Upstream missing from last-known
     /// origin", never "deleted on GitHub" — the app never fetches.
@@ -30,6 +35,26 @@ public struct PushInfo: Hashable, Codable, Sendable {
     /// local tip can sit far ahead of what origin holds, so `Branch.committerDate` was the wrong
     /// number there (codex MAJOR 7).
     public var remoteTipCommitDate: Date?
+    /// The remote every count and every "has moved since" on this row was measured against —
+    /// `%(upstream:remotename)`, or `origin` when an untracked branch's `origin/<name>` supplied
+    /// the tip. Nil when there was nothing to measure against.
+    ///
+    /// Carried since codex round 2 MAJOR 5: a branch tracking `fork/feature` was compared against
+    /// `fork` and then told the user about origin.
+    /// Defaulted so a `CacheFile` written before this field decodes.
+    public var remoteName: String? = nil
+    /// A remote-tracking ref for this branch was in `for-each-ref -- refs/remotes/`.
+    ///
+    /// Separate from `hasUpstream` because the two differ exactly where the old copy contradicted
+    /// itself: `git push origin feature` without `-u` leaves no tracking configuration and a real
+    /// `origin/feature`, and the row read its reflog and then said there was no matching branch on
+    /// origin (codex round 2, MAJOR 5).
+    /// Defaulted so a `CacheFile` written before this field decodes.
+    public var remoteRefExists: Bool = false
+
+    /// The `hasConfiguredUpstream` half of the codex round 2 MAJOR 5 split, under the name the
+    /// finding uses. It is `hasUpstream`, which stays the stored name for cache compatibility.
+    public var hasConfiguredUpstream: Bool { hasUpstream }
 
     /// Where `observedPushAt` (or the fallback date) came from. PLAN.md §3.
     public enum Source: String, Hashable, Codable, Sendable, CaseIterable {
@@ -50,7 +75,9 @@ public struct PushInfo: Hashable, Codable, Sendable {
         upstreamGone: Bool = false,
         aheadOfLastKnownRemote: Int? = nil,
         remoteRefObservedAt: Date? = nil,
-        remoteTipCommitDate: Date? = nil
+        remoteTipCommitDate: Date? = nil,
+        remoteName: String? = nil,
+        remoteRefExists: Bool = false
     ) {
         self.observedPushAt = observedPushAt
         self.observedPushOID = observedPushOID
@@ -61,6 +88,8 @@ public struct PushInfo: Hashable, Codable, Sendable {
         self.aheadOfLastKnownRemote = aheadOfLastKnownRemote
         self.remoteRefObservedAt = remoteRefObservedAt
         self.remoteTipCommitDate = remoteTipCommitDate
+        self.remoteName = remoteName
+        self.remoteRefExists = remoteRefExists
     }
 }
 

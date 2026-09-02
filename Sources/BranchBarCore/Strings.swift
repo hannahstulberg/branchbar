@@ -198,14 +198,55 @@ public enum Strings {
         "GitHub is limiting how many requests it will answer right now. Waiting a few minutes and "
         + "refreshing again fixes this."
 
-    /// State: `pr-list-timeout` — heading for a PR lookup that failed or ran out of time.
+    /// State: `pr-list-timeout`, `gh-command-failed` — heading for a PR lookup that failed or ran
+    /// out of time.
     /// Literal: `PR status did not load`
     public static let commandFailedTitle = "PR status did not load"
 
-    /// State: `pr-list-timeout` — covers both a failure and the 25-second lookup timeout.
+    /// State: `gh-command-failed` — a `gh` failure the reason list does not name: a 404, a
+    /// renamed repo, malformed JSON, a permission error on the CLI itself. It used to share
+    /// `timedOutMessage`, which asserted both a cause the app cannot know and a cure that does not
+    /// exist — a deleted repository does not come back on refresh (codex round 2, MAJOR 7). The
+    /// detail is the first stderr line, flattened and capped by `diagnosticLine`.
+    /// Literal: `The GitHub CLI reported an error for this repo: HTTP 404: Not Found`
+    public static func commandFailedMessage(detail: String? = nil) -> String {
+        guard let line = diagnosticLine(detail) else { return "The GitHub CLI reported an error for this repo." }
+        return "The GitHub CLI reported an error for this repo: \(line)"
+    }
+
+    /// State: `pr-list-timeout` — the one failure whose copy may say the CLI ran out of time,
+    /// because the runner's own timeout is what produced it (codex round 2, MAJOR 7).
     /// Literal: `The GitHub CLI did not answer for this repo in time. Refreshing usually fixes it.`
-    public static let commandFailedMessage =
+    public static let timedOutMessage =
         "The GitHub CLI did not answer for this repo in time. Refreshing usually fixes it."
+
+    /// State: `gh-forbidden` — heading for a 403 that is neither rate limiting nor a bad token.
+    /// Literal: `GitHub refused this request`
+    public static let forbiddenTitle = "GitHub refused this request"
+
+    /// State: `gh-forbidden` — SAML enforcement, an IP allow-list, an organization policy, a grant
+    /// the account does not have. Every one of them is HTTP 403 and none of them is answered by
+    /// `gh auth login`, which is where the old blanket mapping sent a managed NYT account
+    /// (codex round 2, MAJOR 7).
+    /// Literal: `GitHub refused this request for github.com/newsroom/demo (policy, SSO, or scopes). Signing in again will not fix it.`
+    public static func forbiddenMessage(repo: String) -> String {
+        "GitHub refused this request for \(repo) (policy, SSO, or scopes). Signing in again will not fix it."
+    }
+
+    /// A repo-owned diagnostic on its way to the screen: one line, no control characters, capped.
+    /// `gh` stderr can carry anything the remote sent, and the only copy that repeats it is
+    /// `commandFailedMessage`. Internal on purpose: it renders no state of its own, so it is not
+    /// a row of the string contract.
+    static func diagnosticLine(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let firstLine = text.split(whereSeparator: \.isNewline).first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard let firstLine else { return nil }
+        let stripped = String(String.UnicodeScalarView(
+            firstLine.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+        let trimmed = stripped.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.count <= 160 ? trimmed : String(trimmed.prefix(159)) + "…"
+    }
 
     /// State: `rate-limited`, `no-remote`, `no-github-remote`, `pr-list-timeout`, `repo-failed`,
     /// `deadline-exceeded` — the fallback action when nothing more specific helps.
@@ -213,11 +254,13 @@ public enum Strings {
     public static let refreshActionLabel = "Refresh"
 
     /// State: `gh-not-installed`, `gh-not-authenticated`, `no-remote`, `no-github-remote`,
-    /// `rate-limited`, `pr-list-timeout` — one `UserFacingFailure` per reason, each with exactly one
-    /// action (`unavailableReasonCopyNamesOneActionPerReason`). `diagnostic` stays empty here: the
-    /// caller fills it with the `gh` output, which is logged and never rendered.
-    /// Literal: see the six title/message pairs above
-    public static func unavailable(reason: PRUnavailableReason) -> UserFacingFailure {
+    /// `rate-limited`, `pr-list-timeout`, `gh-forbidden`, `gh-command-failed` — one
+    /// `UserFacingFailure` per reason, each with exactly one action
+    /// (`unavailableReasonCopyNamesOneActionPerReason`). `detail` is the `gh` output, and exactly
+    /// one reason repeats it: `commandFailed`, whose copy has nothing else to say (codex round 2,
+    /// MAJOR 7). Every other reason still logs it and renders none of it.
+    /// Literal: see the eight title/message pairs above
+    public static func unavailable(reason: PRUnavailableReason, detail: String? = nil) -> UserFacingFailure {
         switch reason {
         case .ghNotInstalled:
             return UserFacingFailure(
@@ -257,10 +300,22 @@ public enum Strings {
                 message: rateLimitedMessage,
                 action: UserFacingFailure.Action(label: refreshActionLabel, kind: .retryRefresh)
             )
+        case .forbidden(let repo):
+            return UserFacingFailure(
+                title: forbiddenTitle,
+                message: forbiddenMessage(repo: repo),
+                action: UserFacingFailure.Action(label: refreshActionLabel, kind: .retryRefresh)
+            )
+        case .timedOut:
+            return UserFacingFailure(
+                title: commandFailedTitle,
+                message: timedOutMessage,
+                action: UserFacingFailure.Action(label: refreshActionLabel, kind: .retryRefresh)
+            )
         case .commandFailed:
             return UserFacingFailure(
                 title: commandFailedTitle,
-                message: commandFailedMessage,
+                message: commandFailedMessage(detail: detail),
                 action: UserFacingFailure.Action(label: refreshActionLabel, kind: .retryRefresh)
             )
         }
@@ -372,14 +427,23 @@ public enum Strings {
     /// PLAN.md §3 locks "Pushed from this Mac" and forbids "You pushed": the record says what this
     /// Mac observed and nothing about who did it or what other machines did.
     /// Literal: `Pushed from this Mac 2 days ago` (plus ` (origin has moved since)`)
-    public static func pushed(reflogAt: Date, now: Date, originMovedSince moved: Bool = false) -> String {
+    public static func pushed(
+        reflogAt: Date,
+        now: Date,
+        remote: String = "origin",
+        originMovedSince moved: Bool = false
+    ) -> String {
         let base = "Pushed from this Mac \(relative(reflogAt, now: now))"
-        return moved ? "\(base) \(originMovedSince)" : base
+        return moved ? "\(base) \(remoteMovedSince(remote: remote))" : base
     }
 
-    /// State: `origin-moved-since` — appended when the recorded push is no longer origin's tip.
+    /// State: `origin-moved-since`, `non-origin-upstream` — appended when the recorded push is no
+    /// longer the tip of the remote this branch was compared against. It named origin whatever the
+    /// remote was, on a row whose count had been measured against a fork (codex round 2, MAJOR 5).
     /// Literal: `(origin has moved since)`
-    public static let originMovedSince = "(origin has moved since)"
+    public static func remoteMovedSince(remote: String = "origin") -> String {
+        "(\(remote) has moved since)"
+    }
 
     /// State: `last-push-unknown` — no usable push line (file absent, empty, fetch-only,
     /// deletion-only, expired). PLAN.md §3 locks this as a separate fact, never a quieter push
@@ -401,6 +465,15 @@ public enum Strings {
     /// Literal: `No matching branch on last-known origin`
     public static let noUpstream = "No matching branch on last-known origin"
 
+    /// State: `single-branch-no-pr-never-pushed` — the untracked branch whose `origin/<name>` this
+    /// clone does hold. `noUpstream` was rendered there too, on the same row as a push line the
+    /// reflog of that very ref produced: two sentences contradicting each other (codex round 2,
+    /// MAJOR 5). This one says the part that is true.
+    /// Literal: `origin has a branch of the same name, which this branch does not track`
+    public static func untrackedRemoteBranchExists(remote: String = "origin") -> String {
+        "\(remote) has a branch of the same name, which this branch does not track"
+    }
+
     /// State: `upstream-missing` — the tracked branch is gone from the last-known origin. PLAN.md
     /// §3 locks this verbatim and chose it over "deleted on GitHub" because BranchBar never
     /// fetches, so it cannot assert what GitHub holds now. This is the one string exempted from the
@@ -408,11 +481,19 @@ public enum Strings {
     /// Literal: `Upstream missing from last-known origin`
     public static let upstreamMissing = "Upstream missing from last-known origin"
 
+    /// State: `upstream-missing` — the same sentence about the remote the branch actually tracked
+    /// (codex round 2, MAJOR 5). `upstreamMissing` stays as the origin spelling PLAN.md §3 locked
+    /// and the SwiftUI row tests prefixes against.
+    /// Literal: `Upstream missing from last-known origin`
+    public static func upstreamMissing(remote: String) -> String {
+        "Upstream missing from last-known \(remote)"
+    }
+
     /// State: `ahead-of-last-known-origin` — PLAN.md §3 locks the wording and forbids showing
     /// behind. One is "1 ahead", never "1 aheads": the count has no noun after it.
     /// Literal: `2 ahead of last-known origin`
-    public static func ahead(_ n: Int) -> String {
-        "\(n) ahead of last-known origin"
+    public static func ahead(_ n: Int, remote: String = "origin") -> String {
+        "\(n) ahead of last-known \(remote)"
     }
 
     /// State: `in-sync` — tracked, with nothing local that origin has not seen **and** nothing on
@@ -421,11 +502,21 @@ public enum Strings {
     /// Literal: `In sync with last-known origin`
     public static let inSync = "In sync with last-known origin"
 
+    /// State: `in-sync`, `non-origin-upstream` — the same claim about the remote the comparison
+    /// actually used (codex round 2, MAJOR 5). `inSync` stays as the origin spelling the SwiftUI
+    /// row still tests prefixes against.
+    /// Literal: `In sync with last-known origin`
+    public static func inSync(remote: String) -> String {
+        "In sync with last-known \(remote)"
+    }
+
     /// State: `behind-only` — nothing local is ahead, but last-known origin carries commits this
     /// clone does not. PLAN.md §3 still forbids showing the behind count, so the line states only
     /// the half BranchBar is willing to say; "In sync" there would be false (codex MAJOR 5).
     /// Literal: `No local commits ahead of last-known origin`
-    public static let noLocalCommitsAhead = "No local commits ahead of last-known origin"
+    public static func noLocalCommitsAhead(remote: String = "origin") -> String {
+        "No local commits ahead of last-known \(remote)"
+    }
 
     /// State: `origin-moved-since` — tooltip on an observed push.
     /// Literal: `BranchBar saw this push leave this Mac. It cannot see pushes made from your other computers.`
@@ -451,18 +542,20 @@ public enum Strings {
     /// origin. `remoteObservedAt` is the `FETCH_HEAD` modification date, which is a local
     /// observation; it used to be the remote tip's committer date, so fetching a two-year-old
     /// commit today read as "last seen 2 years ago" (codex MAJOR 7).
-    /// Literal: `Counted against last-known origin, last seen 3 hours ago. BranchBar never fetches, so origin may have moved.`
-    public static func aheadTooltip(remoteObservedAt: Date?, now: Date) -> String {
-        let anchor = remoteObservedAt.map { ", last seen \(relative($0, now: now))" }
-            ?? ", \(originNotFetchedYet)"
-        return "Counted against last-known origin\(anchor). BranchBar never fetches, so origin may have moved."
+    /// Literal: `Counted against last-known origin. This repo's last fetch changed FETCH_HEAD 3 hours ago. BranchBar never fetches, so origin may have moved.`
+    public static func aheadTooltip(remote: String = "origin", remoteObservedAt: Date?, now: Date) -> String {
+        let anchor = remoteObservedAt
+            .map { " This repo's last fetch changed FETCH_HEAD \(relative($0, now: now))." }
+            ?? " \(notFetchedYet)"
+        return "Counted against last-known \(remote).\(anchor) BranchBar never fetches, so \(remote) may have moved."
     }
 
     /// State: `origin-not-fetched` — the anchor clause when there is no `FETCH_HEAD` to date. A
     /// clone that has only ever been pushed from has never fetched, and saying so is honest where
-    /// a silent omission read as "we know when, we just did not say".
-    /// Literal: `origin not fetched by this clone yet`
-    public static let originNotFetchedYet = "origin not fetched by this clone yet"
+    /// a silent omission read as "we know when, we just did not say". It is a fact about the repo
+    /// and not about one remote: `FETCH_HEAD` is repo-wide (codex round 2, MAJOR 5).
+    /// Literal: `This repo has not fetched yet.`
+    public static let notFetchedYet = "This repo has not fetched yet."
 
     // MARK: - Worktree markers
 
@@ -655,6 +748,12 @@ public enum Strings {
     /// Literal: `Showing the list from the last time BranchBar ran. Updating now…`
     public static let staleRowsNotice = "Showing the list from the last time BranchBar ran. Updating now…"
 
+    /// State: `stale-rows-idle` — rows that were never refreshed, with no refresh running to
+    /// finish them: a cancelled refresh, or one the deadline cut short. The launch-time wording
+    /// promises an update that is not coming, and the footer beside it says "Updated just now".
+    /// Literal: `Some repos did not finish updating. Refresh to try again.`
+    public static let staleRowsIdleNotice = "Some repos did not finish updating. Refresh to try again."
+
     /// State: `deadline-exceeded` — the whole refresh stopped at 45 seconds (PLAN.md §3).
     /// Literal: `BranchBar stopped after 45 seconds. Repos that did not finish are marked out of date.`
     public static let deadlineExceededNotice =
@@ -694,11 +793,13 @@ public enum Strings {
         "This only works from the BranchBar app in your Applications folder."
 
     /// State: `launch-at-login-needs-approval` — the LaunchAgent fallback writes an absolute path,
-    /// so the app has to be at that path.
-    /// Literal: `Copy BranchBar into your Applications folder first — the login item points at /Applications/BranchBar.app.`
+    /// so the app has to be at one of the two paths it will write. The second one is there because
+    /// a standard non-admin account on a managed Mac normally cannot write `/Applications`, which
+    /// made the login item unreachable for exactly the testers it ships to.
+    /// Literal: `Move BranchBar into your Applications folder first — either /Applications or the Applications folder inside your home folder.`
     public static let launchAtLoginNotInApplications =
-        "Copy BranchBar into your Applications folder first — the login item points at "
-        + "/Applications/BranchBar.app."
+        "Move BranchBar into your Applications folder first — either /Applications or the "
+        + "Applications folder inside your home folder."
 
     /// State: `launch-at-login-needs-approval` — both mechanisms refused. The diagnostic goes to
     /// the log, never into this sentence.

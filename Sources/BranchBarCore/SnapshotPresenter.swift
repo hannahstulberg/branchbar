@@ -207,11 +207,14 @@ public struct SnapshotPresenter: Sendable {
         var label: String
         var tooltip: String
 
+        let remote = Self.remoteName(for: branch)
+
         switch push.source {
         case .reflogObserved:
             label = Strings.pushed(
                 reflogAt: push.observedPushAt ?? branch.committerDate,
                 now: now,
+                remote: remote,
                 originMovedSince: push.originMovedSince
             )
             tooltip = Strings.pushedTooltip
@@ -236,9 +239,18 @@ public struct SnapshotPresenter: Sendable {
         // §5a item 3 hangs both the push tooltip and the ahead tooltip off the tertiary tier, and
         // `BranchRowVM` has one tooltip field, so the anchor rides along when there is a count.
         if aheadCount(for: branch) > 0 {
-            tooltip += " " + Strings.aheadTooltip(remoteObservedAt: push.remoteRefObservedAt, now: now)
+            tooltip += " " + Strings.aheadTooltip(
+                remote: remote, remoteObservedAt: push.remoteRefObservedAt, now: now)
         }
         return (label, tooltip)
+    }
+
+    /// The remote every wording on this row names: the one the counts and the moved-since
+    /// comparison were actually measured against, not the word "origin" (codex round 2, MAJOR 5).
+    /// It falls back to `origin` only where there is nothing to name, which is where the copy
+    /// says there is no matching branch on origin.
+    private static func remoteName(for branch: Branch) -> String {
+        branch.push.remoteName ?? branch.upstream?.remote ?? "origin"
     }
 
     private func aheadCount(for branch: Branch) -> Int {
@@ -256,22 +268,28 @@ public struct SnapshotPresenter: Sendable {
     /// on a merged or closed row. PLAN.md §3 forbids "0 ahead" for a branch that tracks nothing and
     /// forbids showing `behind` at all.
     private func aheadLabel(for branch: Branch) -> String? {
-        let hasUpstream = branch.push.hasUpstream || branch.upstream != nil
+        let hasUpstream = branch.push.hasConfiguredUpstream || branch.upstream != nil
         let isGone = branch.push.upstreamGone || branch.upstream?.isGone == true
+        let remote = Self.remoteName(for: branch)
 
         var parts: [String] = []
         if isGone {
-            parts.append(Strings.upstreamMissing)
+            parts.append(Strings.upstreamMissing(remote: remote))
         } else if !hasUpstream {
-            parts.append(Strings.noUpstream)
+            // codex round 2, MAJOR 5: `origin/<name>` is what the reflog on this row was read
+            // from, so "no matching branch on origin" contradicts the line above it. The branch
+            // still tracks nothing, and that is what the copy says instead.
+            parts.append(branch.push.remoteRefExists
+                ? Strings.untrackedRemoteBranchExists(remote: remote)
+                : Strings.noUpstream)
         } else if aheadCount(for: branch) > 0 {
-            parts.append(Strings.ahead(aheadCount(for: branch)))
+            parts.append(Strings.ahead(aheadCount(for: branch), remote: remote))
         } else if behindCount(for: branch) > 0 {
-            // Nothing local is ahead, but origin holds commits this clone does not, so "In sync"
-            // would be false. The count itself still never reaches the row.
-            parts.append(Strings.noLocalCommitsAhead)
+            // Nothing local is ahead, but the remote holds commits this clone does not, so "In
+            // sync" would be false. The count itself still never reaches the row.
+            parts.append(Strings.noLocalCommitsAhead(remote: remote))
         } else {
-            parts.append(Strings.inSync)
+            parts.append(Strings.inSync(remote: remote))
         }
 
         switch branch.group {
@@ -324,8 +342,11 @@ public struct SnapshotPresenter: Sendable {
 
         if isCollapsed {
             lines.append(Strings.prNotLoaded)
-        } else if case .unavailable(let reason, _) = repo.prAvailability {
-            let failure = Strings.unavailable(reason: reason)
+        } else if case .unavailable(let reason, let detail) = repo.prAvailability {
+            // The one reason whose copy repeats the diagnostic is `commandFailed`, which has
+            // nothing else to say (codex round 2, MAJOR 7); `Strings.diagnosticLine` flattens and
+            // caps it, because the text came off a remote.
+            let failure = Strings.unavailable(reason: reason, detail: detail)
             lines.append(failure.title)
             lines.append(failure.message)
             action = failure.action
@@ -422,9 +443,15 @@ public struct SnapshotPresenter: Sendable {
         if !editors.cursor {
             lines.append(Strings.cursorNotInstalledNotice)
         }
-        // Rows restored from the last run while the first refresh is still in flight.
-        if isRefreshing, snapshot.repos.contains(where: { $0.isStale || $0.prLoadState == .stale }) {
-            lines.append(Strings.staleRowsNotice)
+        // Rows that were not refreshed, whether or not a refresh is still running. Gating this on
+        // `isRefreshing` meant a cancelled refresh left stale rows on screen under a footer that
+        // said "Updated just now": the warning went away at the moment it became the only thing
+        // saying the rows are old.
+        if snapshot.repos.contains(where: { $0.isStale || $0.prLoadState == .stale }) {
+            lines.append(isRefreshing ? Strings.staleRowsNotice : Strings.staleRowsIdleNotice)
+            if !isRefreshing, action == nil {
+                action = UserFacingFailure.Action(label: Strings.refreshActionLabel, kind: .retryRefresh)
+            }
         }
         if snapshot.repos.contains(where: { $0.errors.contains { $0.stage == .deadlineExceeded } }) {
             lines.append(Strings.deadlineExceededNotice)
