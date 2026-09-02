@@ -490,7 +490,7 @@ struct ProcessCommandRunnerGroupAndReadTests {
 
     // MARK: Helpers
 
-    private static func awaitPID(inFile file: String, timeout: TimeInterval = 10) async throws -> pid_t {
+    fileprivate static func awaitPID(inFile file: String, timeout: TimeInterval = 10) async throws -> pid_t {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if let text = try? String(contentsOfFile: file, encoding: .utf8),
@@ -509,5 +509,120 @@ struct ProcessCommandRunnerGroupAndReadTests {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         return false
+    }
+}
+
+// MARK: - Packet F15 — codex round 4, BLOCKER 2 (the launch is inside the deadline) and MAJOR 2
+
+/// Records what `ProcessCommandRunner` sent, so a test can watch the syscalls rather than the
+/// process table. `@unchecked Sendable` because every access is under the lock.
+final class RecordedSignals: @unchecked Sendable {
+    struct Sent: Hashable, CustomStringConvertible {
+        var pid: pid_t
+        var signalNumber: Int32
+        var description: String { "(\(pid), \(signalNumber))" }
+    }
+
+    private let lock = NSLock()
+    private var entries: [Sent] = []
+
+    func record(_ pid: pid_t, _ signalNumber: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append(Sent(pid: pid, signalNumber: signalNumber))
+    }
+
+    var all: [Sent] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
+    }
+}
+
+/// The same, for the pgid-disagreement note.
+final class RecordedNotes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String] = []
+
+    func record(_ message: String) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append(message)
+    }
+
+    var all: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
+    }
+}
+
+/// codex round 4, BLOCKER 2: "Command timeouts do not cover command launch or working-directory
+/// resolution." The runner held its lock across the synchronous `Process.run()` and armed the
+/// timeout only after `run()` returned, so a repo on a disconnected `/Volumes` mount could park
+/// the launch inside working-directory resolution with no child to kill, no deadline armed, and a
+/// cancellation blocked on the same lock. MAJOR 2: the group id was discovered with `getpgid`
+/// after the spawn, so a child that forked and exited first left `savedProcessGroup` nil and its
+/// descendant unsignalled.
+@Suite("The deadline covers the launch, and the group is the pid the spawn produced")
+struct ProcessLaunchDeadlineTests {
+
+    /// The launch itself blocks. Nothing about the caller may depend on it returning: the deadline
+    /// was armed before it started, so the caller gets `timedOut` on time and the blocked launch is
+    /// left on its own thread rather than waited on.
+    @Test("aLaunchThatBlocksDoesNotBlockTheCaller")
+    func launchThatBlocksDoesNotBlockTheCaller() async throws {
+        let hooks = ProcessCommandRunner.SystemHooks(
+            launch: { Thread.sleep(forTimeInterval: 3) })
+        let runner = ProcessCommandRunner(hooks: hooks)
+        let started = Date()
+
+        await #expect(throws: CommandError.timedOut(after: 0.3)) {
+            // `/bin/echo` only has to exist: the hook stands in for the launch, which is the call
+            // a dead mount blocks inside.
+            try await runner.run(
+                Command(executable: "/bin/echo", arguments: ["hello"], timeout: 0.3))
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(elapsed < 2,
+                "the caller waited \(elapsed) s on a launch it was never supposed to wait on")
+    }
+
+    /// MAJOR 2. The group lookup fails the way it does for a leader that forked a descendant and
+    /// exited before anyone asked — and the escalation still reaches the group, because the group
+    /// id was recorded as the pid at spawn rather than discovered afterwards.
+    @Test("escalationSignalsTheGroupWhenTheLeaderExitedBeforeGetpgid")
+    func escalationSignalsTheGroupWhenTheLeaderExitedBeforeGetpgid() async throws {
+        let directory = try Packet25TempDir()
+        defer { directory.remove() }
+        let pidFile = directory.url.appendingPathComponent("child.pid").path
+
+        let signals = RecordedSignals()
+        let notes = RecordedNotes()
+        let hooks = ProcessCommandRunner.SystemHooks(
+            processGroup: { _ in -1 },
+            sendSignal: { signals.record($0, $1) },
+            note: { notes.record($0) })
+
+        let task = Task {
+            try await ProcessCommandRunner(hooks: hooks).run(
+                Command(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "echo $$ > '\(pidFile)'; exec sleep 2"],
+                    timeout: 120))
+        }
+        let childPID = try await ProcessCommandRunnerGroupAndReadTests.awaitPID(inFile: pidFile)
+
+        task.cancel()
+        await #expect(throws: CommandError.cancelled) { try await task.value }
+
+        let sent = signals.all
+        let group = pid_t(0) - childPID
+        #expect(
+            sent.contains(RecordedSignals.Sent(pid: group, signalNumber: SIGTERM)),
+            "the escalation signalled \(sent) instead of the group \(group)")
+        #expect(
+            sent.allSatisfy { $0.pid == group },
+            "no signal may go anywhere but the child's own group: \(sent)")
+        #expect(
+            notes.all.contains { $0.contains("\(childPID)") },
+            "a kernel that disagrees with pgid == pid is a fact worth a log line: \(notes.all)")
     }
 }

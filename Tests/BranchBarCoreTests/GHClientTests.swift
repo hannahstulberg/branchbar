@@ -41,7 +41,9 @@ private enum GH {
     }
 
     static func headArguments(_ slug: GitHubSlug, head: String) -> [String] {
-        ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "all", "--head", head, "--limit", "5", "--json", fields]
+        // 20, not 5, since codex round 4 MAJOR 1.
+        ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "all", "--head", head,
+         "--limit", "\(GHClient.perHeadQueryLimit)", "--json", fields]
     }
 
     static func authorArguments(_ slug: GitHubSlug) -> [String] {
@@ -254,7 +256,7 @@ struct GHClientListTests {
 
         let headCall = try #require(runner.calls(matchingExecutable: "gh").last)
         #expect(headCall.arguments == GH.headArguments(GH.personalAgent, head: head),
-                "--head <branch> --limit 5, exactly as PLAN.md §5 froze it")
+                "--head <branch> --limit \(GHClient.perHeadQueryLimit): the PLAN.md §5 shape, with the limit codex round 4 MAJOR 1 raised")
     }
 
     @Test("openAuthoredPullRequestsAcceptsAnEmptyArrayAsAnAnswer")
@@ -426,9 +428,13 @@ struct GHClientFallbackAndCacheTests {
 
         let queried = await client.pullRequests(slug: GH.personalAgent, unmatchedHeads: heads)
 
-        #expect(queried["queried-with-a-pr"]?.count == 1)
-        #expect(queried["queried-and-empty"]?.isEmpty == true,
+        // A `PerHeadResult` rather than a bare array since codex round 4, MAJOR 1: the caller
+        // needs to know whether the page ended before it can call the head answered.
+        #expect(queried["queried-with-a-pr"]?.prs.count == 1)
+        #expect(queried["queried-and-empty"]?.prs.isEmpty == true,
                 "queried and empty is an entry with no PRs, which RepoAssembler renders as none")
+        #expect(queried["queried-and-empty"]?.isExhaustive == true,
+                "a page that came back short answered for every owner of that head")
         #expect(queried.keys.contains("never-queried") == false,
                 "past the cap it is absent, which RepoAssembler renders as notChecked")
         #expect(runner.calls(matchingExecutable: "gh").filter { $0.arguments.contains("--head") }.count == 2)

@@ -21,6 +21,9 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
     private var symlinks: Set<String> = []
     /// Reading these throws, the way a TCC-denied Documents folder does.
     private var unreadable: Set<String> = []
+    /// Volume roots this tree models as something other than a local disk (codex round 4,
+    /// BLOCKER 3). Keyed by the exact path `volumeKind(for:)` is asked about.
+    private var volumeKinds: [String: VolumeKind] = [:]
 
     public var home: String
     public var path: String
@@ -78,6 +81,13 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         directories.insert(normalized)
         symlinks.insert(normalized)
+    }
+
+    /// Models a mount: `/Volumes/nas` served over `smbfs`, or a mount point whose `statfs`
+    /// fails the way a disconnected one does.
+    public func setVolumeKind(_ kind: VolumeKind, for path: String) {
+        lock.lock(); defer { lock.unlock() }
+        volumeKinds[Self.normalized(path)] = kind
     }
 
     public func markUnreadable(_ path: String) {
@@ -140,9 +150,15 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
     /// nil for a path this tree does not hold at all; throws for one it holds as unreadable or as
     /// something that is not a regular file — the two answers `RealFileSystem` gives from one
     /// `open` plus one `fstat`, with no `fileExists` in front of either.
+    /// Counted so `repoOnANetworkVolumeSkipsDirectFileReads` can prove the loader never opened a
+    /// descriptor against a mount that cannot be trusted to answer.
+    public private(set) var statRegularFileCallCount = 0
+    public private(set) var readFileCallCount = 0
+
     public func statRegularFile(atPath path: String) throws -> RegularFileStat? {
         let normalized = Self.normalized(path)
         lock.lock(); defer { lock.unlock() }
+        statRegularFileCallCount += 1
         if unreadable.contains(normalized) { throw PermissionDenied(path: normalized) }
         if let data = files[normalized] {
             return RegularFileStat(
@@ -163,6 +179,7 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
     public func readFile(atPath path: String) throws -> Data {
         let normalized = Self.normalized(path)
         lock.lock(); defer { lock.unlock() }
+        readFileCallCount += 1
         if unreadable.contains(normalized) { throw PermissionDenied(path: normalized) }
         guard let data = files[normalized] else { throw PermissionDenied(path: normalized) }
         return data
@@ -173,6 +190,13 @@ public final class InMemoryFileSystem: FileSystem, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let date = mtimes[normalized] else { throw PermissionDenied(path: normalized) }
         return date
+    }
+
+    /// The tree's own mount table; anything it does not name is a local disk.
+    public func volumeKind(for path: String) -> VolumeKind {
+        let normalized = Self.normalized(path)
+        lock.lock(); defer { lock.unlock() }
+        return volumeKinds[normalized] ?? .local
     }
 
     public func homeDirectory() -> String { home }

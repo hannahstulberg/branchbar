@@ -313,3 +313,57 @@ struct FileCacheStoreSpecialFileTests {
         #expect(try FileCacheStore(fileURL: link).load() == nil)
     }
 }
+
+// MARK: - Packet F15 — codex round 4, BLOCKER 3 (the cheap half)
+
+/// "The claimed 'nonblocking FD reads' remain blockable through pathname resolution."
+///
+/// `load` opened the descriptor with `O_NOFOLLOW | O_NONBLOCK` and then, in front of it, asked
+/// `FileManager.attributesOfItem` for the size. That preflight is a second pathname resolution
+/// that follows symlinks and has no `O_NONBLOCK` of its own, on the synchronous launch path, so a
+/// `cache.json` symlinked at a stalled automount parked app initialization with nothing above it
+/// able to end it. The bound the preflight enforced is enforced by the read itself instead.
+@Suite("The cache load has no path preflight in front of its descriptor")
+struct CachePreflightTests {
+
+    @Test("cacheLoadNeverStatsThePathBeforeReadingIt")
+    func cacheLoadNeverStatsThePathBeforeReadingIt() throws {
+        let file = RepoRoot.url.appendingPathComponent("Sources/BranchBarCore/FileCacheStore.swift")
+        let source = try String(contentsOf: file, encoding: .utf8)
+        let lines = source.components(separatedBy: .newlines)
+
+        // Only `load`'s own body: `save` legitimately uses `FileManager` to create the directory
+        // and land the file, and it is not on the launch path.
+        let start = try #require(lines.firstIndex { $0.contains("public func load() throws") })
+        let end = try #require(lines[start...].firstIndex { $0 == "    }" })
+
+        var offenders: [String] = []
+        for index in start...end {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            // The doc comment explains why the call is gone, so only code lines count.
+            if trimmed.hasPrefix("//") { continue }
+            for banned in ["attributesOfItem", "FileManager"] where lines[index].contains(banned) {
+                offenders.append("FileCacheStore.swift:\(index + 1) \(banned)")
+            }
+        }
+
+        #expect(offenders.isEmpty,
+                "a path preflight is back in front of the bounded read: \(offenders)")
+    }
+
+    /// The bound survives the preflight's removal: it is now the read that refuses, by asking for
+    /// one byte more than the cap and rejecting an answer that fills it.
+    @Test("aCacheOneByteOverTheBoundStillLoadsNil")
+    func cacheOneByteOverTheBoundStillLoadsNil() throws {
+        let temp = try Packet25TempDir()
+        defer { temp.remove() }
+        let url = temp.file("cache.json")
+
+        // Exactly one byte past the cap, so nothing but the read's own bound can catch it.
+        var bytes = Data(repeating: UInt8(ascii: "a"), count: FileCacheStore.maximumFileBytes + 1)
+        bytes[0] = UInt8(ascii: "{")
+        try bytes.write(to: url)
+
+        #expect(try FileCacheStore(fileURL: url).load() == nil)
+    }
+}

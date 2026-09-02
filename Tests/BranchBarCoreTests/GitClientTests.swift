@@ -50,8 +50,13 @@ struct GitClientTests {
 
     /// PLAN.md §5: git env `LC_ALL=C` (so the output stays parseable under any locale) and
     /// `GIT_OPTIONAL_LOCKS=0` (so a read never takes `index.lock` while the user is mid-commit in
-    /// another tool), `-C <repo>` as the first two arguments, the repo as the working directory,
-    /// and the 10 s git timeout.
+    /// another tool), `-C <repo>` as the first two arguments, and the 10 s git timeout.
+    ///
+    /// The working directory was part of this shape until codex round 4, BLOCKER 2, and is now
+    /// asserted to be **absent**: `-C <repo>` already tells git which repository to read, so the
+    /// second copy of the path bought nothing and cost `Process.run()` a `chdir` into it. On a
+    /// disconnected `/Volumes` mount that resolution blocks inside the launch, where there is no
+    /// child to kill and — before this round — no timeout yet armed.
     private static func expectFrozenShape(
         _ command: Command,
         arguments: [String],
@@ -63,8 +68,9 @@ struct GitClientTests {
                 "the executable is the resolved git, never a shell", sourceLocation: sourceLocation)
         #expect(command.arguments.first == "-C", sourceLocation: sourceLocation)
         #expect(command.arguments.dropFirst().first == repo, sourceLocation: sourceLocation)
-        #expect(command.workingDirectory == repo,
-                "the working directory is the repo path", sourceLocation: sourceLocation)
+        #expect(command.workingDirectory == nil,
+                "a git command carries `-C <repo>` and no working directory (codex round 4, BLOCKER 2)",
+                sourceLocation: sourceLocation)
         #expect(command.environment?["LC_ALL"] == "C", sourceLocation: sourceLocation)
         #expect(command.environment?["GIT_OPTIONAL_LOCKS"] == "0", sourceLocation: sourceLocation)
         #expect(command.timeout == 10, "PLAN.md §5 freezes the git timeout at 10 s", sourceLocation: sourceLocation)
@@ -283,8 +289,8 @@ struct GitClientTests {
 
     /// One test that walks every frozen invocation, because the environment and the working
     /// directory are the two things a per-command copy-paste gets wrong exactly once.
-    @Test("everyGitInvocationCarriesTheFrozenEnvironmentAndWorkingDirectory")
-    func everyGitInvocationCarriesTheFrozenEnvironmentAndWorkingDirectory() async throws {
+    @Test("everyGitInvocationCarriesTheFrozenEnvironmentAndNoWorkingDirectory")
+    func everyGitInvocationCarriesTheFrozenEnvironmentAndNoWorkingDirectory() async throws {
         // The GUI PATH has no Homebrew, so `ToolLocator` may hand the client any absolute path;
         // the stub matches on the basename, the way a machine-independent fixture must.
         let runner = RecordedCommandRunner()
@@ -312,7 +318,9 @@ struct GitClientTests {
 
         for call in runner.calls {
             #expect(call.executable == "/opt/homebrew/bin/git", "the resolved path is used, never bare `git`")
-            #expect(call.workingDirectory == Self.repo)
+            // nil since codex round 4, BLOCKER 2: `-C` is the whole of "which repository", and
+            // a `currentDirectoryURL` is a second path resolution inside the blocking launch.
+            #expect(call.workingDirectory == nil)
             #expect(call.environment?["LC_ALL"] == "C")
             #expect(call.environment?["GIT_OPTIONAL_LOCKS"] == "0")
             #expect(call.environment?["GIT_NO_LAZY_FETCH"] == "1")
@@ -350,7 +358,8 @@ struct GitClientTests {
         #expect(call.arguments == arguments)
         // Six, not five, since codex MAJOR 12 added `-z` to the frozen argv.
         #expect(call.arguments.count == 6, "the path is one element, spaces and all")
-        #expect(call.workingDirectory == spaced)
+        // No longer the working directory too (codex round 4, BLOCKER 2).
+        #expect(call.workingDirectory == nil)
     }
 }
 
@@ -417,5 +426,59 @@ struct GitClientNewlinePathTests {
         await #expect(throws: CommandError.self) {
             _ = try await GitClient(runner: runner, gitPath: "/usr/bin/git").identity(at: "/r")
         }
+    }
+}
+
+// MARK: - Packet F15 — codex round 4, BLOCKER 2
+
+/// "Command timeouts do not cover command launch or working-directory resolution."
+///
+/// Every git command already names its repository with `-C <repo>`, and every one of them also
+/// asked `Process` to `chdir` into that same path. The second copy answered no question the first
+/// had not, and it moved a pathname resolution of a repository-owned path **into the launch** —
+/// where a disconnected `/Volumes` mount blocks with no child process in existence, so there is
+/// nothing for a cancellation to signal and, before this round, no deadline yet armed.
+@Suite("A git command carries -C and no working directory")
+struct GitCommandWorkingDirectoryTests {
+
+    @Test("gitCommandsCarryNoWorkingDirectory")
+    func gitCommandsCarryNoWorkingDirectory() async throws {
+        let repo = "/Volumes/detached/monorepo"
+        let command = GitClient.command(
+            gitPath: "/usr/bin/git",
+            arguments: ["for-each-ref", "--", "refs/heads"],
+            at: repo,
+            timeout: 10)
+
+        #expect(command.workingDirectory == nil)
+        #expect(Array(command.arguments.prefix(2)) == ["-C", repo],
+                "`-C <repo>` is the whole of \"which repository\", and it is still there")
+    }
+
+    /// The rule is a rule about the source, not about one builder: nothing in BranchBarCore may
+    /// set a working directory on a command whose argv already leads with `-C`. `RepoScanner`
+    /// builds its own `rev-parse` rather than going through `GitClient.command`, and it set one
+    /// too.
+    @Test("noGitInvocationInCoreSetsAWorkingDirectory")
+    func noGitInvocationInCoreSetsAWorkingDirectory() throws {
+        let sources = RepoRoot.url.appendingPathComponent("Sources/BranchBarCore")
+        let manager = FileManager.default
+        let files = try manager.subpathsOfDirectory(atPath: sources.path)
+            .filter { $0.hasSuffix(".swift") }
+            // The runner is the one file that may *read* the field: `Command.workingDirectory`
+            // stays on the seam for a caller that genuinely needs one.
+            .filter { !$0.hasSuffix("ProcessCommandRunner.swift") && !$0.hasSuffix("CommandRunner.swift") }
+
+        var offenders: [String] = []
+        for file in files {
+            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            for (index, line) in text.components(separatedBy: .newlines).enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("//") { continue }
+                if line.contains("workingDirectory") { offenders.append("\(file):\(index + 1)") }
+            }
+        }
+
+        #expect(offenders.isEmpty, "a git command grew a working directory again: \(offenders)")
     }
 }

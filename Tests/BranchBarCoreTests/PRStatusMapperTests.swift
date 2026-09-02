@@ -326,3 +326,59 @@ struct PRStatusMapperOpenElsewhereTests {
         #expect(notOnThisMac.count == authored.count)
     }
 }
+
+// MARK: - Packet F15 — codex round 4, MINOR 1
+
+/// "Unknown PR states are reported as open." Every value other than `MERGED` and `CLOSED` fell
+/// through to the open/draft/review path, so a state GitHub adds later — and any malformed cached
+/// or CLI JSON — became an "Open" pill for a PR nobody can say anything about.
+@Suite("A state this app does not know is not an open PR")
+struct UnknownPRStateTests {
+
+    private static func pr(state: String, isDraft: Bool = false, reviewDecision: String = "") -> PRInfo {
+        PRInfo(
+            number: 1,
+            url: "https://github.com/tester/demo/pull/1",
+            state: state,
+            isDraft: isDraft,
+            reviewDecision: reviewDecision,
+            updatedAt: Date(timeIntervalSince1970: 1_788_000_000),
+            baseRefName: "main",
+            headRefName: "feature",
+            headRefOid: "1111111111111111111111111111111111111111",
+            headRepositoryOwnerLogin: "tester")
+    }
+
+    @Test("unknownPRStateIsNeverRenderedAsOpen")
+    func unknownPRStateIsNeverRenderedAsOpen() {
+        for state in ["QUEUED", "LOCKED", "", "open ", "0", "MERGED_QUEUE"] {
+            #expect(PRStatusMapper.status(for: Self.pr(state: state)) == .unavailable,
+                    "\(state) rendered as \(PRStatusMapper.status(for: Self.pr(state: state)))")
+        }
+
+        // A draft flag or a review decision does not rescue an unknown state: the draft and review
+        // pills are statements about an open PR, and nobody established that this one is open.
+        #expect(PRStatusMapper.status(for: Self.pr(state: "QUEUED", isDraft: true)) == .unavailable)
+        #expect(
+            PRStatusMapper.status(for: Self.pr(state: "QUEUED", reviewDecision: "APPROVED"))
+                == .unavailable)
+    }
+
+    /// The three states the API does have still map exactly as they did, casing included.
+    @Test("theThreeKnownStatesAreUnchanged")
+    func knownStatesAreUnchanged() {
+        #expect(PRStatusMapper.status(for: Self.pr(state: "MERGED")) == .merged)
+        #expect(PRStatusMapper.status(for: Self.pr(state: "merged")) == .merged)
+        #expect(PRStatusMapper.status(for: Self.pr(state: "CLOSED")) == .closed)
+        #expect(PRStatusMapper.status(for: Self.pr(state: "OPEN")) == .open)
+        #expect(PRStatusMapper.status(for: Self.pr(state: "open")) == .open)
+        #expect(PRStatusMapper.status(for: Self.pr(state: "OPEN", isDraft: true)) == .draft)
+        #expect(
+            PRStatusMapper.status(for: Self.pr(state: "OPEN", reviewDecision: "APPROVED")) == .approved)
+        #expect(
+            PRStatusMapper.status(for: Self.pr(state: "OPEN", reviewDecision: "CHANGES_REQUESTED"))
+                == .changesRequested)
+        #expect(
+            PRStatusMapper.status(for: Self.pr(state: "OPEN", reviewDecision: "REVIEW_REQUIRED")) == .open)
+    }
+}

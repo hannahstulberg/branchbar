@@ -249,7 +249,8 @@ private func stubGit(
             RecordedCommandRunner.Stub(
                 executableName: "git",
                 arguments: stage.arguments(repo.path),
-                workingDirectory: repo.path,
+                // No `workingDirectory:` since codex round 4, BLOCKER 2: a git command carries
+                // `-C <repo>` and nothing else, so a stub that demanded one would never match.
                 result: result,
                 delay: delay
             )
@@ -1249,7 +1250,9 @@ struct RefreshCoordinatorCacheTrustTests {
         hostile.maxDepth = 99
         let cache = InMemoryCacheStore(initial: CacheFile(
             scan: ScanResult(policy: hostile, scannedAt: Date(timeIntervalSince1970: 1), repos: []),
-            manuallyAddedRepos: ["/Volumes/work"]))
+            // `/Volumes/work` is the mount root, refused since codex round 4 MAJOR 3; the folder
+            // inside it is what "Add folder…" actually produces and is still accepted.
+            manuallyAddedRepos: ["/Volumes/work", "/Volumes/work/added"]))
 
         let coordinator = RefreshCoordinator(
             scanner: RepoScanner(fileSystem: fileSystem),
@@ -1275,7 +1278,7 @@ struct RefreshCoordinatorCacheTrustTests {
         #expect(!reached.contains("/Users/attacker/planted"), "the cached homeRoot was walked")
         #expect(!reached.contains("/Volumes/planted/probe"), "a cached extra root was walked")
         #expect(persisted.policy.homeRoot == RepoStub.home)
-        #expect(persisted.policy.extraRoots == ["/Volumes/work"])
+        #expect(persisted.policy.extraRoots == ["/Volumes/work/added"])
         #expect(persisted.policy.skipDirectoryNames == ScanPolicy.defaultSkipDirectoryNames)
         #expect(persisted.policy.maxDepth == ScanPolicy(homeRoot: RepoStub.home).maxDepth)
     }
@@ -1431,6 +1434,9 @@ struct CachedScanRootBoundsTests {
         #expect(RefreshCoordinator.acceptableExtraRoots(["/opt"], fileSystem: fs).isEmpty)
         #expect(RefreshCoordinator.acceptableExtraRoots(["/Volumes/work/code"], fileSystem: fs)
                 == ["/Volumes/work/code"])
+        // codex round 4, MAJOR 3: the two-component rule accepted `/Volumes/work` itself, which
+        // is the mount root this test's own name says is rejected.
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Volumes/work"], fileSystem: fs).isEmpty)
     }
 
     /// The other shapes a cache file can hold that a folder panel cannot produce.
@@ -1486,7 +1492,9 @@ struct CachedScanRootBoundsTests {
         }
 
         let cache = InMemoryCacheStore(initial: CacheFile(
-            manuallyAddedRepos: ["/", "/Volumes", "/Volumes/work", "/Volumes/gone"]))
+            manuallyAddedRepos: [
+                "/", "/Volumes", "/Volumes/work", "/Volumes/work/added", "/Volumes/gone",
+            ]))
 
         let coordinator = RefreshCoordinator(
             scanner: RepoScanner(fileSystem: fileSystem),
@@ -1505,9 +1513,69 @@ struct CachedScanRootBoundsTests {
             force: true, expandedRepoIDs: [], tools: healthyTools, onProgress: { _ in })
 
         let persisted = try #require(cache.current?.scan)
-        #expect(persisted.policy.extraRoots == ["/Volumes/work"],
+        // `/Volumes/work` was the accepted root until codex round 4, MAJOR 3: a bare
+        // `/Volumes/<name>` is a mount root, which the rule always claimed to reject and the
+        // two-component count let through. Only the folder *inside* it survives.
+        #expect(persisted.policy.extraRoots == ["/Volumes/work/added"],
                 "a cached root that is not a folder anybody picked reached the policy: \(persisted.policy.extraRoots)")
         // The user's own list is untouched: this bounds what is scanned, not what is remembered.
-        #expect(cache.current?.manuallyAddedRepos == ["/", "/Volumes", "/Volumes/work", "/Volumes/gone"])
+        #expect(cache.current?.manuallyAddedRepos == [
+            "/", "/Volumes", "/Volumes/work", "/Volumes/work/added", "/Volumes/gone",
+        ])
+    }
+}
+
+// MARK: - Packet F15 — codex round 4, MAJOR 3
+
+/// "Cached-root restrictions are bypassable and accept mount roots they claim to reject."
+///
+/// Two holes, both in `isAcceptableExtraRoot`. `/Volumes/Disk` has two components, so the
+/// "fewer than two components below `/` is somebody's whole disk" rule accepted the mount root
+/// itself. And the existence check asked only about the **last** component, so an intermediate
+/// symlink the user's own account can replace redirected an unbounded-depth walk anywhere it
+/// liked.
+@Suite("A mount root is not a picked folder, and neither is a path through a symlink")
+struct CachedScanRootWalkTests {
+
+    private static func fileSystem() -> InMemoryFileSystem {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        for directory in ["/Volumes/Disk/code", "/Volumes/Archive", "/Users/tester/code"] {
+            fs.addDirectory(directory)
+        }
+        return fs
+    }
+
+    @Test("volumeRootIsRejected")
+    func volumeRootIsRejected() {
+        let fs = Self.fileSystem()
+
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Volumes/Disk"], fileSystem: fs).isEmpty,
+                "`/Volumes/<name>` is the mount root, not a folder anybody picked in a panel")
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Volumes/Archive"], fileSystem: fs).isEmpty)
+        // A folder *on* that volume is still exactly what "Add folder…" produces.
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Volumes/Disk/code"], fileSystem: fs)
+                == ["/Volumes/Disk/code"])
+        // The rule is about mount roots, not about depth everywhere: two components under
+        // `/Users` is a home folder, which is where every repo on this Mac already lives.
+        #expect(RefreshCoordinator.acceptableExtraRoots(["/Users/tester/code"], fileSystem: fs)
+                == ["/Users/tester/code"])
+    }
+
+    @Test("rootWithAnIntermediateSymlinkIsRejected")
+    func rootWithAnIntermediateSymlinkIsRejected() {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addDirectory("/Users/tester/real/inner")
+        // `link` is a symlink; everything under it resolves through something this app cannot
+        // vouch for and the user's own account can retarget between two refreshes.
+        fs.addSymbolicLink("/Users/tester/link")
+        fs.addDirectory("/Users/tester/link/inner")
+
+        #expect(
+            RefreshCoordinator.acceptableExtraRoots(["/Users/tester/link/inner"], fileSystem: fs).isEmpty,
+            "the check looked only at the last component, so an intermediate symlink walked free")
+        #expect(
+            RefreshCoordinator.acceptableExtraRoots(["/Users/tester/real/inner"], fileSystem: fs)
+                == ["/Users/tester/real/inner"],
+            "the same path without a symlink in it is still a root")
     }
 }

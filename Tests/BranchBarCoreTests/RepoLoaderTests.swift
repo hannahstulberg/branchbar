@@ -54,9 +54,11 @@ struct RepoLoaderTests {
             ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "all", "--limit", "100", "--json", fields]
         }
 
+        // `--limit 20` since codex round 4, MAJOR 1: five was low enough that ordinary fork
+        // traffic filled the page, and a full page was then read as "nobody has a PR here".
         static func head(_ branch: String) -> [String] {
-            ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "all", "--head", branch, "--limit", "5",
-             "--json", fields]
+            ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "all", "--head", branch,
+             "--limit", "\(GHClient.perHeadQueryLimit)", "--json", fields]
         }
 
         static var author: [String] {
@@ -945,5 +947,273 @@ struct RepoLoaderRoundThreeTests {
         #expect(row.pushLabel == Strings.pushHistoryNotChecked)
         #expect(!row.pushLabel.contains("No tracked remote branch"))
         #expect(row.aheadLabel?.contains("In sync") != true, "\(row.aheadLabel ?? "nil")")
+    }
+}
+
+// MARK: - Packet F15 — codex round 4, BLOCKER 3 (the cheap half) and MAJOR 1
+
+/// BLOCKER 3: "The claimed 'nonblocking FD reads' remain blockable through pathname resolution."
+/// `O_NONBLOCK` makes the **open** return for a FIFO; it does nothing for VFS pathname lookup, so
+/// a repo sitting on a disconnected network mount blocks the reflog and `FETCH_HEAD` reads
+/// uninterruptibly — in the app's own process, outside the killable scan helper.
+///
+/// The bound this packet can honestly draw is at the volume: a repo under `/Volumes` whose volume
+/// root will not answer `statfs`, or answers with a network filesystem type, is loaded from git
+/// command output alone. Those run in a child the deadline can kill; a direct `open()` does not.
+@Suite("A repo on a volume that cannot be trusted to answer is read through git only")
+struct RepoOnUntrustedVolumeTests {
+
+    private enum Argv {
+        static let repo = "/Volumes/nas/monorepo"
+        static let commonDirectory = "/Volumes/nas/monorepo/.git"
+
+        static let headsFormat =
+            "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(upstream:short)%1f%(upstream:remotename)%1f%(upstream:track,nobracket)%1f%(HEAD)"
+        static let remotesFormat = "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)"
+
+        static let identityCommonDir = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+        static let identityTopLevel = ["-C", repo, "rev-parse", "--path-format=absolute", "--show-toplevel"]
+        static let remoteOriginURL = ["-C", repo, "config", "--get", "remote.origin.url"]
+        static let branchRefs = ["-C", repo, "for-each-ref", headsFormat, "--", "refs/heads"]
+        static let remoteRefs = ["-C", repo, "for-each-ref", remotesFormat, "--", "refs/remotes/"]
+        static let worktrees = ["-C", repo, "worktree", "list", "--porcelain", "-z"]
+    }
+
+    private static func runner() -> RecordedCommandRunner {
+        let runner = RecordedCommandRunner()
+        runner.stubGit(Argv.identityCommonDir, stdout: "\(Argv.commonDirectory)\n")
+        runner.stubGit(Argv.identityTopLevel, stdout: "\(Argv.repo)\n")
+        runner.stubGit(Argv.remoteOriginURL, stdout: "https://github.com/tester/demo.git\n")
+        runner.stubGit(Argv.branchRefs, stdout: Fixture.text("synthetic-for-each-ref-heads-mixed.txt"))
+        runner.stubGit(Argv.remoteRefs, stdout: Fixture.text("synthetic-for-each-ref-remotes.txt"))
+        runner.stubGit(Argv.worktrees, stdout: Fixture.text("synthetic-worktree-list-multi.txt"))
+        return runner
+    }
+
+    /// A reflog that would answer, on a volume nobody should be opening files on.
+    private static func fileSystem(volume: VolumeKind) -> InMemoryFileSystem {
+        let fs = InMemoryFileSystem()
+        fs.addFile(
+            ReflogFileReader.reflogPath(
+                commonDirectory: Argv.commonDirectory, remote: "origin", branch: "main"),
+            contents: Fixture.text("synthetic-reflog-push-and-fetch.txt"))
+        fs.addFile("\(Argv.commonDirectory)/FETCH_HEAD", contents: "")
+        fs.setVolumeKind(volume, for: "/Volumes/nas")
+        return fs
+    }
+
+    private static func loader(_ runner: RecordedCommandRunner, _ fs: InMemoryFileSystem) -> RepoLoader {
+        RepoLoader(
+            git: GitClient(runner: runner, gitPath: "/usr/bin/git"),
+            gh: nil,
+            reflog: ReflogFileReader(fileSystem: fs),
+            fileSystem: fs)
+    }
+
+    @Test("repoOnANetworkVolumeSkipsDirectFileReads")
+    func repoOnANetworkVolumeSkipsDirectFileReads() async throws {
+        let runner = Self.runner()
+        let fs = Self.fileSystem(volume: .network(type: "smbfs"))
+
+        let repo = await Self.loader(runner, fs).load(
+            DiscoveredRepo(path: Argv.repo, id: RepoID(commonDir: Argv.commonDirectory)),
+            wantsPullRequests: false,
+            cachedPRs: nil,
+            now: Date(timeIntervalSince1970: 1_788_400_000))
+
+        // git still ran: its output arrives through a child process the deadline can kill.
+        #expect(repo.branches.count == 7, "the branch list comes from git, and git still ran")
+        #expect(repo.remoteURL == "https://github.com/tester/demo.git")
+
+        #expect(fs.statRegularFileCallCount == 0,
+                "the loader opened \(fs.statRegularFileCallCount) descriptors on a volume whose server may never answer")
+        #expect(fs.readFileCallCount == 0)
+
+        // The reflog would have said "pushed"; without it the row falls back rather than lying,
+        // and the skipped stage is reported against `.reflog` so the row can say why.
+        let main = try #require(repo.branches.first { $0.name == "main" })
+        #expect(main.push.source != .reflogObserved)
+        let reflogErrors = repo.errors.filter { $0.stage == .reflog }
+        #expect(reflogErrors.count == 1, "the skip is recorded, not silent: \(repo.errors)")
+        #expect(reflogErrors.first?.message.contains("/Volumes/nas") == true)
+        #expect(reflogErrors.first?.message.contains("smbfs") == true)
+    }
+
+    /// A mount point that will not describe itself has already stopped answering; that is the
+    /// same skip, arrived at through `statfs` failing rather than through a filesystem type.
+    @Test("repoOnAVolumeThatCannotBeStattedSkipsDirectFileReads")
+    func repoOnAVolumeThatCannotBeStattedSkipsDirectFileReads() async throws {
+        let runner = Self.runner()
+        let fs = Self.fileSystem(volume: .unreachable(code: ENOTCONN))
+
+        let repo = await Self.loader(runner, fs).load(
+            DiscoveredRepo(path: Argv.repo, id: RepoID(commonDir: Argv.commonDirectory)),
+            wantsPullRequests: false,
+            cachedPRs: nil,
+            now: Date(timeIntervalSince1970: 1_788_400_000))
+
+        #expect(repo.branches.count == 7)
+        #expect(fs.statRegularFileCallCount == 0)
+        #expect(repo.errors.contains { $0.stage == .reflog })
+    }
+
+    /// The gate is the volume, not the prefix: a repo on a local external disk reads its own
+    /// reflog exactly as a repo in the home folder does.
+    @Test("repoOnALocalVolumeStillReadsItsReflog")
+    func repoOnALocalVolumeStillReadsItsReflog() async throws {
+        let runner = Self.runner()
+        let fs = Self.fileSystem(volume: .local)
+
+        let repo = await Self.loader(runner, fs).load(
+            DiscoveredRepo(path: Argv.repo, id: RepoID(commonDir: Argv.commonDirectory)),
+            wantsPullRequests: false,
+            cachedPRs: nil,
+            now: Date(timeIntervalSince1970: 1_788_400_000))
+
+        let main = try #require(repo.branches.first { $0.name == "main" })
+        #expect(main.push.source == .reflogObserved)
+        #expect(fs.statRegularFileCallCount > 0)
+        #expect(repo.errors.isEmpty)
+    }
+}
+
+/// MAJOR 1: "A capped per-head query can falsely render 'No PR'."
+///
+/// `gh pr list --head <name> --limit 5` was asked for five results and any success was then
+/// recorded as covering **every** owner of that head. Five newer PRs from other forks push the
+/// local owner's PR off the page, the owner-aware match correctly rejects the five strangers, and
+/// the row renders "No PR" beside an open one. A page that came back full is not evidence of
+/// absence.
+@Suite("A per-head page that filled up is not an absence proof")
+struct PerHeadQueryExhaustivenessTests {
+
+    private enum Argv {
+        static let repo = "/Users/tester/monorepo"
+        static let commonDirectory = "/Users/tester/monorepo/.git"
+
+        static let headsFormat =
+            "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(upstream:short)%1f%(upstream:remotename)%1f%(upstream:track,nobracket)%1f%(HEAD)"
+        static let remotesFormat = "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)"
+
+        static let identityCommonDir = ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+        static let identityTopLevel = ["-C", repo, "rev-parse", "--path-format=absolute", "--show-toplevel"]
+        static let remoteOriginURL = ["-C", repo, "config", "--get", "remote.origin.url"]
+        static let branchRefs = ["-C", repo, "for-each-ref", headsFormat, "--", "refs/heads"]
+        static let remoteRefs = ["-C", repo, "for-each-ref", remotesFormat, "--", "refs/remotes/"]
+        static let worktrees = ["-C", repo, "worktree", "list", "--porcelain", "-z"]
+    }
+
+    private static let slug = GitHubSlug(host: "github.com", owner: "tester", name: "demo")
+
+    private static func headArgv(_ branch: String) -> [String] {
+        ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "all", "--head", branch,
+         "--limit", "\(GHClient.perHeadQueryLimit)", "--json", GHClient.jsonFields]
+    }
+
+    /// `count` PRs on the same head, every one of them owned by somebody else — the fork traffic
+    /// that pushes the user's own PR off a capped page.
+    private static func strangerPRs(head: String, count: Int) -> String {
+        let rows = (0..<count).map { index in
+            """
+            {
+              "baseRefName": "main",
+              "headRefName": "\(head)",
+              "headRefOid": "\(String(repeating: "\(index % 10)", count: 40))",
+              "headRepositoryOwner": { "id": "U_\(index)", "name": "Stranger", "login": "stranger-\(index)" },
+              "isDraft": false,
+              "mergeCommit": null,
+              "mergedAt": null,
+              "number": \(1000 + index),
+              "reviewDecision": "",
+              "state": "OPEN",
+              "updatedAt": "2026-08-2\(index % 10)T10:00:00Z",
+              "url": "https://github.com/tester/demo/pull/\(1000 + index)"
+            }
+            """
+        }
+        return "[\n" + rows.joined(separator: ",\n") + "\n]"
+    }
+
+    private static func runner(headResults: [String: String]) -> RecordedCommandRunner {
+        let runner = RecordedCommandRunner()
+        runner.stubGit(Argv.identityCommonDir, stdout: "\(Argv.commonDirectory)\n")
+        runner.stubGit(Argv.identityTopLevel, stdout: "\(Argv.repo)\n")
+        runner.stubGit(Argv.remoteOriginURL, stdout: "https://github.com/tester/demo.git\n")
+        runner.stubGit(Argv.branchRefs, stdout: Fixture.text("synthetic-for-each-ref-heads-mixed.txt"))
+        runner.stubGit(Argv.remoteRefs, stdout: Fixture.text("synthetic-for-each-ref-remotes.txt"))
+        runner.stubGit(Argv.worktrees, stdout: Fixture.text("synthetic-worktree-list-multi.txt"))
+
+        let empty = Fixture.text("synthetic-gh-pr-list-empty.json")
+        runner.stub(.init(executableName: "gh", arguments: ["auth", "status"],
+                          result: .stdout(Fixture.text("recorded-gh-auth-status-github.com.txt"))))
+        runner.stub(.init(executableName: "gh", arguments: ["auth", "status", "--hostname", "github.com"],
+                          result: .stdout(Fixture.text("recorded-gh-auth-status-github.com.txt"))))
+        runner.stub(.init(
+            executableName: "gh",
+            arguments: ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "all", "--limit", "100",
+                        "--json", GHClient.jsonFields],
+            result: .stdout(empty)))
+        runner.stub(.init(
+            executableName: "gh",
+            arguments: ["pr", "list", "--repo", slug.ghRepoArgument, "--state", "open", "--author", "@me",
+                        "--limit", "100", "--json", GHClient.jsonFields],
+            result: .stdout(empty)))
+        for name in [
+            "main", "ahead-two", "behind-three", "diverged", "upstream-gone", "no-upstream",
+            "feature/nested name",
+        ] {
+            runner.stub(.init(executableName: "gh", arguments: headArgv(name),
+                              result: .stdout(headResults[name] ?? empty)))
+        }
+        return runner
+    }
+
+    private static func load(_ runner: RecordedCommandRunner) async -> Repo {
+        let fs = InMemoryFileSystem()
+        return await RepoLoader(
+            git: GitClient(runner: runner, gitPath: "/usr/bin/git"),
+            gh: GHClient(runner: runner, ghPath: "/opt/homebrew/bin/gh"),
+            reflog: ReflogFileReader(fileSystem: fs),
+            fileSystem: fs
+        ).load(
+            DiscoveredRepo(path: Argv.repo, id: RepoID(commonDir: Argv.commonDirectory)),
+            wantsPullRequests: true,
+            cachedPRs: nil,
+            now: Date(timeIntervalSince1970: 1_788_400_000))
+    }
+
+    @Test("perHeadResultAtTheLimitIsNotTreatedAsExhaustive")
+    func perHeadResultAtTheLimitIsNotTreatedAsExhaustive() async throws {
+        // A full page of strangers' PRs on `main`: the local owner's own PR, if any, is on a page
+        // nobody asked for.
+        let full = Self.strangerPRs(head: "main", count: GHClient.perHeadQueryLimit)
+        let repo = await Self.load(Self.runner(headResults: ["main": full]))
+
+        // The limit is the first half of the fix: five was low enough that ordinary fork traffic
+        // filled it (codex round 4, MAJOR 1).
+        #expect(GHClient.perHeadQueryLimit == 20)
+
+        let main = try #require(repo.branches.first { $0.name == "main" })
+        #expect(main.prStatus == .notChecked,
+                "a page that filled up was read as \"nobody has a PR on this head\": \(main.prStatus)")
+
+        // Every other branch came back short, so those really were answered.
+        let ahead = try #require(repo.branches.first { $0.name == "ahead-two" })
+        #expect(ahead.prStatus == PRStatus.none)
+    }
+
+    /// The owners the full page *did* name are still covered: they were seen, and what was seen is
+    /// what coverage records.
+    @Test("aFullPageStillCoversTheOwnersItNamed")
+    func fullPageStillCoversTheOwnersItNamed() async {
+        var rows = GHClient.perHeadQueryLimit
+        rows -= 1
+        // One short of the limit is a page that ended, so the head is covered for every owner.
+        let short = Self.strangerPRs(head: "main", count: rows)
+        let repo = await Self.load(Self.runner(headResults: ["main": short]))
+
+        let main = repo.branches.first { $0.name == "main" }
+        #expect(main?.prStatus == PRStatus.none,
+                "a page that ended before the limit answered for every owner of that head")
     }
 }
