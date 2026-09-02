@@ -45,10 +45,23 @@ public struct PRCacheEntry: Hashable, Codable, Sendable {
     public var prs: [PRInfo]
     /// `gh pr list --state open --author @me`.
     public var authorPRs: [PRInfo]
+    /// The heads this entry's fetch actually asked GitHub about: the recent-100 list answers for
+    /// every head it names, and the per-head fallback answers for each head it spent the cap on.
+    /// Persisted because a warm cache serves the whole answer without re-querying, and without
+    /// this a branch the fetch *did* ask about and found nothing for would come back
+    /// `notChecked` on the next launch instead of `none` (`unqueriedBranchIsNotCheckedNeverNone`
+    /// read in the other direction). Defaulted so a cache written before this field decodes.
+    public var queriedHeads: [String] = []
 
-    public init(fetchedAt: Date, prs: [PRInfo] = [], authorPRs: [PRInfo] = []) {
+    public init(
+        fetchedAt: Date,
+        prs: [PRInfo] = [],
+        authorPRs: [PRInfo] = [],
+        queriedHeads: [String] = []
+    ) {
         self.fetchedAt = fetchedAt
         self.prs = prs
         self.authorPRs = authorPRs
+        self.queriedHeads = queriedHeads
     }
 }

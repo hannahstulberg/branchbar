@@ -39,6 +39,39 @@ public struct RepoLoader: Sendable {
         now: Date,
         previous: Repo? = nil
     ) async -> Repo {
+        await loadReportingPRCache(
+            discovered,
+            wantsPullRequests: wantsPullRequests,
+            cachedPRs: cachedPRs,
+            now: now,
+            previous: previous).repo
+    }
+
+    /// One repo plus the `PRCacheEntry` the next refresh should be handed for it.
+    ///
+    /// `RefreshCoordinator` (packet 3.2) persists `prCache`, and a `Repo` cannot be turned back
+    /// into one honestly: it holds only the PRs that matched a local branch, and nothing at all
+    /// about which heads were asked. `queriedHeads` is the field that keeps `none` and
+    /// `notChecked` distinguishable across a relaunch.
+    public struct LoadResult: Sendable {
+        public var repo: Repo
+        /// nil when this refresh neither fetched nor was given anything worth keeping.
+        public var prCache: PRCacheEntry?
+
+        public init(repo: Repo, prCache: PRCacheEntry?) {
+            self.repo = repo
+            self.prCache = prCache
+        }
+    }
+
+    /// `load`, plus the cache entry. See `load` for the stage-by-stage contract.
+    public func loadReportingPRCache(
+        _ discovered: DiscoveredRepo,
+        wantsPullRequests: Bool,
+        cachedPRs: PRCacheEntry?,
+        now: Date,
+        previous: Repo? = nil
+    ) async -> LoadResult {
         var errors: [RepoError] = []
 
         // Stage 1 — identity. The scan already recorded both paths, so a failure here costs only
@@ -73,13 +106,17 @@ public struct RepoLoader: Sendable {
             branchRefs = try await git.branchRefs(at: path)
         } catch {
             errors.append(RepoError(stage: .branches, message: "git for-each-ref -- refs/heads failed (\(Self.describe(error)))"))
-            return Self.stale(
-                previous: previous,
-                discovered: discovered,
-                path: path,
-                remoteURL: remoteURL,
-                slug: slug,
-                errors: errors)
+            // The entry rides through untouched: this refresh learned nothing about PRs, and
+            // dropping it would cost the next one a fetch it does not need.
+            return LoadResult(
+                repo: Self.stale(
+                    previous: previous,
+                    discovered: discovered,
+                    path: path,
+                    remoteURL: remoteURL,
+                    slug: slug,
+                    errors: errors),
+                prCache: cachedPRs)
         }
 
         // Stage 4 — the remote-tracking tips, which back `originMovedSince` and the last-known
@@ -123,15 +160,19 @@ public struct RepoLoader: Sendable {
         // Stage 7 — PRs, and only if asked. PLAN.md §3: `gh` runs when the repo is expanded or in
         // the 5 most recently active, and the cache exists "for latency, not quota".
         var pr = PRStage()
+        var entry: PRCacheEntry? = cachedPRs
         let cacheIsFresh = cachedPRs.map { now.timeIntervalSince($0.fetchedAt) < policy.prCacheTTL } ?? false
 
         if let cachedPRs, cacheIsFresh {
-            // `prCacheWithinTTLIssuesNoGhCalls`: a warm entry answers outright. `queriedHeads`
-            // stays empty because this refresh asked nothing, so a branch the cached list does not
-            // name reads `notChecked` and never `none`.
+            // `prCacheWithinTTLIssuesNoGhCalls`: a warm entry answers outright. The heads that
+            // fetch asked about are carried in the entry, so a branch it asked about and found
+            // nothing for still reads `none`; a branch it never asked about still reads
+            // `notChecked`. Serving a fetched answer while forgetting what was fetched would
+            // downgrade every `none` to `notChecked` the moment the cache went warm.
             pr.pullRequests = cachedPRs.prs
             pr.authored = cachedPRs.authorPRs
             pr.fetchedAt = cachedPRs.fetchedAt
+            pr.queriedHeads = Set(cachedPRs.queriedHeads).union(cachedPRs.prs.map(\.headRefName))
             pr.loadState = .loaded
         } else if wantsPullRequests {
             await runPullRequestStage(
@@ -141,6 +182,15 @@ public struct RepoLoader: Sendable {
                 remoteURL: remoteURL,
                 slug: slug,
                 now: now)
+            // Only a fetch that reached the recent-100 list is worth keeping; a failed one would
+            // cache a blank answer as if GitHub had given it.
+            if let fetchedAt = pr.fetchedAt {
+                entry = PRCacheEntry(
+                    fetchedAt: fetchedAt,
+                    prs: pr.pullRequests,
+                    authorPRs: pr.authored,
+                    queriedHeads: pr.queriedHeads.sorted())
+            }
         } else if let cachedPRs {
             // Not eager, and the entry is past its TTL: show what was last known rather than
             // blanking the pills, and say it is stale.
@@ -150,7 +200,7 @@ public struct RepoLoader: Sendable {
             pr.loadState = .stale
         }
 
-        return RepoAssembler.assemble(RepoAssembler.Inputs(
+        let repo = RepoAssembler.assemble(RepoAssembler.Inputs(
             id: discovered.id,
             path: path,
             remoteURL: remoteURL,
@@ -167,6 +217,8 @@ public struct RepoLoader: Sendable {
             errors: errors,
             isStale: false,
             refreshedAt: now))
+
+        return LoadResult(repo: repo, prCache: entry)
     }
 
     // MARK: - The `gh` stage

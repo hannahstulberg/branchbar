@@ -14,6 +14,11 @@ let package = Package(
             dependencies: ["BranchBarCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .executableTarget(
+            name: "branchbar-cli",
+            dependencies: ["BranchBarCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .testTarget(
             name: "BranchBarCoreTests",
             dependencies: ["BranchBarCore"]
