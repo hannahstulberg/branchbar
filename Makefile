@@ -22,7 +22,7 @@ bundle: release
 zip: bundle
 	rm -f $(ZIP) $(ZIP).sha256
 	ditto -c -k --sequesterRsrc --keepParent $(APP) $(ZIP)
-	shasum -a 256 $(ZIP) > $(ZIP).sha256
+	cd dist && shasum -a 256 $(notdir $(ZIP)) > $(notdir $(ZIP)).sha256
 
 run: stop        ## rebuild (arm64) and launch the bundled app
 	ARCHS=arm64 scripts/bundle.sh
