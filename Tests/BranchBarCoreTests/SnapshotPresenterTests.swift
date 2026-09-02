@@ -130,6 +130,12 @@ struct SnapshotPresenterTests {
         Strings.launchAtLoginFailed,
         Strings.ghSignInScriptBanner,
         Strings.filesAndFoldersSettingsURL,
+        // F11 moved these two out of `Sources/BranchBar/Views/FooterView.swift`, where a shell
+        // packet had parked them because this list was frozen. Same kind of thing as the rest: a
+        // fixed control label and the sentence VoiceOver reads for it, with no view-model field
+        // and no `Snapshot` that can produce either.
+        Strings.cancelRefreshActionLabel,
+        Strings.cancelRefreshAccessibilityLabel,
     ]
 
     /// Literals a fixture contracts that its own recorded `Snapshot` cannot produce. These are not
@@ -182,7 +188,8 @@ struct SnapshotPresenterTests {
     /// made green by widening them.
     @Test("everyFixtureStringIsRenderedOrOnAFrozenExemptionList")
     func everyFixtureStringIsRenderedOrOnAFrozenExemptionList() throws {
-        #expect(Self.viewOwnedChrome.count == 28)
+        // 28 until F11 added the Cancel button's label and its accessibility label.
+        #expect(Self.viewOwnedChrome.count == 30)
         #expect(Self.fixtureDataGaps.keys.sorted() == ["repo-failed", "single-branch-no-pr-never-pushed"])
         // 32 + 2 until the codex pre-ship review, which added one state per finding that named a
         // state the contract had no row for: `zero-repos-documents-denied` (MAJOR 3),
@@ -191,9 +198,11 @@ struct SnapshotPresenterTests {
         // codex round 2 added four: `gh-forbidden` and `gh-command-failed` (MAJOR 7),
         // `non-origin-upstream` and `untracked-remote-branch` (MAJOR 5). `stale-rows-idle` is the
         // idle half of the stale-row warning.
+        // F11 added `non-origin-in-sync` and `non-origin-upstream-missing`: the two other things a
+        // fork-tracking row can say, both of which named origin before codex round 2's MAJOR 5.
         #expect(
-            stateFixtureIDs.count == 43,
-            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1, codex round 2 added 5; found \(stateFixtureIDs.count)")
+            stateFixtureIDs.count == 45,
+            "packet 4.0 recorded 32, packet 4.3 added 2, the codex fixes added 3, CR-04 added 1, codex round 2 added 5, F11 added 2; found \(stateFixtureIDs.count)")
 
         // Nothing is exempted that no fixture actually asks for.
         var contracted: Set<String> = []

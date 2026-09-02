@@ -258,6 +258,8 @@ enum UIStates {
         nonOriginUpstream,
         untrackedRemoteBranch,
         staleRowsIdle,
+        nonOriginInSync,
+        nonOriginUpstreamMissing,
     ]
 
     // 1
@@ -1173,7 +1175,11 @@ enum UIStates {
         title: "A refresh is in flight",
         planReference: "§5 RefreshState.running(completed, total)",
         entries: [
-            ("refreshRunning", Strings.refreshRunning(completed: 3, total: 12))
+            ("refreshRunning", Strings.refreshRunning(completed: 3, total: 12)),
+            // F11: the control that ends a refresh the user is tired of waiting for.
+            // `AppModel.cancelRefresh()` has had no caller since F6; F12 wires the button.
+            ("cancelRefreshActionLabel", Strings.cancelRefreshActionLabel),
+            ("cancelRefreshAccessibilityLabel", Strings.cancelRefreshAccessibilityLabel),
         ],
         snapshot: UIFixtures.snapshot([
             UIFixtures.repo(branches: [UIFixtures.branch("main", prStatus: .none)])
@@ -1338,6 +1344,69 @@ enum UIStates {
             UIFixtures.repo(
                 branches: [UIFixtures.branch("main", prStatus: .notChecked)],
                 isStale: true)
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 40 — F11. `non-origin-upstream` covers the ahead half of a fork-tracking branch; these two
+    // cover the other two things such a row can say, because "In sync with last-known origin" and
+    // "Upstream missing from last-known origin" are claims about a repository the branch was never
+    // compared against (codex round 2, MAJOR 5). Both name the remote instead.
+    static let nonOriginInSync = UIState(
+        id: "non-origin-in-sync",
+        title: "A branch tracking a fork with nothing either side has not seen",
+        planReference: "§3: the claim names the remote the comparison used, not the word origin",
+        entries: [
+            ("inSync", Strings.inSync(remote: "fork")),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "fork-feature",
+                    upstream: Upstream(ref: "fork/fork-feature", remote: "fork", ahead: 0, behind: 0),
+                    prStatus: .notChecked,
+                    push: PushInfo(
+                        observedPushAt: UIClock.ago(2 * UIClock.day),
+                        observedPushOID: UIFixtures.tipSHA,
+                        source: .reflogObserved,
+                        hasUpstream: true,
+                        aheadOfLastKnownRemote: 0,
+                        remoteRefObservedAt: UIClock.ago(2 * UIClock.day),
+                        remoteName: "fork",
+                        remoteRefExists: true
+                    )
+                )
+            ])
+        ]),
+        refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
+    )
+
+    // 41 — F11
+    static let nonOriginUpstreamMissing = UIState(
+        id: "non-origin-upstream-missing",
+        title: "The fork branch this one tracked is gone from the last-known fork",
+        planReference: "§3 vocabulary: upstream gone, named against the remote it tracked",
+        entries: [
+            ("upstreamMissing", Strings.upstreamMissing(remote: "fork")),
+        ],
+        snapshot: UIFixtures.snapshot([
+            UIFixtures.repo(branches: [
+                UIFixtures.branch(
+                    "fork-feature",
+                    upstream: Upstream(ref: "fork/fork-feature", remote: "fork", isGone: true),
+                    prStatus: .merged,
+                    push: PushInfo(
+                        observedPushAt: UIClock.ago(8 * UIClock.day),
+                        observedPushOID: UIFixtures.tipSHA,
+                        source: .reflogObserved,
+                        hasUpstream: true,
+                        upstreamGone: true,
+                        remoteName: "fork",
+                        remoteRefExists: false
+                    ),
+                    group: .merged
+                )
+            ])
         ]),
         refreshState: .idle(lastRefreshedAt: UIClock.ago(12))
     )
@@ -1512,11 +1581,20 @@ struct StringsTests {
         // The second entry arrived with codex MAJOR 8. "No later local commits found" was a claim
         // `headRefOid` cannot support — GitHub documents it as the PR's **current** head, not a
         // merge-time snapshot — and the wording that the data does support has to name the PR
-        // head. Both exceptions are pinned whole so the list cannot quietly grow.
-        let lockedExceptions = [Strings.upstreamMissing, Strings.mergedGroupCopy(base: "main")]
+        // head. The third is F11's: the same locked sentence about the remote the branch actually
+        // tracked, which is the whole of codex round 2's MAJOR 5 — a fork-tracking branch may not
+        // be told its upstream is missing from a repository it was never compared against. It is
+        // the locked wording with one word substituted, not new copy. All three are pinned whole
+        // so the list cannot quietly grow.
+        let lockedExceptions = [
+            Strings.upstreamMissing,
+            Strings.mergedGroupCopy(base: "main"),
+            Strings.upstreamMissing(remote: "fork"),
+        ]
         #expect(lockedExceptions == [
             "Upstream missing from last-known origin",
             "PR merged into main. Local tip matches GitHub's current PR head.",
+            "Upstream missing from last-known fork",
         ])
 
         var corpus: [String] = []

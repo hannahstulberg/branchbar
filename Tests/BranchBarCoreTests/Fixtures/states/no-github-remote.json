@@ -66,6 +66,9 @@
         },
         "prFetchedAt" : 810302100,
         "prLoadState" : "notLoaded",
+        "remoteOwners" : {
+
+        },
         "remoteURL" : "git@git.example.internal:team/internal-tools.git",
         "worktrees" : [
           {

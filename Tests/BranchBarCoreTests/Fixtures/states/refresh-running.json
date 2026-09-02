@@ -4,7 +4,9 @@
 
   ],
   "expectedStrings" : [
-    "Updating 3 of 12 repos…"
+    "Updating 3 of 12 repos…",
+    "Cancel",
+    "Cancel the running refresh"
   ],
   "id" : "refresh-running",
   "now" : 810302400,
@@ -62,6 +64,9 @@
         },
         "prFetchedAt" : 810302100,
         "prLoadState" : "loaded",
+        "remoteOwners" : {
+
+        },
         "remoteURL" : "git@github.com:tester/demo.git",
         "worktrees" : [
           {

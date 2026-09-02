@@ -577,3 +577,73 @@ struct RepoScannerHostileMarkerTests {
         #expect(result.repos.first?.id == RepoID(commonDir: commonDirectory))
     }
 }
+
+// Packet F11 — one walk, two consumers.
+//
+// The `branchbar-cli scan` helper has to publish a repo the moment it is deduped, or a kill takes
+// every repo the walk had already found (F10). Rather than give the CLI a second walk that would
+// drift from this one, `RepoScanner` reports what it is doing through `onProgress` and the CLI
+// turns each event into a line of NDJSON. `InProcessScanRunner` passes no callback, so the app's
+// in-process path is unchanged.
+@Suite("RepoScanner reports what it found while it is still walking")
+struct RepoScannerProgressTests {
+
+    /// A recorder that is safe to hand a `@Sendable` callback.
+    private final class Events: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [ScanEvent] = []
+        func append(_ event: ScanEvent) { lock.lock(); storage.append(event); lock.unlock() }
+        var all: [ScanEvent] { lock.lock(); defer { lock.unlock() }; return storage }
+        var repos: [String] { all.compactMap { if case .repo(let r) = $0 { return r.path } else { return nil } } }
+        var unreadable: [String] { all.compactMap { if case .unreadable(let p) = $0 { return p } else { return nil } } }
+        var entering: [String] { all.compactMap { if case .entering(let p) = $0 { return p } else { return nil } } }
+        var counters: [ScanCounters] { all.compactMap { if case .skipped(let c) = $0 { return c } else { return nil } } }
+    }
+
+    @Test("scannerReportsEachRepoAsItIsDeduped")
+    func scannerReportsEachRepoAsItIsDeduped() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addRepository(at: "/Users/tester/alpha")
+        fs.addRepository(at: "/Users/tester/beta")
+        fs.addDirectory("/Users/tester/locked")
+        fs.markUnreadable("/Users/tester/locked")
+
+        let events = Events()
+        let scanner = RepoScanner(fileSystem: fs, onProgress: { events.append($0) })
+        let result = try await scanner.scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+
+        #expect(events.repos.sorted() == ["/Users/tester/alpha", "/Users/tester/beta"])
+        #expect(events.repos.sorted() == result.repos.map(\.path).sorted())
+        #expect(events.unreadable == ["/Users/tester/locked"])
+        #expect(!events.counters.isEmpty, "the walk never reported its skip counters")
+        #expect(events.counters.last?.candidatesExamined == result.candidatesExamined)
+    }
+
+    /// The event the "Not scanned" row is built from when the process dies inside a listing: the
+    /// gated folder is announced *before* the call that can block, because nothing after it will
+    /// run if macOS never answers.
+    @Test("scannerAnnouncesAGatedFolderBeforeListingIt")
+    func scannerAnnouncesAGatedFolderBeforeListingIt() async throws {
+        let fs = InMemoryFileSystem(home: "/Users/tester")
+        fs.addRepository(at: "/Users/tester/alpha")
+        fs.addRepository(at: "/Users/tester/Documents/notes")
+
+        let events = Events()
+        let scanner = RepoScanner(fileSystem: fs, onProgress: { events.append($0) })
+        _ = try await scanner.scan(policy: ScanPolicy(homeRoot: "/Users/tester"))
+
+        #expect(events.entering.contains("/Users/tester/Documents"))
+        #expect(events.entering.allSatisfy { path in
+            RepoScanner.tccGatedFolderNames.contains((path as NSString).lastPathComponent)
+        }, "only the folders macOS gates are announced: \(events.entering)")
+
+        // Every repo outside the gated folders is on the wire before the gated listing starts.
+        let enteringIndex = try #require(events.all.firstIndex {
+            if case .entering("/Users/tester/Documents") = $0 { return true } else { return false }
+        })
+        let alphaIndex = try #require(events.all.firstIndex {
+            if case .repo(let repo) = $0 { return repo.path == "/Users/tester/alpha" } else { return false }
+        })
+        #expect(alphaIndex < enteringIndex)
+    }
+}

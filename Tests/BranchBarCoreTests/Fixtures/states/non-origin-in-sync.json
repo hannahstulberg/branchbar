@@ -4,11 +4,11 @@
 
   ],
   "expectedStrings" : [
-    "origin has a branch of the same name, which this branch does not track"
+    "In sync with last-known fork"
   ],
-  "id" : "untracked-remote-branch",
+  "id" : "non-origin-in-sync",
   "now" : 810302400,
-  "planReference" : "§3: the row may not deny the ref whose reflog produced its push line",
+  "planReference" : "§3: the claim names the remote the comparison used, not the word origin",
   "refreshState" : {
     "idle" : {
       "lastRefreshedAt" : 810302388
@@ -23,19 +23,28 @@
             "committerDate" : 810129600,
             "group" : "active",
             "isCheckedOutInPrimary" : true,
-            "name" : "hotfix",
+            "name" : "fork-feature",
             "prStatus" : "notChecked",
             "push" : {
-              "hasUpstream" : false,
+              "aheadOfLastKnownRemote" : 0,
+              "hasUpstream" : true,
               "observedPushAt" : 810129600,
               "observedPushOID" : "1111111111111111111111111111111111111111",
               "originMovedSince" : false,
-              "remoteName" : "origin",
+              "remoteName" : "fork",
               "remoteRefExists" : true,
+              "remoteRefObservedAt" : 810129600,
               "source" : "reflogObserved",
               "upstreamGone" : false
             },
-            "tipSHA" : "1111111111111111111111111111111111111111"
+            "tipSHA" : "1111111111111111111111111111111111111111",
+            "upstream" : {
+              "ahead" : 0,
+              "behind" : 0,
+              "isGone" : false,
+              "ref" : "fork/fork-feature",
+              "remote" : "fork"
+            }
           }
         ],
         "errors" : [
@@ -90,5 +99,5 @@
       "gitVersion" : "git version 2.39.5 (Apple Git-154)"
     }
   },
-  "title" : "Pushed without -u: no tracking, and origin holds the branch anyway"
+  "title" : "A branch tracking a fork with nothing either side has not seen"
 }

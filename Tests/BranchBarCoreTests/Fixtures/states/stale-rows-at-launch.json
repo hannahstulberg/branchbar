@@ -62,6 +62,9 @@
         },
         "prFetchedAt" : 810302100,
         "prLoadState" : "stale",
+        "remoteOwners" : {
+
+        },
         "remoteURL" : "git@github.com:tester/demo.git",
         "worktrees" : [
           {

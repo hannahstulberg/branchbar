@@ -76,6 +76,12 @@ struct ScanRunnerTests {
     /// codex BLOCKER 1. The helper is spawned with the frozen argument shape, the policy travels
     /// as JSON in a temp file, and the `ScanResult` it prints comes back byte-identical through
     /// the shared encoder and decoder — dates included, which is why both sides use `.iso8601`.
+    ///
+    /// Packet F11 changed two expectations here, and nothing else. The result now travels as the
+    /// stream's final `{"result": …}` line rather than as a bare `ScanResult` document, because
+    /// the helper prints repos as it walks and the last line is what says the walk finished. And
+    /// `--json` is no longer passed: `scan` never read it (F10's finding), and the stream is the
+    /// only output shape the subcommand has.
     @Test("helperScanResultRoundTripsThroughJSON")
     func helperScanResultRoundTripsThroughJSON() async throws {
         let expected = ScanResult(
@@ -96,11 +102,13 @@ struct ScanRunnerTests {
         let payload = try Packet25TempDir()
         defer { payload.remove() }
         let resultFile = payload.file("result.json")
-        try HelperProcessScanRunner.makeEncoder().encode(expected).write(to: resultFile)
+        try HelperProcessScanRunner.makeEncoder()
+            .encode(ScanStreamLine(result: expected))
+            .write(to: resultFile)
         let argumentsFile = payload.file("argv.txt")
 
         let helper = try HelperScript(
-            "printf '%s\\n' \"$@\" > '\(argumentsFile.path)'\ncat '\(resultFile.path)'")
+            "printf '%s\\n' \"$@\" > '\(argumentsFile.path)'\ncat '\(resultFile.path)'\nprintf '\\n'")
         defer { helper.remove() }
 
         let runner = HelperProcessScanRunner(
@@ -111,13 +119,13 @@ struct ScanRunnerTests {
 
         #expect(result == expected)
 
-        // The frozen shape: `scan --policy-json <tmpfile> --json`, plus the soft deadline the
-        // helper enforces on its own walk.
+        // The frozen shape: `scan --policy-json <tmpfile>`, plus the soft deadline the helper
+        // enforces on its own walk.
         let argv = try String(contentsOf: argumentsFile, encoding: .utf8)
             .components(separatedBy: "\n")
             .filter { !$0.isEmpty }
         #expect(argv.first == "scan")
-        #expect(argv.contains("--json"))
+        #expect(!argv.contains("--json"))
         let policyIndex = try #require(argv.firstIndex(of: "--policy-json"))
         let deadlineIndex = try #require(argv.firstIndex(of: "--deadline"))
         #expect(Double(argv[deadlineIndex + 1]) ?? 0 > 0)
@@ -142,10 +150,15 @@ struct ScanRunnerTests {
         let helper = try HelperScript("echo $$ > '\(pidFile)'\nexec sleep 60")
         defer { helper.remove() }
 
+        // Packet F11 raised this from 0.5 s. What the test asserts is unchanged — the helper is
+        // killed rather than waited on, and `elapsed < 15` is the bound that says so — but half a
+        // second was short enough that, with the rest of the suite spawning processes in parallel,
+        // the shell was sometimes killed before it had written its own pid and the test failed on
+        // its bookkeeping rather than on the behaviour.
         let runner = HelperProcessScanRunner(
             helperExecutable: helper.url.path,
             runner: ProcessCommandRunner(),
-            scanDeadline: 0.5)
+            scanDeadline: 2)
 
         let started = Date()
         let result = try await runner.scan(policy: Self.policy)
@@ -271,5 +284,179 @@ struct CoordinatorScanRunnerTests {
         #expect(stub.policies.first?.homeRoot == "/Users/tester")
         #expect(snapshot.repos.map(\.path) == [helperOnly.path],
                 "the coordinator walked the tree itself instead of asking the injected runner")
+    }
+}
+
+// Packet F11 — F10's finding: "All partial progress is lost: when the soft deadline wins the race,
+// `branchbar-cli scan` returns `HelperProcessScanRunner.truncatedResult(for:)`, a synthetic empty
+// result, instead of what the walk had already accumulated."
+//
+// On three consecutive launches of the installed bundle the refresh finished in 21 s with repos=0
+// and `candidatesExamined: 0`, while the same helper run from Terminal found 25 repos in 1.2 s.
+// The helper was parked in `open()` inside `contentsOfDirectory` on a TCC-gated folder — the one
+// place no cancellation check is ever reached — so its own soft deadline never fired, the hard
+// kill took the process, and every repo the walk had already found died with it. It had found
+// them all: the gated folders are enumerated last.
+//
+// The fix is to stop treating one process as one answer. The helper writes NDJSON as it walks and
+// flushes after every line, so a repo is on the wire the moment it is deduped rather than at the
+// end; whatever arrived before the kill is what the runner assembles. The folder the helper
+// announced entering and never left is reported as "not scanned", which is the same recoverable
+// row a TCC denial produces.
+
+/// The four line shapes the helper writes, built here rather than by encoding a `ScanStreamLine`,
+/// so a test helper cannot pass by being wrong in the same way the shipped encoder is.
+private enum StreamLines {
+    static func repo(_ path: String) -> String {
+        #"{"repo":{"id":{"commonDir":"\#(path)/.git"},"path":"\#(path)"}}"#
+    }
+    static func entering(_ path: String) -> String { #"{"entering":"\#(path)"}"# }
+    static func unreadable(_ path: String) -> String { #"{"unreadable":"\#(path)"}"# }
+}
+
+@Suite("The helper streams what it finds, so a kill costs only what it had not printed yet")
+struct ScanStreamTests {
+
+    private static let policy = ScanPolicy(homeRoot: "/Users/tester", extraRoots: ["/Volumes/Work"])
+
+    /// Long enough that a `printf` in a shell script reliably lands before the kill even while the
+    /// rest of the suite is running in parallel, short enough that a helper which never answers
+    /// costs the suite two seconds. What is being tested is that the lines survive the kill, not
+    /// how soon the kill arrives — `helperScanIsKilledAtTheDeadlineAndYieldsATruncatedResult`
+    /// owns that.
+    private static let deadline: TimeInterval = 2
+
+    /// F10's finding, as a test. The script prints two repos, announces the gated folder it is
+    /// about to open, and then never returns — which is what `open()` behind an unanswered consent
+    /// dialog does. The runner kills it and keeps the two repos.
+    @Test("killedHelperYieldsTheReposStreamedBeforeTheKill")
+    func killedHelperYieldsTheReposStreamedBeforeTheKill() async throws {
+        let helper = try HelperScript("""
+            printf '%s\\n' '\(StreamLines.repo("/Users/tester/alpha"))' \\
+                           '\(StreamLines.repo("/Users/tester/beta"))' \\
+                           '\(StreamLines.entering("/Users/tester/Documents"))'
+            exec sleep 60
+            """)
+        defer { helper.remove() }
+
+        let result = try await HelperProcessScanRunner(
+            helperExecutable: helper.url.path,
+            runner: ProcessCommandRunner(),
+            scanDeadline: Self.deadline
+        ).scan(policy: Self.policy)
+
+        #expect(result.repos.map(\.path) == ["/Users/tester/alpha", "/Users/tester/beta"],
+                "the repos the helper had already printed were thrown away with the process")
+        #expect(result.truncatedByDeadline, "a killed scan must not read as a finished one")
+        #expect(result.policy == Self.policy)
+    }
+
+    /// A helper that finished says so on its last line, and that line is the whole answer: the
+    /// counts, the skip lists and `truncatedByDeadline: false` are things only the walk knows.
+    @Test("completedHelperUsesTheFinalResultLine")
+    func completedHelperUsesTheFinalResultLine() async throws {
+        let expected = ScanResult(
+            policy: Self.policy,
+            scannedAt: Date(timeIntervalSince1970: 1_788_400_000),
+            repos: [
+                DiscoveredRepo(path: "/Users/tester/alpha", id: RepoID(commonDir: "/Users/tester/alpha/.git")),
+                DiscoveredRepo(path: "/Users/tester/beta", id: RepoID(commonDir: "/Users/tester/beta/.git")),
+            ],
+            candidatesExamined: 12,
+            unreadableDirectories: ["/Users/tester/Documents"],
+            depthCutDirectories: 3,
+            skippedHiddenDirectories: 40,
+            skippedWorktreeCheckouts: ["/Users/tester/wt"],
+            skippedSubmodules: ["/Users/tester/sub"],
+            truncatedByDeadline: false)
+
+        let payload = try Packet25TempDir()
+        defer { payload.remove() }
+        let resultFile = payload.file("result.json")
+        try HelperProcessScanRunner.makeEncoder()
+            .encode(ScanStreamLine(result: expected))
+            .write(to: resultFile)
+
+        // One repo already streamed, then the final line, which supersedes it.
+        let helper = try HelperScript("""
+            printf '%s\\n' '\(StreamLines.repo("/Users/tester/alpha"))'
+            cat '\(resultFile.path)'
+            printf '\\n'
+            """)
+        defer { helper.remove() }
+
+        let result = try await HelperProcessScanRunner(
+            helperExecutable: helper.url.path,
+            runner: ProcessCommandRunner(),
+            scanDeadline: 20
+        ).scan(policy: Self.policy)
+
+        #expect(result == expected)
+    }
+
+    /// The listing that never returned is the folder the user can act on. It is reported the way a
+    /// TCC denial is — `unreadableDirectories`, which the presenter renders as "Not scanned:
+    /// Documents" — rather than silently dropped, which is what left F10's user staring at an
+    /// empty list with nothing to do about it.
+    @Test("enteringLineNamesTheFolderReportedAsNotScanned")
+    func enteringLineNamesTheFolderReportedAsNotScanned() async throws {
+        let helper = try HelperScript("""
+            printf '%s\\n' '\(StreamLines.repo("/Users/tester/alpha"))' \\
+                           '\(StreamLines.unreadable("/Users/tester/Desktop"))' \\
+                           '\(StreamLines.entering("/Users/tester/Documents"))'
+            exec sleep 60
+            """)
+        defer { helper.remove() }
+
+        let result = try await HelperProcessScanRunner(
+            helperExecutable: helper.url.path,
+            runner: ProcessCommandRunner(),
+            scanDeadline: Self.deadline
+        ).scan(policy: Self.policy)
+
+        #expect(result.unreadableDirectories.contains("/Users/tester/Documents"),
+                "the gated folder the helper was inside when it died is not reported")
+        #expect(result.unreadableDirectories.contains("/Users/tester/Desktop"),
+                "a folder the helper reported unreadable is not carried through")
+        #expect(result.repos.map(\.path) == ["/Users/tester/alpha"])
+    }
+
+    /// A line this side cannot read costs that line and nothing else. The stream is repository-
+    /// owned data at one remove — a directory name decides what a `repo` line says — and a single
+    /// bad line taking down the whole scan would hand any folder on this Mac the power to empty
+    /// the list.
+    @Test("malformedStreamLineIsSkippedNotFatal")
+    func malformedStreamLineIsSkippedNotFatal() async throws {
+        let helper = try HelperScript("""
+            printf '%s\\n' '\(StreamLines.repo("/Users/tester/alpha"))' \\
+                           'not json at all' \\
+                           '{"repo":' \\
+                           '' \\
+                           '\(StreamLines.repo("/Users/tester/beta"))'
+            exec sleep 60
+            """)
+        defer { helper.remove() }
+
+        let result = try await HelperProcessScanRunner(
+            helperExecutable: helper.url.path,
+            runner: ProcessCommandRunner(),
+            scanDeadline: Self.deadline
+        ).scan(policy: Self.policy)
+
+        #expect(result.repos.map(\.path) == ["/Users/tester/alpha", "/Users/tester/beta"])
+        #expect(result.truncatedByDeadline)
+    }
+
+    /// The stray flag F10 named: `scan` never read `--json`, and passing it advertised a shape the
+    /// helper does not have. The stream is the only output form now, so the flag is gone.
+    @Test("helperIsNotPassedTheStrayJSONFlag")
+    func helperIsNotPassedTheStrayJSONFlag() {
+        let argv = HelperProcessScanRunner.arguments(
+            policyPath: "/tmp/policy.json", softDeadline: 15, gitExecutable: "/usr/bin/git")
+
+        #expect(!argv.contains("--json"))
+        #expect(argv.first == "scan")
+        #expect(argv.contains("--policy-json"))
+        #expect(argv.contains("--deadline"))
     }
 }
