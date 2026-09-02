@@ -88,6 +88,8 @@ enum Glyph {
     static let grantAccess = "lock.open"
     static let rescan = "magnifyingglass"
     static let removeRoot = "minus.circle"
+    static let hide = "eye.slash"
+    static let unhide = "eye"
     static let warning = "exclamationmark.triangle"
     static let notScanned = "eye.slash"
     static let rateLimited = "clock"

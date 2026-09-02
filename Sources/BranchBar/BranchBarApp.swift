@@ -40,7 +40,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Read once, here, rather than per popover open: `SMAppService.status` is an XPC round trip
+        // and the footer redraws on every progressive emit. Every later read follows a flip.
+        LaunchAtLogin.logCurrentState()
+        model.refreshLaunchAtLoginState()
+
+        let environment = ProcessInfo.processInfo.environment
+        if let mode = environment["BRANCHBAR_LAUNCH_AT_LOGIN"], !mode.isEmpty {
+            runLaunchAtLoginCheck(mode)
+            return
+        }
+        if let path = environment["BRANCHBAR_ACTION_CHECK"], !path.isEmpty {
+            runActionCheck(on: path)
+            return
+        }
+
         model.refresh(reason: .launch)
+    }
+
+    // MARK: - Gate 4 harnesses
+
+    /// Runs the row and setup actions against one folder and logs what each one did, then quits.
+    ///
+    /// It exists because the popover cannot be driven from a script without an Accessibility grant
+    /// (0.2 spike item 4), and Gate 4 asks for every action exercised on a real worktree. These are
+    /// the same `Actions` entry points the menu items call — the harness replaces the click, not the
+    /// code under it. Two actions are deliberately absent: "Add folder…" runs a modal `NSOpenPanel`
+    /// that only a person can answer, and the login-item toggle has its own mode below.
+    private func runActionCheck(on path: String) {
+        Log.info("action check: starting on \(path)")
+
+        Actions.openInAvailableEditor(path: path)
+        Actions.revealInFinder(path: path)
+
+        Actions.copyPath(path)
+        let pasted = NSPasteboard.general.string(forType: .string) ?? "—"
+        Log.info("action check: clipboard now holds \(pasted) · matches=\(pasted == path)")
+
+        let command = Strings.ghAuthLoginCommand(host: "github.com")
+        if let script = Actions.writeSignInScript(command: command) {
+            let body = (try? String(contentsOf: script, encoding: .utf8)) ?? ""
+            Log.info(
+                "action check: sign-in script at \(script.path) executable="
+                    + "\(FileManager.default.isExecutableFile(atPath: script.path)) "
+                    + "carries-command=\(body.contains(command))")
+        }
+        Actions.openTerminalForSignIn(command: command)
+
+        Actions.openPR(url: "https://github.com/hannahstulberg/branchbar")
+        Actions.openPR(url: "file:///etc/passwd")
+        Actions.openFilesAndFoldersSettings()
+
+        Log.info("action check: done")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.terminate(nil) }
+    }
+
+    /// `status`, `on`, or `off` for the login item, so the toggle's two mechanisms can be exercised
+    /// and read back from `/Applications` without clicking a checkbox in a popover.
+    private func runLaunchAtLoginCheck(_ mode: String) {
+        switch mode {
+        case "on", "off":
+            do {
+                try LaunchAtLogin.set(mode == "on")
+            } catch {
+                let failure = error as? LaunchAtLogin.Failure
+                Log.info("launch at login check: set(\(mode)) threw \(failure?.diagnostic ?? "\(error)")")
+            }
+        case "status":
+            break
+        default:
+            Log.info("launch at login check: unknown mode \(mode)")
+        }
+        LaunchAtLogin.logCurrentState()
+        Log.info(
+            "launch at login check: plist=\(LaunchAtLogin.hasLaunchAgentPlist) "
+                + "path=\(LaunchAtLogin.launchAgentURL.path) bundle=\(Bundle.main.bundlePath)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
     }
 
     /// Lays the popover's own view out in an ordinary window and logs `rendered state <id>` once

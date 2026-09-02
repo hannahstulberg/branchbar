@@ -7,7 +7,12 @@ import SwiftUI
 struct RepoSectionView: View {
     let section: RepoSectionVM
     let focus: RowFocus?
+    /// True only while the footer's "Show hidden" is on: a hidden repo is normally filtered out
+    /// before the presenter ever sees it.
+    let isHidden: Bool
     let toggleCollapse: (RepoID) -> Void
+    let hide: (RepoID) -> Void
+    let unhide: (RepoID) -> Void
     let perform: (UserFacingFailure.Action) -> Void
     let openPR: (String) -> Void
 
@@ -78,6 +83,11 @@ struct RepoSectionView: View {
                     .foregroundStyle(Color(nsColor: .labelColor))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                if isHidden {
+                    Text(ShellStrings.hiddenRepoMarker)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 0)
             }
             .frame(height: Metrics.sectionHeaderHeight)
@@ -86,8 +96,10 @@ struct RepoSectionView: View {
         }
         .buttonStyle(.plain)
         .background(headerBackground)
+        .contextMenu { headerMenu }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(section.title)
+        .accessibilityLabel(
+            isHidden ? "\(section.title), \(ShellStrings.hiddenRepoMarker)" : section.title)
         .accessibilityValue(
             section.isCollapsed
                 ? Strings.expandSectionActionLabel
@@ -99,6 +111,64 @@ struct RepoSectionView: View {
                 ? Strings.expandSectionActionLabel
                 : Strings.collapseSectionActionLabel
         ) { toggleCollapse(section.id) }
+        // VoiceOver reaches a context menu through the rotor's actions, so every menu item is also
+        // an accessibility action; §5a's rule is that a control the mouse has, the keyboard has.
+        .accessibilityAction(named: hideActionLabel) { toggleHidden() }
+        .accessibilityActions {
+            if let path = repoPath {
+                Button(Strings.revealInFinderActionLabel) { Actions.revealInFinder(path: path) }
+                Button(Strings.copyPathActionLabel) { Actions.copyPath(path) }
+            }
+        }
+    }
+
+    /// Per-row Hide (PLAN.md §8 packet 4.2) plus the two folder actions that make sense for a whole
+    /// repo. Nothing here deletes: hiding drops the repo out of this list and out of every future
+    /// refresh's `gh` budget, and the repo on disk is untouched.
+    @ViewBuilder private var headerMenu: some View {
+        Button {
+            toggleHidden()
+        } label: {
+            Label(hideActionLabel, systemImage: isHidden ? Glyph.unhide : Glyph.hide)
+        }
+        if let path = repoPath {
+            Divider()
+            Button {
+                Actions.openInAvailableEditor(path: path)
+            } label: {
+                Label(Actions.openInAvailableEditorLabel, systemImage: Glyph.openInEditor)
+            }
+            Button {
+                Actions.revealInFinder(path: path)
+            } label: {
+                Label(Strings.revealInFinderActionLabel, systemImage: Glyph.revealInFinder)
+            }
+            Button {
+                Actions.copyPath(path)
+            } label: {
+                Label(Strings.copyPathActionLabel, systemImage: Glyph.copyPath)
+            }
+        }
+    }
+
+    private var hideActionLabel: String {
+        isHidden ? ShellStrings.unhideRepoActionLabel : ShellStrings.hideRepoActionLabel
+    }
+
+    private func toggleHidden() {
+        if isHidden { unhide(section.id) } else { hide(section.id) }
+    }
+
+    /// The repo's own folder. `RepoSectionVM` carries no path — the presenter had no reason to add
+    /// one — so it comes off the first row whose primary action names an absolute path, which is
+    /// the checked-out worktree the row would open. Nil for a repo whose rows have not loaded yet,
+    /// and the menu then offers Hide alone rather than a Finder item that would open nothing.
+    private var repoPath: String? {
+        let rows = section.active + section.merged + section.closedUnmerged
+        return rows.compactMap { row -> String? in
+            guard let payload = row.primaryAction.payload, payload.hasPrefix("/") else { return nil }
+            return payload
+        }.first
     }
 
     @ViewBuilder private var headerBackground: some View {

@@ -34,6 +34,23 @@ final class AppModel: ObservableObject {
     @Published private(set) var refreshState: RefreshState = .running(completed: 0, total: 0)
     @Published private(set) var collapsedRepoIDs: Set<RepoID> = []
 
+    /// Repos the user hid. Published because the footer's "Show hidden (N)" carries the count, and
+    /// a hide has to move that number the moment it happens.
+    @Published private(set) var hiddenRepoIDs: Set<RepoID> = []
+
+    /// Whether hidden repos are being shown anyway, so they can be un-hidden. Session-only and off
+    /// at every launch: hiding is meant to shorten the list, and a preference that quietly
+    /// un-shortens it on the next launch would defeat the point.
+    @Published private(set) var showsHiddenRepos = false
+
+    /// Mirrors `LaunchAtLogin` for SwiftUI. Read once at launch and after every flip rather than
+    /// polled: `SMAppService.status` is an XPC round trip and the popover redraws constantly.
+    @Published private(set) var launchAtLoginIsOn = false
+
+    /// Beside the toggle: why it is disabled, or what macOS is still waiting for. Nil when the
+    /// toggle needs no explaining.
+    @Published private(set) var launchAtLoginNotice: String?
+
     /// Non-nil only in `BRANCHBAR_STATE_FIXTURE` mode; the fixture's own id, which the log line
     /// `rendered state <id>` names.
     let previewStateID: String?
@@ -42,7 +59,6 @@ final class AppModel: ObservableObject {
 
     private var snapshot = Snapshot()
     private var scanResult: ScanResult?
-    private var hiddenRepoIDs: Set<RepoID> = []
     /// Repos the cache has already seen. A repo absent from it is new, and a new repo starts
     /// collapsed unless it is the most recently active one (docs/UI-CONTRACT.md section 3).
     private var knownRepoIDs: Set<RepoID> = []
@@ -118,8 +134,28 @@ final class AppModel: ObservableObject {
         collapsedRepoIDs = Set(fixture.collapsedRepoIDs)
         scanResult = fixture.scanResult
 
+        // No recorded state hides a repo — hiding is a choice a person makes, not a state the app
+        // can be found in — so `BRANCHBAR_PREVIEW_HIDDEN` is what lets Gate 4 photograph the footer's
+        // "Show hidden (N)" control and the "Hidden" marker. `=shown` hides the fixture's last repo
+        // and reveals it; anything else hides it and leaves it hidden. Same shape as 4.1's
+        // `BRANCHBAR_APPEARANCE`: fixture mode only, and it changes nothing a real run does.
+        var hidden: Set<RepoID> = []
+        var showsHidden = false
+        if let mode = ProcessInfo.processInfo.environment["BRANCHBAR_PREVIEW_HIDDEN"],
+           !mode.isEmpty,
+           let last = fixture.snapshot.repos.last {
+            hidden = [last.id]
+            showsHidden = mode == "shown"
+        }
+        hiddenRepoIDs = hidden
+        showsHiddenRepos = showsHidden
+
+        var visible = fixture.snapshot
+        if !showsHidden {
+            visible.repos = visible.repos.filter { !hidden.contains($0.id) }
+        }
         vm = SnapshotPresenter(editors: editors).present(
-            fixture.snapshot,
+            visible,
             refreshState: fixture.refreshState,
             collapsedRepoIDs: Set(fixture.collapsedRepoIDs),
             scanResult: fixture.scanResult,
@@ -244,14 +280,69 @@ final class AppModel: ObservableObject {
         persist { $0.collapsedRepoIDs = Array(self.collapsedRepoIDs) }
     }
 
-    /// Per-row Hide is packet 4.2's; the state it writes is here so the shell has one owner for
-    /// `CacheFile.hiddenRepoIDs`. A hidden repo is filtered out before the presenter sees it —
-    /// `SnapshotPresenter` renders the repos it is handed and knows nothing about hiding.
+    /// Per-row Hide. A hidden repo is filtered out before the presenter sees it —
+    /// `SnapshotPresenter` renders the repos it is handed and knows nothing about hiding — except
+    /// while "Show hidden" is on, which is the only way back to un-hiding one.
     func hide(_ repoID: RepoID) {
+        guard !hiddenRepoIDs.contains(repoID) else { return }
         hiddenRepoIDs.insert(repoID)
         persist { $0.hiddenRepoIDs = Array(self.hiddenRepoIDs) }
-        Log.info("action: hide repo \(repoID.commonDir)")
+        Log.info("action: hide repo \(repoID.commonDir) · hidden=\(hiddenRepoIDs.count)")
         present()
+    }
+
+    func unhide(_ repoID: RepoID) {
+        guard hiddenRepoIDs.contains(repoID) else { return }
+        hiddenRepoIDs.remove(repoID)
+        persist { $0.hiddenRepoIDs = Array(self.hiddenRepoIDs) }
+        Log.info("action: stop hiding repo \(repoID.commonDir) · hidden=\(hiddenRepoIDs.count)")
+        // Nothing left to reveal means nothing left for the toggle to do.
+        if hiddenRepoIDs.isEmpty { showsHiddenRepos = false }
+        present()
+    }
+
+    func isHidden(_ repoID: RepoID) -> Bool { hiddenRepoIDs.contains(repoID) }
+
+    /// The footer's "Show hidden (N)". Turning it on puts the hidden repos back in the list with
+    /// "Stop hiding this repo" on each one; turning it off shortens the list again.
+    func setShowsHiddenRepos(_ shown: Bool) {
+        guard showsHiddenRepos != shown else { return }
+        showsHiddenRepos = shown
+        Log.info("action: show hidden repos \(shown) · hidden=\(hiddenRepoIDs.count)")
+        present()
+    }
+
+    // MARK: - Launch at login
+
+    /// Reads the current login-item state into the published properties. Called at launch and
+    /// after every flip.
+    func refreshLaunchAtLoginState() {
+        guard !isPreviewing else { return }
+        launchAtLoginIsOn = LaunchAtLogin.isEnabled
+        if let reason = LaunchAtLogin.unavailableReason {
+            launchAtLoginNotice = reason
+        } else if LaunchAtLogin.needsApproval {
+            launchAtLoginNotice = ShellStrings.launchAtLoginNeedsApproval
+        } else {
+            launchAtLoginNotice = nil
+        }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        guard !isPreviewing else { return }
+        do {
+            try LaunchAtLogin.set(enabled)
+            refreshLaunchAtLoginState()
+        } catch {
+            let failure = error as? LaunchAtLogin.Failure
+            Log.info("action: launch at login \(enabled) failed: \(failure?.diagnostic ?? "\(error)")")
+            refreshLaunchAtLoginState()
+            // A failure the state read cannot see (the toggle is available, the flip still lost)
+            // still owes the user a sentence.
+            if launchAtLoginNotice == nil {
+                launchAtLoginNotice = failure?.errorDescription ?? ShellStrings.launchAtLoginFailed
+            }
+        }
     }
 
     func addFolder(_ url: URL) {
@@ -289,8 +380,12 @@ final class AppModel: ObservableObject {
             } else {
                 Actions.openPR(url: payload)
             }
-        case .addFolder, .grantFolderAccess:
+        case .addFolder:
             if let url = Actions.pickFolder() { addFolder(url) }
+        case .grantFolderAccess:
+            // Not the same thing as Add folder…: this one is for a folder macOS already refused,
+            // where the answer lives in the Privacy pane rather than in a picker.
+            Actions.openFilesAndFoldersSettings()
         case .rescan:
             refresh(reason: .rescan)
         case .retryRefresh:
@@ -304,7 +399,9 @@ final class AppModel: ObservableObject {
 
     private func present() {
         var visible = snapshot
-        visible.repos = visible.repos.filter { !hiddenRepoIDs.contains($0.id) }
+        if !showsHiddenRepos {
+            visible.repos = visible.repos.filter { !hiddenRepoIDs.contains($0.id) }
+        }
         vm = SnapshotPresenter(editors: editors).present(
             visible,
             refreshState: refreshState,

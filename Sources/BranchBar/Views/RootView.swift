@@ -36,7 +36,10 @@ struct RootView: View {
                         RepoSectionView(
                             section: section,
                             focus: focus,
+                            isHidden: model.isHidden(section.id),
                             toggleCollapse: model.toggleCollapse,
+                            hide: model.hide,
+                            unhide: model.unhide,
                             perform: model.perform,
                             openPR: Actions.openPR)
                     }
@@ -60,7 +63,14 @@ struct RootView: View {
                 perform: model.perform,
                 refresh: { model.refresh(reason: $0) },
                 addFolder: { if let url = Actions.pickFolder() { model.addFolder(url) } },
-                removeRoot: model.removeRoot)
+                removeRoot: model.removeRoot,
+                hiddenCount: model.hiddenRepoIDs.count,
+                showsHidden: model.showsHiddenRepos,
+                setShowsHidden: model.setShowsHiddenRepos,
+                launchAtLoginIsOn: model.launchAtLoginIsOn,
+                launchAtLoginIsAvailable: !model.isPreviewing && LaunchAtLogin.isAvailable,
+                launchAtLoginNotice: model.launchAtLoginNotice,
+                setLaunchAtLogin: model.setLaunchAtLogin)
 
             // Return runs the focused row's primary action. `onKeyPress` is macOS 14; a hidden
             // button carrying the Return shortcut is the macOS 13 way to say the same thing.
