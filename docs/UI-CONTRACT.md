@@ -50,7 +50,7 @@ fixture filename stem.
 | `stale-rows-idle` | Rows left unfinished with no refresh running: a cancelled refresh, or one the 45 s deadline cut short | "Some repos did not finish updating. Refresh to try again." | "Refresh" (`retryRefresh`) | — |
 | `git-too-old` | `git --version` below 2.39 | "BranchBar works best with git 2.39 or newer. This Mac has 2.30.1, so some branch details may be missing." | — | — |
 | `git-not-found` | `ToolLocator` found no `git`, so the preflight failed and no command ran | "git not found" / "BranchBar could not find git on this Mac, so it cannot read any repo. Run xcode-select --install in Terminal, then try again." | "Refresh" (`retryRefresh`) | — (this state replaces the empty state; the footer carries it when a cached list is on screen) |
-| `cursor-not-installed` | `open -a Cursor` has no Cursor to open | "Cursor is not installed on this Mac, so rows open in VS Code instead — or in Terminal if neither is installed." | "Open in VS Code" | "Open in Terminal" |
+| `cursor-not-installed` | `open -a Cursor` has no Cursor to open | "Cursor is not installed on this Mac, so rows open in VS Code instead — or show in the Finder if neither editor is installed." | "Open in VS Code" | "Show in Finder" (the whole chain when neither editor is installed, since codex round 4) |
 | `last-push-unknown` | `PushInfo.source == .tipCommitDate`: no usable push line (file absent, empty, fetch-only, deletion-only, expired) | "Last push unknown · newest commit dated 2 days ago" / tooltip "BranchBar has no record of this branch going out from this Mac. The date shown is when the newest commit was made, not when it left." | "Open in Cursor" | "Copy path" |
 | `origin-moved-since` | `PushInfo.source == .reflogObserved` and the observed OID is not the remote-tracking tip | "Pushed from this Mac 2 days ago (origin has moved since)" / tooltip "BranchBar saw this push leave this Mac. It cannot see pushes made from your other computers." | "Open in Cursor" | "Open PR" |
 | `pr-draft` | Matched PR with `isDraft == true` | pill "Draft" / "Pushed from this Mac 3 hours ago" | "Open in Cursor" | "Open PR" |
@@ -191,9 +191,8 @@ from last-known origin" because PLAN.md §3 locks that wording verbatim, having 
 | Worktree markers | `detachedWorktree` | `detached-worktree` — PLAN.md §3 locks this in place of "detached HEAD". | `Worktree at commit abc1234 (no branch)` |
 | Row actions | `openInCursorActionLabel` | `single-branch-no-pr-never-pushed` — primary row action (PLAN.md §3). | `Open in Cursor` |
 | Row actions | `openInVSCodeActionLabel` | `cursor-not-installed` — first fallback when Cursor is absent. | `Open in VS Code` |
-| Row actions | `openInTerminalActionLabel` | `cursor-not-installed` — last fallback when neither editor is installed. | `Open in Terminal` |
-| Row actions | `cursorNotInstalledNotice` | `cursor-not-installed` — footer notice naming the fallback chain. | `Cursor is not installed on this Mac, so rows open in VS Code instead — or in Terminal if neither is installed.` |
-| Row actions | `openInAvailableEditorLabel` | `cursor-not-installed` — the same fallback chain, resolved to the one label that names the app a row will actually open. `SnapshotPresenter` puts it on a branch row's primary action and the shell's repo-header menu offers the same thing for a whole folder, so both read it from here rather than each picking a winner of their own. | one of `Open in Cursor`, `Open in VS Code`, `Open in Terminal` |
+| Row actions | `cursorNotInstalledNotice` | `cursor-not-installed` — footer notice naming the fallback chain. | `Cursor is not installed on this Mac, so rows open in VS Code instead — or show in the Finder if neither editor is installed.` |
+| Row actions | `openInAvailableEditorLabel` | `cursor-not-installed` — the same fallback chain, resolved to the one label that names what a row will actually do. `SnapshotPresenter` puts it on a branch row's primary action and the shell's repo-header menu offers the same thing for a whole folder, so both read it from here rather than each picking a winner of their own.  codex round 4, BLOCKER 1: the chain used to end at `Open in Terminal`, and Terminal executes a `.command` document. A row's payload is a path a repository or `cache.json` supplied, so the last step is now Finder, which reveals a path and runs nothing. | one of `Open in Cursor`, `Open in VS Code`, `Show in Finder` |
 | Row actions | `openPRActionLabel` | `pr-open`, `open-prs-not-on-this-mac` — opens the PR in the browser. | `Open PR` |
 | Row actions | `revealInFinderActionLabel` | `single-branch-no-pr-never-pushed` — secondary row action. | `Show in Finder` |
 | Row actions | `copyPathActionLabel` | `single-branch-no-pr-never-pushed` — secondary row action. | `Copy path` |
@@ -364,7 +363,7 @@ screenshot comparison.
 | Worktree with no branch | `folder.badge.questionmark` |
 | Repo section disclosure, collapsed / expanded | `chevron.right` / `chevron.down` |
 | Open PR (leaves the app) | `arrow.up.right.square` |
-| Open in Cursor / VS Code / Terminal | `arrow.up.forward.app` |
+| Open in Cursor / VS Code | `arrow.up.forward.app` |
 | Show in Finder | `folder` |
 | Copy path | `doc.on.doc` |
 | Refresh, Refresh PRs now | `arrow.clockwise` |

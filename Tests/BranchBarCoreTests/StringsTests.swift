@@ -760,7 +760,9 @@ enum UIStates {
         entries: [
             ("cursorNotInstalledNotice", Strings.cursorNotInstalledNotice),
             ("openInVSCodeActionLabel", Strings.openInVSCodeActionLabel),
-            ("openInTerminalActionLabel", Strings.openInTerminalActionLabel),
+            // codex round 4 removed `openInTerminalActionLabel` from this row with the member
+            // itself: the chain's last step is `revealInFinderActionLabel`, which the modal state
+            // `single-branch-no-pr-never-pushed` already names.
             (
                 "openInAvailableEditorLabel",
                 Strings.openInAvailableEditorLabel(EditorAvailability(cursor: false, vsCode: true))

@@ -4,9 +4,8 @@
 
   ],
   "expectedStrings" : [
-    "Cursor is not installed on this Mac, so rows open in VS Code instead — or in Terminal if neither is installed.",
+    "Cursor is not installed on this Mac, so rows open in VS Code instead — or show in the Finder if neither editor is installed.",
     "Open in VS Code",
-    "Open in Terminal",
     "Open in VS Code"
   ],
   "id" : "cursor-not-installed",

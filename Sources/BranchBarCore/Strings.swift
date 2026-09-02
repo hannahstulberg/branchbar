@@ -634,25 +634,25 @@ public enum Strings {
     /// Literal: `Open in VS Code`
     public static let openInVSCodeActionLabel = "Open in VS Code"
 
-    /// State: `cursor-not-installed` — last fallback when neither editor is installed.
-    /// Literal: `Open in Terminal`
-    public static let openInTerminalActionLabel = "Open in Terminal"
-
     /// State: `cursor-not-installed` — footer notice naming the fallback chain.
-    /// Literal: `Cursor is not installed on this Mac, so rows open in VS Code instead — or in Terminal if neither is installed.`
+    /// Literal: `Cursor is not installed on this Mac, so rows open in VS Code instead — or show in the Finder if neither editor is installed.`
     public static let cursorNotInstalledNotice =
-        "Cursor is not installed on this Mac, so rows open in VS Code instead — or in Terminal if "
-        + "neither is installed."
+        "Cursor is not installed on this Mac, so rows open in VS Code instead — or show in the "
+        + "Finder if neither editor is installed."
 
     /// State: `cursor-not-installed` — the same fallback chain, resolved to the one label that
-    /// names the app a row will actually open. `SnapshotPresenter` puts it on a branch row's
-    /// primary action and the shell's repo-header menu offers the same thing for a whole folder,
-    /// so both read it from here rather than each picking a winner of their own.
-    /// Literal: one of `Open in Cursor`, `Open in VS Code`, `Open in Terminal`
+    /// names what a row will actually do. `SnapshotPresenter` puts it on a branch row's primary
+    /// action and the shell's repo-header menu offers the same thing for a whole folder, so both
+    /// read it from here rather than each picking a winner of their own.
+    ///
+    /// codex round 4, BLOCKER 1: the chain used to end at `Open in Terminal`, and Terminal executes
+    /// a `.command` document. A row's payload is a path a repository or `cache.json` supplied, so
+    /// the last step is now Finder, which reveals a path and runs nothing.
+    /// Literal: one of `Open in Cursor`, `Open in VS Code`, `Show in Finder`
     public static func openInAvailableEditorLabel(_ editors: EditorAvailability) -> String {
         if editors.cursor { return openInCursorActionLabel }
         if editors.vsCode { return openInVSCodeActionLabel }
-        return openInTerminalActionLabel
+        return revealInFinderActionLabel
     }
 
     /// State: `pr-open`, `open-prs-not-on-this-mac` — opens the PR in the browser.

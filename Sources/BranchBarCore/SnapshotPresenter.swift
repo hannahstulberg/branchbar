@@ -4,8 +4,9 @@ import Foundation
 ///
 /// It is a property of the machine rather than of a `Snapshot`, so it is handed to the presenter
 /// once at construction and `present`'s argument list stays exactly the six that packet 4.0 froze
-/// into `Tests/BranchBarCoreTests/Fixtures/states/*.json`. Terminal is always present, which is
-/// why the fallback chain in §3 ends there and this type has no third flag.
+/// into `Tests/BranchBarCoreTests/Fixtures/states/*.json`. Two flags are the whole type: the chain
+/// ends at Show in Finder, which needs no flag because the Finder is always there (codex round 4,
+/// BLOCKER 1 — Terminal used to be the last step, and Terminal runs a `.command` document).
 public struct EditorAvailability: Hashable, Codable, Sendable {
     public var cursor: Bool
     public var vsCode: Bool
@@ -48,7 +49,7 @@ public struct EditorAvailability: Hashable, Codable, Sendable {
 ///   already uses to join two facts in one line, because §5a gives the row no other slot for it.
 public struct SnapshotPresenter: Sendable {
 
-    /// Decides the primary row action: Cursor → VS Code → Terminal (PLAN.md §3).
+    /// Decides the primary row action: Cursor → VS Code → Show in Finder (PLAN.md §3).
     public let editors: EditorAvailability
 
     public init(editors: EditorAvailability = .all) {
@@ -163,7 +164,8 @@ public struct SnapshotPresenter: Sendable {
             // `RepoAssembler` refused every prunable and bare record, and `RepoLoader` marks a
             // record prunable when its path is not an existing directory; the repo's own folder
             // carries the same verdict in `pathIsDirectory`. A row with neither offers nothing to
-            // click, because the last editor in the fallback chain executes what it is handed.
+            // click: since codex round 4 no app in the chain would run what it is handed, but an
+            // editor asked to open a FIFO or a device is still a hang or a nonsense window.
             primaryAction: branch.worktreePath.map(openAction(path:))
                 ?? (repo.pathIsDirectory ? openAction(path: repo.path) : nil),
             accessibilityLabel: Strings.branchRowAccessibilityLabel(
@@ -561,9 +563,12 @@ public struct SnapshotPresenter: Sendable {
 
     // MARK: - Row actions
 
-    /// PLAN.md §3: Cursor → VS Code → Terminal. `UserFacingFailure.Action.Kind` (frozen in packet
-    /// 1.1) has no case for opening a folder, so the payload carries the path and `.openURL` is
-    /// the closest frozen kind; the label is what the row shows either way.
+    /// PLAN.md §3, as amended by codex round 4: Cursor → VS Code → Show in Finder.
+    /// `UserFacingFailure.Action.Kind` (frozen in packet 1.1) has no case for opening a folder, so
+    /// the payload carries the path and `.openURL` is the closest frozen kind; the shell already
+    /// routes an absolute-path `.openURL` through `Actions.openInAvailableEditor`, whose own last
+    /// step is `revealInFinder`. The label is what the row shows either way, and on a Mac with
+    /// neither editor it now names the thing that actually happens.
     private func openAction(path: String) -> UserFacingFailure.Action {
         UserFacingFailure.Action(
             label: Strings.openInAvailableEditorLabel(editors),

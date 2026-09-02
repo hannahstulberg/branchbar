@@ -111,7 +111,6 @@ struct SnapshotPresenterTests {
         Strings.revealInFinderActionLabel,
         Strings.copyPathActionLabel,
         Strings.openPRActionLabel,
-        Strings.openInTerminalActionLabel,
         Strings.refreshPRsNowActionLabel,
         Strings.launchAtLoginToggleLabel,
         Strings.quitActionLabel,
@@ -188,8 +187,10 @@ struct SnapshotPresenterTests {
     /// made green by widening them.
     @Test("everyFixtureStringIsRenderedOrOnAFrozenExemptionList")
     func everyFixtureStringIsRenderedOrOnAFrozenExemptionList() throws {
-        // 28 until F11 added the Cancel button's label and its accessibility label.
-        #expect(Self.viewOwnedChrome.count == 30)
+        // 28 until F11 added the Cancel button's label and its accessibility label; back to 29
+        // when codex round 4 dropped `openInTerminalActionLabel` — Terminal is no longer a
+        // document target, so the label no longer exists to be exempted.
+        #expect(Self.viewOwnedChrome.count == 29)
         #expect(Self.fixtureDataGaps.keys.sorted() == ["repo-failed", "single-branch-no-pr-never-pushed"])
         // 32 + 2 until the codex pre-ship review, which added one state per finding that named a
         // state the contract had no row for: `zero-repos-documents-denied` (MAJOR 3),
@@ -879,8 +880,12 @@ struct SnapshotPresenterTests {
         }
     }
 
-    @Test("editorFallbackChoosesCursorThenVSCodeThenTerminal")
-    func editorFallbackChoosesCursorThenVSCodeThenTerminal() throws {
+    /// Renamed from `editorFallbackChoosesCursorThenVSCodeThenTerminal` by codex round 4: a click
+    /// on a Mac with neither editor installed no longer opens Terminal, because Terminal executes a
+    /// `.command` document and a row's payload is a path a repository supplied. The chain ends at
+    /// Finder, which reveals a path and runs nothing, and the label says so.
+    @Test("editorFallbackChoosesCursorThenVSCodeThenFinder")
+    func editorFallbackChoosesCursorThenVSCodeThenFinder() throws {
         let snapshot = Self.singleBranchSnapshot(push: PushInfo(source: .none))
 
         func label(_ editors: EditorAvailability) throws -> String {
@@ -898,7 +903,7 @@ struct SnapshotPresenterTests {
         #expect(try label(EditorAvailability(cursor: true, vsCode: true)) == Strings.openInCursorActionLabel)
         #expect(try label(EditorAvailability(cursor: true, vsCode: false)) == Strings.openInCursorActionLabel)
         #expect(try label(EditorAvailability(cursor: false, vsCode: true)) == Strings.openInVSCodeActionLabel)
-        #expect(try label(EditorAvailability(cursor: false, vsCode: false)) == Strings.openInTerminalActionLabel)
+        #expect(try label(EditorAvailability(cursor: false, vsCode: false)) == Strings.revealInFinderActionLabel)
         #expect(EditorAvailability.all == EditorAvailability(cursor: true, vsCode: true))
 
         // §5a item 1: when Cursor is missing the footer says where rows open instead.
